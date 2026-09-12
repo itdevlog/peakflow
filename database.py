@@ -66,6 +66,26 @@ def init_db(db_path: str):
     except sqlite3.OperationalError:
         pass
 
+    # Migration: note attached to a measurement ('болел', 'после спорта'...)
+    try:
+        c.execute("ALTER TABLE measurements ADD COLUMN note TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    # Migration: measurement source ('manual' or 'auto' — auto-carry for missed slots)
+    try:
+        c.execute("ALTER TABLE measurements ADD COLUMN source TEXT DEFAULT 'manual'")
+    except sqlite3.OperationalError:
+        pass
+
+    # Migration: child reminder + auto-fill dedup flags
+    for col in ("child_morning_reminder", "child_evening_reminder",
+                "auto_morning", "auto_evening"):
+        try:
+            c.execute(f"ALTER TABLE reminders_sent ADD COLUMN {col} INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
     # Settings table
     c.execute("""
         CREATE TABLE IF NOT EXISTS settings (
@@ -90,18 +110,63 @@ def init_db(db_path: str):
 # Measurements CRUD
 # ============================================================================
 def add_measurement(db_path: str, pef_value: int, time_of_day: str,
-                    user_id: int, added_by: int) -> int:
+                    user_id: int, added_by: int, source: str = "manual") -> int:
     """Add measurement. Returns new measurement ID."""
     conn = get_connection(db_path)
     now_str = _now().strftime("%Y-%m-%d %H:%M:%S")
     cursor = conn.execute(
-        "INSERT INTO measurements (pef_value, time_of_day, user_id, added_by, measured_at) VALUES (?, ?, ?, ?, ?)",
-        (pef_value, time_of_day, user_id, added_by, now_str)
+        "INSERT INTO measurements (pef_value, time_of_day, user_id, added_by, measured_at, source) VALUES (?, ?, ?, ?, ?, ?)",
+        (pef_value, time_of_day, user_id, added_by, now_str, source)
     )
     mid = cursor.lastrowid
     conn.commit()
     conn.close()
     return mid
+
+
+def set_note(db_path: str, measurement_id: int, note: str, user_id: int) -> bool:
+    """Attach a note to a measurement (record must belong to user)."""
+    conn = get_connection(db_path)
+    cur = conn.execute(
+        "UPDATE measurements SET note = ? WHERE id = ? AND user_id = ?",
+        (note, measurement_id, user_id)
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+_AUTO_FILTER = "(source IS NULL OR source != 'auto')"
+
+
+def get_last_of_tod(db_path: str, user_id: int, time_of_day: str) -> Optional[dict]:
+    """Last real (non-auto) measurement of the given time of day."""
+    conn = get_connection(db_path)
+    row = conn.execute(
+        f"SELECT * FROM measurements WHERE user_id = ? AND time_of_day = ? AND {_AUTO_FILTER} "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, time_of_day)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def replace_auto_measurement(db_path: str, user_id: int, time_of_day: str,
+                            pef_value: int, added_by: int) -> bool:
+    """Overwrite today's auto-carry record with a real measurement."""
+    today = _today_str()
+    conn = get_connection(db_path)
+    now_str = _now().strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        f"UPDATE measurements SET pef_value = ?, added_by = ?, source = 'manual', "
+        "measured_at = ? WHERE user_id = ? AND time_of_day = ? AND source = 'auto' AND measured_at LIKE ?",
+        (pef_value, added_by, now_str, user_id, time_of_day, f"{today}%")
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
 
 
 def edit_measurement(db_path: str, measurement_id: int, new_value: int, user_id: int) -> bool:
@@ -139,12 +204,18 @@ def get_last_measurement(db_path: str, user_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def get_all_measurements(db_path: str, user_id: int) -> list:
+def get_all_measurements(db_path: str, user_id: int, include_auto: bool = False) -> list:
     conn = get_connection(db_path)
-    rows = conn.execute(
-        "SELECT * FROM measurements WHERE user_id = ? ORDER BY id DESC",
-        (user_id,)
-    ).fetchall()
+    if include_auto:
+        rows = conn.execute(
+            "SELECT * FROM measurements WHERE user_id = ? ORDER BY id DESC",
+            (user_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT * FROM measurements WHERE user_id = ? AND {_AUTO_FILTER} ORDER BY id DESC",
+            (user_id,)
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -163,13 +234,21 @@ def get_today_measurements(db_path: str, user_id: int) -> list:
     return [dict(r) for r in rows]
 
 
-def has_today_measurement(db_path: str, user_id: int, time_of_day: str) -> bool:
+def has_today_measurement(db_path: str, user_id: int, time_of_day: str,
+                          skip_auto: bool = False) -> bool:
     today = _today_str()
     conn = get_connection(db_path)
-    row = conn.execute(
-        "SELECT COUNT(*) FROM measurements WHERE user_id = ? AND measured_at LIKE ? AND time_of_day = ?",
-        (user_id, f"{today}%", time_of_day)
-    ).fetchone()
+    if skip_auto:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM measurements WHERE user_id = ? AND measured_at LIKE ? "
+            f"AND time_of_day = ? AND {_AUTO_FILTER}",
+            (user_id, f"{today}%", time_of_day)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM measurements WHERE user_id = ? AND measured_at LIKE ? AND time_of_day = ?",
+            (user_id, f"{today}%", time_of_day)
+        ).fetchone()
     conn.close()
     return row[0] > 0
 
@@ -237,7 +316,8 @@ def get_measurements_for_chart(db_path: str, user_id: int, days: int = 30) -> li
     since = (_now() - timedelta(days=days)).strftime("%Y-%m-%d")
     conn = get_connection(db_path)
     rows = conn.execute(
-        "SELECT pef_value, time_of_day, measured_at FROM measurements WHERE user_id = ? AND measured_at >= ? ORDER BY measured_at ASC",
+        f"SELECT pef_value, time_of_day, measured_at FROM measurements "
+        f"WHERE user_id = ? AND measured_at >= ? AND {_AUTO_FILTER} ORDER BY measured_at ASC",
         (user_id, since)
     ).fetchall()
     conn.close()
@@ -248,7 +328,7 @@ def get_measurements_for_chart(db_path: str, user_id: int, days: int = 30) -> li
 # Statistics
 # ============================================================================
 def get_stats(db_path: str, user_id: int) -> dict:
-    """Full statistics for a user."""
+    """Full statistics for a user (auto-carry records excluded)."""
     all_m = get_all_measurements(db_path, user_id)
     if not all_m:
         return {"total": 0}
@@ -291,12 +371,11 @@ def mark_reminder_sent(db_path: str, date_str: str, reminder_type: str):
         "INSERT INTO reminders_sent (date) VALUES (?) ON CONFLICT(date) DO NOTHING",
         (date_str,)
     )
-    if reminder_type == "morning_missing":
-        conn.execute("UPDATE reminders_sent SET morning_reminder = 1 WHERE date = ?", (date_str,))
-    elif reminder_type == "evening_missing":
-        conn.execute("UPDATE reminders_sent SET evening_reminder = 1 WHERE date = ?", (date_str,))
-    elif reminder_type == "weekly":
-        conn.execute("UPDATE reminders_sent SET weekly_report = 1 WHERE date = ?", (date_str,))
+    column = _reminder_column(reminder_type)
+    if column:
+        conn.execute(
+            f"UPDATE reminders_sent SET {column} = 1 WHERE date = ?", (date_str,)
+        )
     conn.commit()
     conn.close()
 
@@ -309,13 +388,24 @@ def was_reminder_sent(db_path: str, date_str: str, reminder_type: str) -> bool:
     conn.close()
     if not row:
         return False
-    if reminder_type == "morning_missing":
-        return bool(row["morning_reminder"])
-    elif reminder_type == "evening_missing":
-        return bool(row["evening_reminder"])
-    elif reminder_type == "weekly":
-        return bool(row["weekly_report"])
+    column = _reminder_column(reminder_type)
+    if column:
+        return bool(row[column]) if column in row.keys() else False
     return False
+
+
+def _reminder_column(reminder_type: str) -> Optional[str]:
+    """Map reminder type to a reminders_sent column (None = unknown type)."""
+    mapping = {
+        "morning_missing": "morning_reminder",
+        "evening_missing": "evening_reminder",
+        "weekly": "weekly_report",
+        "child_morning": "child_morning_reminder",
+        "child_evening": "child_evening_reminder",
+        "auto_morning": "auto_morning",
+        "auto_evening": "auto_evening",
+    }
+    return mapping.get(reminder_type)
 
 
 # ============================================================================
@@ -338,3 +428,97 @@ def set_setting(db_path: str, key: str, value: str):
     )
     conn.commit()
     conn.close()
+
+
+# ============================================================================
+# Reminder hours (configurable via settings)
+# ============================================================================
+REMINDER_HOURS_DEFAULT = {
+    "child_morning": 8,
+    "child_evening": 20,
+    "parent_morning": 10,
+    "parent_evening": 22,
+}
+
+
+def get_reminder_hours(db_path: str) -> dict:
+    """Reminder hours from settings; defaults when missing/invalid."""
+    result = dict(REMINDER_HOURS_DEFAULT)
+    for key in result:
+        try:
+            val = int(get_setting(db_path, f"reminder_{key}", ""))
+            if 0 <= val <= 23:
+                result[key] = val
+        except ValueError:
+            pass
+    return result
+
+
+# ============================================================================
+# Backup
+# ============================================================================
+def backup_db(db_path: str, dest_path: str):
+    """Consistent SQLite backup (safe under WAL)."""
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(dest_path)
+    with dst:
+        src.backup(dst)
+    dst.close()
+    src.close()
+
+
+# ============================================================================
+# Month selections (chart navigation, CSV by period)
+# ============================================================================
+def get_measurements_for_month(db_path: str, user_id: int, year: int, month: int,
+                               include_auto: bool = False) -> list:
+    """Measurements within a calendar month (auto excluded unless include_auto)."""
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end = f"{year + 1:04d}-01-01"
+    else:
+        end = f"{year:04d}-{month + 1:02d}-01"
+    conn = get_connection(db_path)
+    if include_auto:
+        rows = conn.execute(
+            "SELECT * FROM measurements WHERE user_id = ? AND measured_at >= ? AND measured_at < ? "
+            "ORDER BY measured_at ASC",
+            (user_id, start, end)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT * FROM measurements WHERE user_id = ? AND measured_at >= ? AND measured_at < ? "
+            f"AND {_AUTO_FILTER} ORDER BY measured_at ASC",
+            (user_id, start, end)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_available_months(db_path: str, user_id: int) -> list:
+    """Sorted list of (year, month) having measurements, oldest first."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        f"SELECT DISTINCT substr(measured_at, 1, 7) AS ym FROM measurements "
+        f"WHERE user_id = ? AND {_AUTO_FILTER} ORDER BY ym ASC",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    months = []
+    for r in rows:
+        y, m = r["ym"].split("-")
+        months.append((int(y), int(m)))
+    return months
+
+
+def get_measurements_between(db_path: str, user_id: int,
+                             date_from: str, date_to: str) -> list:
+    """Measurements in [date_from 00:00, date_to 23:59:59] (auto included — export shows them)."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM measurements WHERE user_id = ? AND measured_at >= ? "
+        "AND measured_at < ? ORDER BY measured_at ASC",
+        (user_id, f"{date_from} 00:00:00", f"{date_to} 23:59:59")
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

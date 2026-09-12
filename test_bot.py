@@ -1,5 +1,6 @@
 """Тесты для семейного бота пикфлоуметрии."""
 import os
+import sqlite3
 import pytest
 
 TEST_DB = "test_peakflow.db"
@@ -16,25 +17,9 @@ def setup_db():
                 pass
 
     import sqlite3
+    from database import init_db
+    init_db(TEST_DB)  # single source of schema truth (incl. migrations, index)
     conn = sqlite3.connect(TEST_DB)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS measurements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
-            pef_value INTEGER NOT NULL, time_of_day TEXT NOT NULL,
-            measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by INTEGER
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS reminders_sent (
-            date TEXT PRIMARY KEY, morning_reminder INTEGER DEFAULT 0,
-            evening_reminder INTEGER DEFAULT 0, weekly_report INTEGER DEFAULT 0
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY, value TEXT NOT NULL
-        )
-    """)
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_pef', '260')")
     conn.commit()
     conn.close()
@@ -153,6 +138,93 @@ class TestDatabase:
         mark_reminder_sent(TEST_DB, today, "morning_missing")
         assert was_reminder_sent(TEST_DB, today, "morning_missing")
 
+    def test_get_reminder_hours_defaults(self):
+        from database import get_reminder_hours
+        h = get_reminder_hours(TEST_DB)
+        assert h == {"child_morning": 8, "child_evening": 20,
+                     "parent_morning": 10, "parent_evening": 22}
+
+    def test_get_reminder_hours_override(self):
+        from database import get_reminder_hours, set_setting
+        set_setting(TEST_DB, "reminder_child_morning", "7")
+        set_setting(TEST_DB, "reminder_parent_evening", "23")
+        h = get_reminder_hours(TEST_DB)
+        assert h["child_morning"] == 7
+        assert h["parent_evening"] == 23
+        assert h["child_evening"] == 20  # untouched default
+
+    def test_get_reminder_hours_garbage(self):
+        from database import get_reminder_hours, set_setting
+        set_setting(TEST_DB, "reminder_child_morning", "abc")
+        set_setting(TEST_DB, "reminder_child_evening", "25")  # out of range
+        h = get_reminder_hours(TEST_DB)
+        assert h["child_morning"] == 8
+        assert h["child_evening"] == 20
+
+    def test_backup_db(self):
+        """Backup copy opens and contains all rows."""
+        import sqlite3
+        from database import add_measurement, backup_db, init_db
+        for v in (240, 250, 260):
+            add_measurement(TEST_DB, v, "morning", 111, 222)
+        dest = "/tmp/opencode/backup_test.db"
+        backup_db(TEST_DB, dest)
+        conn = sqlite3.connect(dest)
+        n = conn.execute("SELECT COUNT(*) FROM measurements WHERE user_id=111").fetchone()[0]
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        conn.close()
+        os.remove(dest)
+        assert n == 3
+        assert "settings" in tables
+
+    def test_get_measurements_for_month(self):
+        from database import add_measurement, get_measurements_for_month
+        # insert with explicit measured_at via raw SQL to control months
+        conn = sqlite3.connect(TEST_DB)
+        for d, v in [("2026-08-05 08:00:00", 240), ("2026-08-20 20:00:00", 250),
+                     ("2026-09-01 08:00:00", 260)]:
+            conn.execute(
+                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "VALUES (111, ?, ?, ?, 222, 'manual')",
+                (v, "morning" if "08:00" in d else "evening", d))
+        conn.commit()
+        conn.close()
+
+        aug = get_measurements_for_month(TEST_DB, 111, 2026, 8)
+        sep = get_measurements_for_month(TEST_DB, 111, 2026, 9)
+        assert len(aug) == 2
+        assert len(sep) == 1
+        assert all("2026-08" in m["measured_at"] for m in aug)
+
+    def test_get_available_months(self):
+        from database import get_available_months
+        conn = sqlite3.connect(TEST_DB)
+        for d in ["2026-07-15 08:00:00", "2026-08-01 08:00:00",
+                  "2026-08-31 20:00:00", "2026-09-10 08:00:00"]:
+            conn.execute(
+                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "VALUES (111, 240, 'morning', ?, 222, 'manual')", (d,))
+        conn.commit()
+        conn.close()
+
+        months = get_available_months(TEST_DB, 111)
+        assert months == [(2026, 7), (2026, 8), (2026, 9)]
+
+    def test_get_measurements_between(self):
+        from database import get_measurements_between
+        conn = sqlite3.connect(TEST_DB)
+        for d in ["2026-08-01 08:00:00", "2026-08-15 08:00:00",
+                  "2026-08-31 23:00:00", "2026-09-05 08:00:00"]:
+            conn.execute(
+                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "VALUES (111, 240, 'morning', ?, 222, 'manual')", (d,))
+        conn.commit()
+        conn.close()
+
+        rows = get_measurements_between(TEST_DB, 111, "2026-08-01", "2026-08-31")
+        assert len(rows) == 3  # inclusive both ends
+
     def test_reminder_flags_not_reset_by_other_type(self):
         """Bug regression: marking evening/weekly must not reset morning flag."""
         from database import mark_reminder_sent, was_reminder_sent
@@ -175,6 +247,106 @@ class TestDatabase:
         ).fetchall()
         conn.close()
         assert rows, "index idx_meas_user_time missing"
+
+    def test_migration_new_columns(self):
+        """init_db must add child-reminder, auto-fill flags and measurements.source."""
+        from database import init_db
+        init_db(TEST_DB)
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+
+        for col in ("child_morning_reminder", "child_evening_reminder",
+                    "auto_morning", "auto_evening"):
+            row = conn.execute(
+                "SELECT %s FROM reminders_sent LIMIT 1" % col
+            )
+            row.fetchone()  # raises OperationalError if column missing
+
+        row = conn.execute("SELECT source FROM measurements LIMIT 1")
+        row.fetchone()
+        conn.close()
+
+    def test_measurement_source_column_exists_in_prod_schema(self):
+        """The prod DB (old schema) must be migratable: source column addable."""
+        import sqlite3
+        from database import init_db
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(measurements)")]
+        conn.close()
+        assert "source" in cols
+        # default for old rows is 'manual'
+        from database import add_measurement, get_last_measurement
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        m = get_last_measurement(TEST_DB, 111)
+        assert m["source"] == "manual"
+
+    def test_set_note(self):
+        """set_note writes note to a measurement; wrong user → False."""
+        from database import add_measurement, get_last_measurement, set_note
+        mid = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        assert set_note(TEST_DB, mid, "болел", 111)
+        m = get_last_measurement(TEST_DB, 111)
+        assert m["note"] == "болел"
+        assert not set_note(TEST_DB, mid, "x", 999)  # wrong user
+
+    def test_add_measurement_with_source(self):
+        from database import add_measurement, get_last_measurement
+        add_measurement(TEST_DB, 240, "morning", 111, 222, source="auto")
+        m = get_last_measurement(TEST_DB, 111)
+        assert m["source"] == "auto"
+
+    def test_get_last_of_tod_skips_auto(self):
+        """Last measurement of a time-of-day must be a real (manual) one."""
+        from database import add_measurement, get_last_of_tod
+        add_measurement(TEST_DB, 200, "morning", 111, 222)  # manual, oldest
+        add_measurement(TEST_DB, 210, "morning", 111, 222, source="auto")
+        m = get_last_of_tod(TEST_DB, 111, "morning")
+        assert m["pef_value"] == 200 and m["source"] == "manual"
+
+    def test_get_last_of_tod_none(self):
+        from database import get_last_of_tod
+        assert get_last_of_tod(TEST_DB, 111, "morning") is None
+
+    def test_has_today_measurement_skips_auto(self):
+        """Auto-carry record must not count as 'measured today'."""
+        from database import add_measurement, has_today_measurement
+        add_measurement(TEST_DB, 240, "morning", 111, 222, source="auto")
+        assert not has_today_measurement(TEST_DB, 111, "morning", skip_auto=True)
+        assert has_today_measurement(TEST_DB, 111, "morning", skip_auto=False)
+
+    def test_stats_ignore_auto(self):
+        from database import add_measurement, get_stats
+        add_measurement(TEST_DB, 100, "morning", 111, 222, source="auto")
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        s = get_stats(TEST_DB, 111)
+        assert s["total"] == 1
+        assert s["avg"] == 250
+
+    def test_chart_data_ignores_auto(self):
+        from database import add_measurement, get_measurements_for_chart
+        add_measurement(TEST_DB, 100, "morning", 111, 222, source="auto")
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        rows = get_measurements_for_chart(TEST_DB, 111, days=30)
+        assert len(rows) == 1 and rows[0]["pef_value"] == 250
+
+    def test_replace_auto_measurement(self):
+        """Manual measurement replaces today's auto record, not a duplicate."""
+        from database import (add_measurement, get_today_measurements,
+                              replace_auto_measurement, add_measurement as am)
+        # yesterday-ish auto record for today's morning slot
+        add_measurement(TEST_DB, 230, "morning", 111, 222, source="auto")
+        ok = replace_auto_measurement(TEST_DB, 111, "morning", 245, 333)
+        assert ok
+        today = get_today_measurements(TEST_DB, 111)
+        assert len(today) == 1, "must replace, not duplicate"
+        assert today[0]["pef_value"] == 245
+        assert today[0]["source"] == "manual"
+
+    def test_replace_auto_measurement_no_auto(self):
+        """Without an auto record, replace returns False (caller decides)."""
+        from database import replace_auto_measurement
+        assert not replace_auto_measurement(TEST_DB, 111, "morning", 245, 333)
 
     def test_pagination(self):
         from database import add_measurement, get_measurements_paginated
@@ -214,6 +386,481 @@ class TestDatabase:
             assert is_reminder_minute(minute), f"minute={minute} must be inside the window"
         for minute in (2, 3, 15, 30, 59):
             assert not is_reminder_minute(minute), f"minute={minute} must be outside the window"
+
+
+    def test_kb_main_child_has_chart_and_stats(self):
+        """Child menu must include chart and stats buttons."""
+        from bot import kb_main
+        kb = kb_main(is_parent_user=False)
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "add" in callbacks
+        assert "chart" in callbacks
+        assert "stats" in callbacks
+
+    def test_kb_main_parent_buttons(self):
+        from bot import kb_main
+        kb = kb_main(is_parent_user=True)
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        for cb in ("add", "history", "chart", "summary", "weekly", "settings", "edit_last"):
+            assert cb in callbacks, f"missing {cb}"
+
+    def test_kb_settings_contains_new_items(self):
+        """Settings screen must offer reminders and backup."""
+        from bot import kb_settings
+        kb = kb_settings(target=260)
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "reminders" in callbacks
+        assert "backup" in callbacks
+        assert "change_target" in callbacks
+        assert "export" in callbacks
+
+    def test_kb_main_child(self):
+        from bot import kb_main
+        kb = kb_main(is_parent_user=True)
+        assert kb is not None
+
+
+class TestNotes:
+    """Notes flow: ask after save, store text, truncate long text."""
+
+    def _make_callback(self, uid=999):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def _make_state(self, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        st = MagicMock()
+        st._data = dict(data or {})
+
+        async def update_data(**kw):
+            st._data.update(kw)
+
+        async def get_data():
+            return dict(st._data)
+
+        st.update_data = update_data
+        st.get_data = get_data
+
+        async def get_state():
+            return None
+
+        async def set_state(s):
+            st._state = s
+
+        st.get_state = get_state
+        st.set_state = set_state
+        st._state = None
+        st.clear = AsyncMock()
+        return st
+
+    def test_save_measurement_asks_note(self):
+        """After saving, bot must ask about a note instead of jumping to menu."""
+        import asyncio
+        import bot
+        from database import add_measurement
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        cb = self._make_callback()
+        state = self._make_state({"input_context": "add"})
+        cb.message.text = "болел"
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            callback.sent_text = text
+            return MagicMock()
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "add_measurement", return_value=1) as m_add:
+            asyncio.run(bot._save_measurement(cb, state, 240, {"input_context": "add"}))
+            assert hasattr(cb, "sent_text")
+            assert "заметку" in cb.sent_text.lower()
+            # state must not be cleared — we're waiting for the note answer
+            state.clear.assert_not_called()
+
+    def test_note_handler_saves_note(self):
+        """Text during waiting_note → set_note with CHILD_ID."""
+        import asyncio
+        import bot
+        from database import add_measurement, get_last_measurement
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+        mid = get_last_measurement(TEST_DB, bot.CHILD_ID)["id"]
+
+        cb = self._make_callback()
+        cb.message.text = "болел"
+        state = self._make_state({"note_for_id": mid})
+
+        msg = MagicMock()
+        msg.text = "болел"
+        msg.answer = AsyncMock()
+
+        async def fake_answer(text=None, parse_mode=None, reply_markup=None, **kw):
+            msg.last_text = text
+
+        msg.answer.side_effect = fake_answer
+
+        with patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.input_note(msg, state))
+        m = get_last_measurement(TEST_DB, bot.CHILD_ID)
+        assert m["note"] == "болел"
+        state.clear.assert_called()
+
+    def test_note_truncated_to_200(self):
+        import asyncio
+        import bot
+        from database import add_measurement, get_last_measurement
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+        mid = get_last_measurement(TEST_DB, bot.CHILD_ID)["id"]
+
+        msg = MagicMock()
+        msg.text = "а" * 350
+        msg.answer = AsyncMock()
+        state = self._make_state({"note_for_id": mid})
+
+        with patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.input_note(msg, state))
+        m = get_last_measurement(TEST_DB, bot.CHILD_ID)
+        assert len(m["note"]) <= 200
+
+
+class TestScheduler:
+    """Scheduler logic: child pings, auto-carry, escalation."""
+
+    def _run_tick(self, hour, minute, mocked_bot):
+        """Run one scheduler tick with faked time; return the send_message calls."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+        from datetime import datetime, timedelta, timezone
+
+        tz = timezone(timedelta(hours=5))
+        fake_now = datetime(2026, 9, 12, hour, minute, 5, tzinfo=tz)  # Saturday
+        tod = "morning" if hour < 12 else "evening"
+
+        async def fake_sleep(s):
+            raise asyncio.CancelledError  # stop loop after first tick
+
+        with patch.object(bot, "now_tz", return_value=fake_now), \
+             patch.object(bot, "bot", mocked_bot), \
+             patch.object(bot, "get_reminder_hours",
+                          return_value={"child_morning": 8, "child_evening": 20,
+                                        "parent_morning": 10, "parent_evening": 22}), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "is_reminder_minute", return_value=minute < 2), \
+             patch("asyncio.sleep", side_effect=fake_sleep), \
+             patch("asyncio.create_task", lambda coro: coro):
+            try:
+                asyncio.run(bot.scheduler_loop())
+            except asyncio.CancelledError:
+                pass
+        return mocked_bot.send_message.call_args_list
+
+    def _mocked_bot(self):
+        from unittest.mock import AsyncMock, MagicMock
+        mb = MagicMock()
+        mb.send_message = AsyncMock()
+        return mb
+
+    def test_child_morning_ping(self):
+        """08:00 tick without morning measurement → message to child."""
+        import bot
+        mb = self._mocked_bot()
+        calls = self._run_tick(8, 0, mb)
+        recipients = [c[0][0] for c in calls]
+        assert bot.CHILD_ID in recipients
+
+    def test_escalation_with_auto_carry(self):
+        """10:00 tick, no measurement → parents informed about auto-carry."""
+        from unittest.mock import patch
+        import bot
+        mb = self._mocked_bot()
+        with patch.object(bot, "get_last_of_tod",
+                           return_value={"pef_value": 240}):
+            calls = self._run_tick(10, 0, mb)
+        texts = [c[0][1] for c in calls]
+        assert any("скорректируйте" in t.lower() for t in texts)
+
+    def test_escalation_no_auto_when_no_history(self):
+        """No previous measurement → no auto record, plain 'напомните' message."""
+        from unittest.mock import patch
+        import bot
+        mb = self._mocked_bot()
+        with patch.object(bot, "get_last_of_tod", return_value=None):
+            calls = self._run_tick(10, 0, mb)
+        texts = [c[0][1] for c in calls]
+        assert any("напомните" in t.lower() for t in texts)
+
+    def test_child_ping_suppressed_when_measured(self):
+        """08:00 with morning measurement done → nothing to child."""
+        mb = self._mocked_bot()
+
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from datetime import datetime, timedelta, timezone
+        import bot
+        tz = timezone(timedelta(hours=5))
+        fake_now = datetime(2026, 9, 12, 8, 0, 5, tzinfo=tz)
+
+        async def fake_sleep(s):
+            raise asyncio.CancelledError
+
+        with patch.object(bot, "now_tz", return_value=fake_now), \
+             patch.object(bot, "bot", mb), \
+             patch.object(bot, "get_reminder_hours",
+                          return_value={"child_morning": 8, "child_evening": 20,
+                                        "parent_morning": 10, "parent_evening": 22}), \
+             patch.object(bot, "has_today_measurement", return_value=True), \
+             patch.object(bot, "is_reminder_minute", return_value=True), \
+             patch("asyncio.sleep", side_effect=fake_sleep), \
+             patch("asyncio.create_task", lambda coro: coro):
+            try:
+                asyncio.run(bot.scheduler_loop())
+            except asyncio.CancelledError:
+                pass
+        recipients = [c[0][0] for c in mb.send_message.call_args_list]
+        assert bot.CHILD_ID not in recipients
+
+
+class TestRemindersScreen:
+    """⏰ Reminders settings screen + hour input FSM."""
+
+    def test_build_reminders_text(self):
+        from bot import build_reminders_text
+        hours = {"child_morning": 8, "child_evening": 20,
+                 "parent_morning": 10, "parent_evening": 22}
+        text = build_reminders_text(hours)
+        assert "08:00" in text
+        assert "20:00" in text
+        assert "10:00" in text
+        assert "22:00" in text
+
+    def test_kb_reminders(self):
+        from bot import kb_reminders
+        kb = kb_reminders()
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        for cb in ("rem_set_child_morning", "rem_set_child_evening",
+                   "rem_set_parent_morning", "rem_set_parent_evening", "settings"):
+            assert cb in callbacks, f"missing {cb}"
+
+    def test_input_reminder_hour_saves(self):
+        """Digit input during editing_reminder_hour → set_setting('reminder_<key>')."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.text = "7"
+        msg.answer = AsyncMock()
+
+        state = MagicMock()
+        state_data = {"reminder_key": "child_morning"}
+
+        async def get_data():
+            return state_data
+
+        async def get_state():
+            return bot.Measurement.editing_reminder_hour
+
+        state.get_data = get_data
+        state.get_state = get_state
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "_send_settings_from_message", new=AsyncMock()):
+            asyncio.run(bot.input_reminder_hour(msg, state))
+
+        from database import get_setting
+        assert get_setting(TEST_DB, "reminder_child_morning") == "7"
+
+    def test_input_reminder_hour_invalid(self):
+        """25 → error message, setting NOT saved."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.text = "25"
+        msg.last_text = None
+        msg.answer = AsyncMock()
+
+        async def fake_answer(text=None, **kw):
+            msg.last_text = text
+
+        msg.answer.side_effect = fake_answer
+
+        state = MagicMock()
+
+        async def get_data():
+            return {"reminder_key": "child_morning"}
+
+        state.get_data = get_data
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "_send_settings_from_message", new=AsyncMock()):
+            asyncio.run(bot.input_reminder_hour(msg, state))
+        assert "0–23" in msg.last_text
+        state.clear.assert_not_called()
+
+    def test_auto_replaced_by_manual_measurement(self):
+        """cb_add flow: auto record in today's slot gets replaced, not duplicated."""
+        import asyncio
+        import bot
+        from database import (add_measurement, get_today_measurements,
+                              has_today_measurement)
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # auto record in today's morning slot
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 0, source="auto")
+        assert not has_today_measurement(TEST_DB, bot.CHILD_ID, "morning", skip_auto=True)
+
+        cb = MagicMock()
+        cb.from_user.id = bot.CHILD_ID
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+
+        state = MagicMock()
+        sd = {"hundreds": 2}
+
+        async def get_data():
+            return sd
+
+        state.get_data = get_data
+        state.update_data = AsyncMock()
+        state.set_state = AsyncMock()
+        state.clear = AsyncMock()
+
+        # simulate tens selection with auto record present
+        with patch.object(bot, "auto_time_of_day", return_value="morning"), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._save_measurement(cb, state, 245, {"input_context": "add"}))
+
+        today = get_today_measurements(TEST_DB, bot.CHILD_ID)
+        assert len(today) == 1, "auto must be replaced, not duplicated"
+        assert today[0]["pef_value"] == 245
+        assert today[0]["source"] == "manual"
+
+
+class TestChartMonths:
+    """Chart month navigation + PNG download."""
+
+    def test_parse_chart_month(self):
+        from bot import parse_chart_month
+        y, m = parse_chart_month("chart_2026-08")
+        assert (y, m) == (2026, 8)
+        assert parse_chart_month("chart_bad") is None
+        assert parse_chart_month("chart") is None
+
+    def test_kb_chart_nav(self):
+        from bot import kb_chart_nav
+        kb = kb_chart_nav(year=2026, month=8, can_next=False)
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "chart_2026-07" in callbacks  # prev month
+        assert "chart_dl_2026-08" in callbacks  # download PNG
+        assert "back" in callbacks
+        assert "chart_2026-09" not in callbacks  # no next for the past month? (Aug is past, next=Sep allowed only if <= current)
+        # can_next=True shows next
+        kb2 = kb_chart_nav(year=2026, month=8, can_next=True)
+        callbacks2 = [btn.callback_data for row in kb2.inline_keyboard for btn in row]
+        assert "chart_2026-09" in callbacks2
+
+    def test_month_title(self):
+        from bot import month_title
+        assert "Август" in month_title(2026, 8)
+        assert "Сентябрь" in month_title(2026, 9)
+
+    def test_render_chart_png(self):
+        """Renderer produces non-empty PNG bytes."""
+        from datetime import datetime
+        from bot import _render_chart_png
+        rows = [
+            {"pef_value": 240, "time_of_day": "morning", "measured_at": "2026-08-05 08:00:00"},
+            {"pef_value": 250, "time_of_day": "evening", "measured_at": "2026-08-06 20:00:00"},
+            {"pef_value": 260, "time_of_day": "morning", "measured_at": "2026-08-07 08:00:00"},
+        ]
+        png = _render_chart_png(rows, target=260, title="Test")
+        assert png[:8] == b"\x89PNG\r\n\x1a\n"
+        assert len(png) > 1000
+
+
+class TestExportAndBackup:
+    """CSV period screen + backup button."""
+
+    def test_kb_export_periods(self):
+        from bot import kb_export_periods
+        kb = kb_export_periods(months=[(2026, 6), (2026, 7), (2026, 8)])
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "export_all" in callbacks
+        assert "csv_2026-08" in callbacks
+        assert "csv_2026-07" in callbacks
+        assert "settings" in callbacks
+
+    def test_build_csv_content_month(self):
+        """CSV for a month includes note + source columns and only that month."""
+        import bot
+        from database import add_measurement, get_measurements_for_month
+
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source, note) "
+            "VALUES (111, 240, 'morning', '2026-08-05 08:00:00', 222, 'manual', 'болел')")
+        conn.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+            "VALUES (111, 250, 'evening', '2026-08-06 20:00:00', 222, 'auto')")
+        conn.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+            "VALUES (111, 260, 'morning', '2026-09-01 08:00:00', 222, 'manual')")
+        conn.commit()
+        conn.close()
+
+        # CSV export includes auto records (marked in 'Source' column)
+        rows = get_measurements_for_month(TEST_DB, 111, 2026, 8, include_auto=True)
+        content = bot.build_csv_content(rows, target=260, include_summary=False)
+        assert "Заметка" in content and "Источник" in content
+        assert "болел" in content
+        assert "авто" in content
+        assert "260" not in content  # September row excluded
+
+    def test_parse_csv_month(self):
+        from bot import parse_csv_month
+        assert parse_csv_month("csv_2026-08") == (2026, 8)
+        assert parse_csv_month("csv_x") is None
+
+    def test_backup_button_flow(self):
+        """cb_backup sends a document with the DB copy."""
+        import asyncio
+        import bot
+        from database import add_measurement
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+
+        cb = MagicMock()
+        cb.from_user.id = bot.PARENT_IDS[0] if bot.PARENT_IDS else 999
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer_document = AsyncMock()
+
+        with patch.object(bot, "answer_callback", new=AsyncMock()):
+            asyncio.run(bot.cb_backup(cb))
+
+        assert cb.message.answer_document.called
+        doc = cb.message.answer_document.call_args[0][0]
+        assert doc.filename.endswith(".db")
+        # cleanup temp file if left
+        import glob
+        for f in glob.glob("backup_*.db"):
+            os.remove(f)
 
 
 class TestConfig:
@@ -283,7 +930,7 @@ class TestEditDeleteExport:
         with patch("bot.edit_measurement") as mock_edit:
             mock_edit.return_value = True
             import bot
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 bot._save_edit_last(callback, state, 280, {"edit_id": last["id"]})
             )
             # The record's user_id (CHILD_ID) must be used, not the parent's ID
@@ -307,7 +954,7 @@ class TestEditDeleteExport:
         callback.message = MagicMock()
         callback.message.delete = AsyncMock()
 
-        asyncio.get_event_loop().run_until_complete(bot.answer_callback(callback))
+        asyncio.run(bot.answer_callback(callback))
         callback.message.delete.assert_called_once()
 
     def test_direct_sql_edit_by_id(self):
@@ -354,7 +1001,7 @@ class TestEditDeleteExport:
         state = MagicMock()
         state.clear = AsyncMock()
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             bot.cb_delete_confirm(callback, state)
         )
 
