@@ -56,7 +56,7 @@ cp .env.example .env
 ```
 
 ```env
-BOT_TOKEN=8565342225:AAFxxxxxxxxxxxxxxxxxxxx
+BOT_TOKEN=123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxx
 CHILD_ID=123456789
 PARENT_IDS=987654321,111222333
 CHILD_NAME=Маша

@@ -173,7 +173,7 @@ telegrambot-pick/
 
 | Функция | Возвращает / делает |
 |---------|---------------------|
-| `init_db(path)` | Создание таблиц, миграции, дефолт `target_pef` |
+| `init_db(path)` | Создание таблиц, миграции, дефолт `target_pef`, индекс `idx_meas_user_time` |
 | `add_measurement(db, pef, tod, uid, by)` | INSERT; возвращает `id` |
 | `edit_measurement(db, mid, val, uid)` | UPDATE по `id`+`user_id`; bool |
 | `delete_measurement(db, mid, uid)` | DELETE по `id`+`user_id`; bool |
@@ -186,7 +186,7 @@ telegrambot-pick/
 | `get_measurements_paginated(db, uid, page, per_page)` | `(страница, всего, всего_страниц)`; по 10 записей |
 | `get_measurements_for_chart(db, uid, days=30)` | Данные за N дней, по возрастанию |
 | `get_stats(db, uid)` | Полная статистика (см. §15) |
-| `mark_reminder_sent` / `was_reminder_sent` | Флаги отправленных напоминаний по дате |
+| `mark_reminder_sent` / `was_reminder_sent` | Флаги отправленных напоминаний по дате (INSERT … ON CONFLICT DO NOTHING — соседние флаги дня не затираются) |
 | `get_setting` / `set_setting` | Чтение/запись `settings` |
 
 ---
@@ -242,7 +242,7 @@ telegrambot-pick/
 | `kb_back()` | «⬅️ Назад» (callback `back`) |
 | `kb_pagination(page, total, is_parent, items)` | Строки «✏️ N | 🗑️» для каждой записи (только родители) + навигация ⏮️ `N/M` ⏭️ + низ: Назад (+ Настройки для родителей) |
 | `kb_pef_hundreds()` | Ряд: `1 2 3 4 5 6` + «⬅️ Назад». Callback `h_1`…`h_6` |
-| `kb_pef_tens()` | 2 ряда: `00 10 20 30 40` / `50 60 70 80 90`. Callback `t_00`…`t_90`. ⚠️ Кнопки «Назад» нет (см. §24) |
+| `kb_pef_tens()` | 2 ряда: `00 10 20 30 40` / `50 60 70 80 90` + ряд «⬅️ Назад». Callback `t_00`…`t_90`, `back` |
 
 Диапазон вводимого ПСВ = **100–690** (сотни 1–6 × десятки 00–90).
 
@@ -330,8 +330,7 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 - Берётся `get_last_measurement()` (последняя запись ребёнка).
 - Если записей нет → «📭 Нет измерений для исправления».
 - FSM: `edit_id`, `input_context="edit_last"`, показ старого значения, клавиатура сотен → десятков.
-- `_save_edit_last()`: `edit_measurement(DB_PATH, mid, new_val, callback.from_user.id)`.
-  - ⚠️ **Известный баг №1 (roadmap.md):** `edit_measurement` требует совпадения `user_id` записи (=`CHILD_ID`) с переданным ID. Если жмёт родитель (ID ≠ CHILD_ID), `rowcount=0` → «❌ Не удалось изменить запись». Для ребёнка работает корректно.
+- `_save_edit_last()`: `edit_measurement(DB_PATH, mid, new_val, CHILD_ID)` — запись принадлежит ребёнку, поэтому `user_id` передаётся всегда `CHILD_ID` (работает и для родителей, и для ребёнка).
 
 ### Редактирование любой записи (`edit_<id>`) — только родитель
 
@@ -359,8 +358,8 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 
 ### Шаг 2: `cb_delete_confirm` (callback `del_confirm_<id>`)
 
+- Проверка `is_parent` → иначе alert «Только родители могут удалять» (защита и на этапе подтверждения).
 - Прямой `DELETE FROM measurements WHERE id=? AND user_id=CHILD_ID`.
-- ⚠️ Проверки `is_parent` здесь **нет** (баг №5 аудита) — защита только на шаге показа кнопки.
 - Результат — alert «✅ Запись удалена» / «❌ Не удалось», затем `state.clear()` и возврат в историю (стр. 1).
 
 ---
@@ -516,15 +515,15 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 loop каждые 60 секунд:
     now = локальное время (TZ)
 
-    ── 10:00 ровно (hour==10 and minute==0) ──
+    ── 10:00–10:01 (hour==10 and minute<2, окно is_reminder_minute) ──
     если флаг morning_missing за сегодня НЕ ставился:
         если утреннего замера сегодня нет →
             уведомить всех родителей, mark_reminder_sent(morning_missing)
 
-    ── 22:00 ровно ──
+    ── 22:00–22:01 ──
     аналогично для evening_missing
 
-    ── воскресенье 21:00 ровно ──
+    ── воскресенье 21:00–21:01 ──
     если флаг weekly за сегодня не ставился:
         text = _send_weekly_report()
         если есть данные → разослать родителям, mark_reminder_sent(weekly)
@@ -532,9 +531,7 @@ loop каждые 60 секунд:
     исключения ловятся и логируются (цикл не умирает)
 ```
 
-Дедубликация — по таблице `reminders_sent` (один флаг на дату на тип события).
-
-⚠️ Известная особенность №2 и №3 (см. §24): `INSERT OR REPLACE` в `mark_reminder_sent` стирает соседние флаги того же дня; совпадение `minute == 0` при тике раз в 60 сек может быть пропущено (окно в 1 минуту).
+Дедубликация — по таблице `reminders_sent` (один флаг на дату на тип события). Двухминутное окно `is_reminder_minute()` компенсирует дрейф `sleep(60)`: точный тик 10:00:00 не гарантирован, но любой тик в первые 2 минуты часа сработает; повторные срабатывания подавляются флагами.
 
 ---
 
@@ -621,37 +618,43 @@ loop каждые 60 секунд:
 
 ## 24. Известные проблемы
 
-Подробный аудит — в `roadmap.md`. Ключевое (актуально на 2026-09):
+Подробный аудит — в `roadmap.md`. Ключевое (актуально на 2026-09-12, после Фазы 0):
 
-**Критические (логика может работать неверно):**
-1. **«Исправить последний» не работает для родителей** — `edit_measurement` требует `user_id == CHILD_ID`, родитель передаёт свой ID → всегда «❌». (`bot.py:430`)
-2. **`mark_reminder_sent()` стирает флаги** — `INSERT OR REPLACE` пересоздаёт строку дня, обнуляя соседние флаги (утренний флаг может потеряться при недельном отчёте). (`database.py:284`)
-3. **Планировщик может пропустить минуту** — условие `minute == 0` при тике раз в 60 сек; пропущенный тик = нет напоминания весь день.
-4. **Двойной `callback.answer()`** в `chart/summary/weekly/stats/export` → TelegramBadRequest.
-5. **`del_confirm_` без проверки `is_parent`** — защита только на этапе показа кнопки.
+**Исправлено (Фаза 0, 2026-09-12):**
+- ✅ «Исправить последний» для родителей (передаётся `CHILD_ID`)
+- ✅ `mark_reminder_sent` не стирает соседние флаги дня (`ON CONFLICT DO NOTHING`)
+- ✅ Окно планировщика `minute < 2` (`is_reminder_minute`) — тик не потеряется
+- ✅ Двойной `callback.answer()` убран из 9 хендлеров; `answer_callback` глушит `TelegramBadRequest`
+- ✅ `is_parent` в `cb_delete_confirm`
+- ✅ Индекс `idx_meas_user_time` создаётся при `init_db`
+- ✅ Кнопка «⬅️ Назад» на шаге десятков
+- ✅ Пины зависимостей, LICENSE, плейсхолдеры токена в доках, чистка `-journal` в фикстуре
+
+**Осталось открытым:**
 6. **Молчаливая инверсия утро↔вечер** в `_save_measurement`, если слот занят и не было `forced_tod` — искажает статистику утро/вечер.
 
 **Архитектурные:**
 - Блокирующие вызовы SQLite и matplotlib в event loop (нет `asyncio.to_thread`); соединение создаётся на каждый запрос.
 - Прямой SQL в `bot.py` в обход `database.py` (`_save_edit_any`, `cb_edit_any`, `cb_delete*`).
-- Отсутствие индексов; фильтрация по дате через `LIKE 'ГГГГ-ММ-ДД%'`.
+- Фильтрация по дате через `LIKE 'ГГГГ-ММ-ДД%'` (индекс добавлен, но LIKE не использует его).
 - Часовой пояс — ручное смещение из двух независимых мест чтения env (без DST).
+- Небезопасный `int(callback.data...)` без try/except; FSM без обработки нецифрового ввода и `/cancel`.
 - Markdown-рендер пользовательских данных без экранирования; CSV собирается вручную.
-- Нет `.gitignore`/`.env.example`; `.env` с реальным токеном и БД с медданными лежат в проекте.
-- Мёртвый код: `safe_delete`, `_show_history_from_message`, `Measurement.waiting_delete_confirm`, `PEF_NORM_BY_AGE`, `ZONE_RED`, `get_week_measurements`, `stats`-хендлер без кнопки; на шаге десятков нет кнопки «Назад».
+- Мёртвый код: `safe_delete`, `_show_history_from_message`, `Measurement.waiting_delete_confirm`, `PEF_NORM_BY_AGE`, `ZONE_RED`, `get_week_measurements`, `stats`-хендлер без кнопки.
 
 ---
 
 ## 25. Запуск и тесты
 
 ```bash
-pip install -r requirements.txt   # aiogram>=3.0.0, matplotlib>=3.7.0, python-dotenv>=1.0.0
+pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, python-dotenv==1.2.3
+pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test_bot.py -v   # тесты database.py + чистых функций bot.py
+python -m pytest test_bot.py -v   # 33 теста
 ```
 
-`test_bot.py` (23 теста) покрывает: CRUD измерений, права в SQL, статистику/тренд, пагинацию, флаги напоминаний, settings, зоны `pef_zone`, `pct_of`, `auto_time_of_day`, CSV-логику и прямые SQL-операции родителя. FSM и хендлеры бота тестами не покрыты; тесты импортируют `bot.py`, поэтому требуют валидный `.env`.
+`test_bot.py` (**33 теста**) покрывает: CRUD измерений, права в SQL, статистику/тренд, пагинацию, флаги напоминаний (включая «флаги не стираются»), settings, зоны `pef_zone`, `pct_of`, `auto_time_of_day`, окно планировщика, клавиатуры ввода ПСВ, CSV-логику, прямые SQL-операции родителя, а также регрессионные тесты хендлеров через mock-объекты aiogram (`_save_edit_last` использует CHILD_ID; `cb_delete_confirm` отклоняет не-родителя; `answer_callback` переживает повторный answer). Полного покрытия FSM/хендлеров нет — тесты импортируют `bot.py`, поэтому требуют установленный aiogram и `.env`.
 
 ---
 

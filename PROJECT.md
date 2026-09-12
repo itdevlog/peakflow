@@ -104,7 +104,7 @@ picklo/
 ### Файл `.env`
 
 ```env
-BOT_TOKEN=8565342225:AAGxxxxxxxxxxxxxxxxxxxxx
+BOT_TOKEN=123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxxx
 CHILD_ID=123456789
 PARENT_IDS=987654321,111222333
 CHILD_NAME=Маша

@@ -21,7 +21,7 @@ Telegram-бот для отслеживания пиковой скорости 
 ## Настройка (.env)
 
 ```env
-BOT_TOKEN=8565342225:AAF...
+BOT_TOKEN=123456789:AAE...
 CHILD_ID=123456789
 PARENT_IDS=987654321,111222333
 CHILD_NAME=Маша

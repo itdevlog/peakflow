@@ -117,6 +117,16 @@ def auto_time_of_day() -> str:
     return "morning" if hour < 12 else "evening"
 
 
+def is_reminder_minute(minute: int) -> bool:
+    """True for minutes inside the reminder window (0–1).
+
+    The scheduler ticks every 60 seconds, so an exact 'minute == 0' check
+    can be skipped by sleep drift. A two-minute window guarantees the
+    reminder fires; per-day flags in the DB prevent duplicates.
+    """
+    return minute < 2
+
+
 def tod_emoji(tod: str) -> str:
     return "☀️" if tod == "morning" else "🌙"
 
@@ -140,7 +150,11 @@ def pct_of(value: int, target: int) -> int:
 
 
 async def answer_callback(callback: types.CallbackQuery):
-    await callback.answer()
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        # query already answered or too old — safe to ignore
+        pass
     try:
         await callback.message.delete()
     except (TelegramBadRequest, Exception):
@@ -232,10 +246,11 @@ def kb_pef_hundreds() -> InlineKeyboardMarkup:
 
 
 def kb_pef_tens() -> InlineKeyboardMarkup:
-    """Клавиатура для выбора десятков: 00 10 20 ... 90 (2 ряда по 5)."""
+    """Клавиатура для выбора десятков: 00 10 20 ... 90 (2 ряда по 5) + Назад."""
     row1 = [InlineKeyboardButton(text=f"{d*10:02d}", callback_data=f"t_{d*10:02d}") for d in range(0, 5)]
     row2 = [InlineKeyboardButton(text=f"{d*10:02d}", callback_data=f"t_{d*10:02d}") for d in range(5, 10)]
-    return InlineKeyboardMarkup(inline_keyboard=[row1, row2])
+    row3 = [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, row3])
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +329,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "add")
 async def cb_add(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
     tod = auto_time_of_day()
     tod_icon = tod_emoji(tod)
     tod_name = tod_label(tod)
@@ -346,7 +360,6 @@ async def cb_add(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("add_force_"))
 async def cb_add_force(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
     tod = callback.data.replace("add_force_", "")
     await state.update_data(input_context="add", forced_tod=tod)
     await respond(callback,
@@ -427,7 +440,7 @@ async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = edit_measurement(DB_PATH, mid, new_val, callback.from_user.id)
+    ok = edit_measurement(DB_PATH, mid, new_val, CHILD_ID)
     if ok:
         target = get_effective_target()
         zone, _ = pef_zone(new_val, target)
@@ -537,13 +550,11 @@ async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "history")
 async def cb_history(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
     await _show_history(callback, page=1)
 
 
 @router.callback_query(F.data.startswith("hist_page_"))
 async def cb_history_page(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
     page = int(callback.data.replace("hist_page_", ""))
     await _show_history(callback, page=page)
 
@@ -613,6 +624,10 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext):
 # so aiogram matches the more specific pattern first.
 @router.callback_query(F.data.startswith("del_confirm_"))
 async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
+        return
+
     mid = int(callback.data.replace("del_confirm_", ""))
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute("DELETE FROM measurements WHERE id = ? AND user_id = ?", (mid, CHILD_ID))
@@ -669,7 +684,6 @@ async def cb_settings(callback: types.CallbackQuery):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    await callback.answer()
     target = get_effective_target()
     measurements = get_all_measurements(DB_PATH, CHILD_ID)
 
@@ -761,8 +775,6 @@ async def _send_settings_from_message(message: types.Message):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "export")
 async def cb_export(callback: types.CallbackQuery):
-    await callback.answer()
-
     measurements = get_all_measurements(DB_PATH, CHILD_ID)
     if not measurements:
         await respond(callback, "📭 Нет данных для экспорта.", kb=kb_back())
@@ -869,7 +881,6 @@ async def _show_history_from_callback(callback: types.CallbackQuery):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "chart")
 async def cb_chart(callback: types.CallbackQuery):
-    await callback.answer()
     data = get_measurements_for_chart(DB_PATH, CHILD_ID, days=30)
     target = get_effective_target()
 
@@ -936,7 +947,6 @@ async def cb_chart(callback: types.CallbackQuery):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "summary")
 async def cb_summary(callback: types.CallbackQuery):
-    await callback.answer()
     target = get_effective_target()
     today = get_today_measurements(DB_PATH, CHILD_ID)
 
@@ -1040,7 +1050,6 @@ async def _send_weekly_report(message=None):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "stats")
 async def cb_stats(callback: types.CallbackQuery):
-    await callback.answer()
     stats = get_stats(DB_PATH, CHILD_ID)
     target = get_effective_target()
 
@@ -1123,7 +1132,7 @@ async def scheduler_loop():
             minute = now.minute
 
             # Morning missing reminder
-            if hour == REMINDER_MORNING_DEADLINE and minute == 0:
+            if hour == REMINDER_MORNING_DEADLINE and is_reminder_minute(minute):
                 if not was_reminder_sent(DB_PATH, today, "morning_missing"):
                     if not has_today_measurement(DB_PATH, CHILD_ID, "morning"):
                         for pid in PARENT_IDS:
@@ -1140,7 +1149,7 @@ async def scheduler_loop():
                         logger.info("Напоминание: утренний замер пропущен")
 
             # Evening missing reminder
-            if hour == REMINDER_EVENING_DEADLINE and minute == 0:
+            if hour == REMINDER_EVENING_DEADLINE and is_reminder_minute(minute):
                 if not was_reminder_sent(DB_PATH, today, "evening_missing"):
                     if not has_today_measurement(DB_PATH, CHILD_ID, "evening"):
                         for pid in PARENT_IDS:
@@ -1156,7 +1165,7 @@ async def scheduler_loop():
                         logger.info("Напоминание: вечерний замер пропущен")
 
             # Weekly report
-            if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and minute == 0:
+            if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
                 if not was_reminder_sent(DB_PATH, today, "weekly"):
                     text = await _send_weekly_report()
                     if text:

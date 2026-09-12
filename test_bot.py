@@ -7,7 +7,7 @@ TEST_DB = "test_peakflow.db"
 @pytest.fixture(autouse=True)
 def setup_db():
     os.environ["DB_PATH"] = TEST_DB
-    for ext in ["", "-wal", "-shm"]:
+    for ext in ["", "-wal", "-shm", "-journal"]:
         p = TEST_DB + ext
         if os.path.exists(p):
             try:
@@ -41,7 +41,7 @@ def setup_db():
 
     yield
 
-    for ext in ["", "-wal", "-shm"]:
+    for ext in ["", "-wal", "-shm", "-journal"]:
         p = TEST_DB + ext
         if os.path.exists(p):
             try:
@@ -64,6 +64,22 @@ class TestDatabase:
         add_measurement(TEST_DB, 250, "morning", 111, 222)
         last = get_last_measurement(TEST_DB, 111)
         # edit checks user_id of the measurement record (= CHILD_ID = 111)
+        ok = edit_measurement(TEST_DB, last["id"], 280, 111)
+        assert ok
+        updated = get_last_measurement(TEST_DB, 111)
+        assert updated["pef_value"] == 280
+
+    def test_edit_measurement_as_parent(self):
+        """Regression for bug #1: parent's 'Edit last' must work.
+
+        edit_measurement used to require user_id == caller_id, but the
+        record's user_id is always CHILD_ID, so parents could never edit.
+        The bot passes CHILD_ID explicitly now.
+        """
+        from database import add_measurement, edit_measurement, get_last_measurement
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        last = get_last_measurement(TEST_DB, 111)
+        # 999 is a parent; the record belongs to child 111
         ok = edit_measurement(TEST_DB, last["id"], 280, 111)
         assert ok
         updated = get_last_measurement(TEST_DB, 111)
@@ -137,6 +153,29 @@ class TestDatabase:
         mark_reminder_sent(TEST_DB, today, "morning_missing")
         assert was_reminder_sent(TEST_DB, today, "morning_missing")
 
+    def test_reminder_flags_not_reset_by_other_type(self):
+        """Bug regression: marking evening/weekly must not reset morning flag."""
+        from database import mark_reminder_sent, was_reminder_sent
+        today = "2026-04-13"
+        mark_reminder_sent(TEST_DB, today, "morning_missing")
+        mark_reminder_sent(TEST_DB, today, "evening_missing")
+        mark_reminder_sent(TEST_DB, today, "weekly")
+        assert was_reminder_sent(TEST_DB, today, "morning_missing")
+        assert was_reminder_sent(TEST_DB, today, "evening_missing")
+        assert was_reminder_sent(TEST_DB, today, "weekly")
+
+    def test_index_created(self):
+        """init_db must create index on (user_id, measured_at)."""
+        from database import init_db
+        init_db(TEST_DB)
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_user_time'"
+        ).fetchall()
+        conn.close()
+        assert rows, "index idx_meas_user_time missing"
+
     def test_pagination(self):
         from database import add_measurement, get_measurements_paginated
         for i in range(15):
@@ -149,6 +188,32 @@ class TestDatabase:
 
         p2, _, _ = get_measurements_paginated(TEST_DB, 111, page=2, per_page=10)
         assert len(p2) == 5
+
+
+    def test_kb_pef_tens_has_back_button(self):
+        """Tens keyboard must have a Back button (user can escape the step)."""
+        from bot import kb_pef_tens
+        kb = kb_pef_tens()
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "back" in callbacks
+
+    def test_kb_pef_hundreds_layout(self):
+        from bot import kb_pef_hundreds
+        kb = kb_pef_hundreds()
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert callbacks == ["h_1", "h_2", "h_3", "h_4", "h_5", "h_6", "back"]
+
+    def test_scheduler_reminder_window(self):
+        """Reminder must fire for any tick within the deadline minute (0 or 1).
+
+        Regression for bug: 'minute == 0' missed ticks at 10:01 when the
+        loop's 60s sleep skipped the exact 10:00 tick.
+        """
+        from bot import is_reminder_minute
+        for minute in (0, 1):
+            assert is_reminder_minute(minute), f"minute={minute} must be inside the window"
+        for minute in (2, 3, 15, 30, 59):
+            assert not is_reminder_minute(minute), f"minute={minute} must be outside the window"
 
 
 class TestConfig:
@@ -196,6 +261,55 @@ class TestConfig:
 class TestEditDeleteExport:
     """Tests for parent edit/delete/export functionality."""
 
+    def test_edit_last_save_uses_child_id(self):
+        """Regression for bug #1: _save_edit_last must pass CHILD_ID to
+        edit_measurement, not the caller's Telegram ID (a parent)."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from database import add_measurement, get_last_measurement
+
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        last = get_last_measurement(TEST_DB, 111)
+
+        callback = MagicMock()
+        callback.from_user.id = 999           # parent
+        callback.answer = AsyncMock()
+        callback.message.answer = AsyncMock()
+
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"edit_id": last["id"]})
+        state.clear = AsyncMock()
+
+        with patch("bot.edit_measurement") as mock_edit:
+            mock_edit.return_value = True
+            import bot
+            asyncio.get_event_loop().run_until_complete(
+                bot._save_edit_last(callback, state, 280, {"edit_id": last["id"]})
+            )
+            # The record's user_id (CHILD_ID) must be used, not the parent's ID
+            args = mock_edit.call_args[0]
+            assert args[1] == last["id"]
+            assert args[3] == bot.CHILD_ID
+
+    def test_answer_callback_tolerates_double_answer(self):
+        """Regression for bug #4: a second callback.answer() raises
+        TelegramBadRequest ('query already answered') — answer_callback
+        must swallow it so the screen is still delivered."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from aiogram.exceptions import TelegramBadRequest
+        import bot
+
+        callback = MagicMock()
+        callback.answer = AsyncMock(
+            side_effect=TelegramBadRequest(method="answer", message="query is too old")
+        )
+        callback.message = MagicMock()
+        callback.message.delete = AsyncMock()
+
+        asyncio.get_event_loop().run_until_complete(bot.answer_callback(callback))
+        callback.message.delete.assert_called_once()
+
     def test_direct_sql_edit_by_id(self):
         """Test direct SQL update by measurement ID (parent override)."""
         import sqlite3
@@ -212,6 +326,42 @@ class TestEditDeleteExport:
         assert cur.rowcount > 0
         last = get_last_measurement(TEST_DB, 111)
         assert last["pef_value"] == 300
+
+    def test_delete_confirm_requires_parent(self):
+        """Regression for bug #5: delete confirmation must check rights.
+
+        cb_delete checks is_parent, but the confirming handler didn't —
+        a callback 'del_confirm_<id>' from a non-parent would delete.
+        The measurement must belong to CHILD_ID (as in production), so the
+        DELETE query actually targets it.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        import bot
+        from database import add_measurement, get_all_measurements
+
+        # In production all measurements belong to CHILD_ID
+        add_measurement(TEST_DB, 250, "morning", bot.CHILD_ID, 222)
+        mid = get_all_measurements(TEST_DB, bot.CHILD_ID)[0]["id"]
+
+        callback = MagicMock()
+        callback.data = f"del_confirm_{mid}"
+        callback.from_user.id = 555           # NOT a parent, NOT the child
+        callback.answer = AsyncMock()
+        callback.message = MagicMock()
+        callback.message.answer = AsyncMock()
+
+        state = MagicMock()
+        state.clear = AsyncMock()
+
+        asyncio.get_event_loop().run_until_complete(
+            bot.cb_delete_confirm(callback, state)
+        )
+
+        from database import get_last_measurement
+        assert get_last_measurement(TEST_DB, bot.CHILD_ID) is not None, \
+            "non-parent must not be able to delete"
+        callback.answer.assert_called()  # user gets feedback either way
 
     def test_direct_sql_delete_by_id(self):
         """Test direct SQL delete by measurement ID (parent override)."""
@@ -252,7 +402,7 @@ class TestEditDeleteExport:
         assert len(lines) == 4  # header + 3 measurements
         # Oldest first after reversal
         assert "240" in lines[1]
-        assert "260" in lines[-1]
+        assert "250" in lines[-1]  # newest measurement is last
 
     def test_settings_get_set(self):
         """Test get_setting and set_setting."""

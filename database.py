@@ -76,6 +76,12 @@ def init_db(db_path: str):
     # Default target PEF if not set
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_pef', '260')")
 
+    # Index for user_id + measured_at queries (history, today, charts)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_meas_user_time
+        ON measurements(user_id, measured_at)
+    """)
+
     conn.commit()
     conn.close()
 
@@ -279,10 +285,10 @@ def get_stats(db_path: str, user_id: int) -> dict:
 # Reminder tracking
 # ============================================================================
 def mark_reminder_sent(db_path: str, date_str: str, reminder_type: str):
-    """Mark that a reminder was sent today."""
+    """Mark that a reminder was sent today. Other flags stay intact."""
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT OR REPLACE INTO reminders_sent (date) VALUES (?)",
+        "INSERT INTO reminders_sent (date) VALUES (?) ON CONFLICT(date) DO NOTHING",
         (date_str,)
     )
     if reminder_type == "morning_missing":
