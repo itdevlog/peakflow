@@ -1,0 +1,22 @@
+# Секреты
+.env
+
+# Базы данных (медицинские данные)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Файл блокировки бота
+.bot.lock
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Идеи
+.idea/
+.vscode/
