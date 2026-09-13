@@ -5,6 +5,7 @@ import fcntl
 import sqlite3
 import logging
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, types, F, Router
@@ -25,6 +26,7 @@ from config import (
     PEF_NORM_BY_AGE, ZONE_GREEN, ZONE_YELLOW, ZONE_RED,
     REMINDER_MORNING_DEADLINE, REMINDER_EVENING_DEADLINE,
     WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR, TZ_OFFSET,
+    WEBAPP_PORT,
     is_parent, is_child, get_effective_target,
 )
 from database import (
@@ -38,6 +40,10 @@ from database import (
     get_measurements_for_month, get_available_months, get_measurements_between,
     get_last_of_tod, replace_auto_measurement,
 )
+
+import config as app_config
+
+from web.server import run_webapp, wait_forever
 
 # Часовой пояс из config (UTC+N)
 TZ = timezone(timedelta(hours=TZ_OFFSET))
@@ -1572,6 +1578,25 @@ async def scheduler_loop():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _web_services() -> dict:
+    return {"config": app_config}
+
+
+async def run_async():
+    dp.startup.register(on_startup)
+    if not WEBAPP_PORT:
+        await dp.start_polling(bot)
+        return
+    polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
+    try:
+        await run_webapp(_web_services())
+    finally:
+        polling.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await polling
+        await bot.session.close()
+
+
 def main():
     if not BOT_TOKEN:
         print("❌ BOT_TOKEN не задан в .env!")
@@ -1587,9 +1612,7 @@ def main():
     try:
         init_db(DB_PATH)
         logger.info("Пикфлоуметр: %s, родители: %s", CHILD_NAME, PARENT_IDS)
-
-        dp.startup.register(on_startup)
-        dp.run_polling(bot)
+        asyncio.run(run_async())
     finally:
         release_lock(lock_fd)
 
