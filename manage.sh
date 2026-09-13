@@ -76,7 +76,12 @@ get_port() {
 get_db_file() {
     local db
     db=$(env_get DB_PATH)
-    echo "${SCRIPT_DIR:-.}/${db:-peakflow.db}"
+    db="${db:-peakflow.db}"
+    if [[ "$db" = /* ]]; then
+        echo "$db"
+    else
+        echo "${SCRIPT_DIR:-.}/${db}"
+    fi
 }
 
 get_webapp_url() {
@@ -200,7 +205,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=${USER}
+User=${USER:-$(id -un)}
 WorkingDirectory=${SCRIPT_DIR}
 ExecStart=${VENV_DIR}/bin/python bot.py
 Restart=on-failure
@@ -287,8 +292,10 @@ cmd_install() {
 
         local token=""
         while [[ -z "$token" ]]; do
-            ask "" "Введите токен бота (у @BotFather)"
-            token="$REPLY"
+            if [[ -n "$INPUT_FD" ]]; then
+                read -r -s -p "Введите токен бота (у @BotFather) [ввод скрыт]: " token < "$INPUT_FD" || token=""
+                echo
+            fi
             [[ -n "$token" ]] || warn "Токен не может быть пустым"
         done
         sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${token}|" "$ENV_FILE"
@@ -312,6 +319,8 @@ cmd_install() {
         warn "Скопирован .env.example -> .env. Отредактируйте его: nano .env"
         info "После настройки запустите: ./manage.sh doctor"
     fi
+
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
 
     if service_exists; then
         info "systemd-сервис уже установлен"
@@ -523,28 +532,47 @@ cmd_backup() {
     target="${BACKUP_DIR}/bot-backup-${stamp}.tar.gz"
     db_file=$(get_db_file)
 
-    local files=() tmp_db=""
+    local staging
+    staging=$(mktemp -d "${BACKUP_DIR}/.staging-${stamp}.XXXXXX") || die "Не удалось создать временный каталог"
+    local db_name
+    db_name=$(basename "$db_file")
+
     if [[ -f "$db_file" ]]; then
+        local have_db=false
         if command -v sqlite3 >/dev/null 2>&1; then
-            tmp_db="${BACKUP_DIR}/.db-snapshot-${stamp}.sqlite"
-            sqlite3 "$db_file" ".backup '${tmp_db}'" \
-                || { warn "sqlite3 .backup не удался — копирую файл напрямую"; rm -f "$tmp_db"; tmp_db=""; }
+            if sqlite3 "$db_file" ".backup '${staging}/${db_name}'"; then
+                have_db=true
+            else
+                warn "sqlite3 .backup не удался — останавливаю бота и копирую файл напрямую"
+                rm -f "${staging}/${db_name}"
+            fi
         fi
-        if [[ -n "$tmp_db" ]]; then
-            files+=("$(basename "$tmp_db")")
-        else
-            files+=("$(realpath --relative-to="$SCRIPT_DIR" "$db_file" 2>/dev/null || basename "$db_file")")
+        if [[ "$have_db" != "true" ]]; then
+            local was_running=false
+            service_running && was_running=true
+            do_stop || true
+            cp -f "$db_file" "${staging}/${db_name}" \
+                || { warn "Не удалось скопировать БД"; rm -rf "$staging"; rm -f "$target"; return 1; }
+            [[ -f "${db_file}-wal" ]] && cp -f "${db_file}-wal" "${staging}/${db_name}-wal" 2>/dev/null || true
+            [[ -f "${db_file}-shm" ]] && cp -f "${db_file}-shm" "${staging}/${db_name}-shm" 2>/dev/null || true
+            if [[ "$was_running" == "true" ]]; then
+                do_start || true
+            fi
         fi
     fi
-    [[ -f "$ENV_FILE" ]] && files+=(.env)
-    if [[ ${#files[@]} -eq 0 ]]; then
+
+    [[ -f "$ENV_FILE" ]] && cp -f "$ENV_FILE" "${staging}/.env"
+
+    if ! find "$staging" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
         warn "Нет данных для бэкапа (БД и .env отсутствуют)"
+        rm -rf "$staging"
         return 0
     fi
 
-    tar -czf "$target" -C "$SCRIPT_DIR" "${files[@]}" \
-        || { rm -f "$tmp_db"; die "Не удалось создать бэкап"; }
-    [[ -n "$tmp_db" ]] && rm -f "$tmp_db"
+    tar -czf "$target" -C "$staging" . \
+        || { rm -rf "$staging"; rm -f "$target"; die "Не удалось создать бэкап"; }
+    rm -rf "$staging"
+    chmod 600 "$target" 2>/dev/null || true
     ok "Бэкап: ${target} ($(du -h "$target" | cut -f1))"
 
     local old
