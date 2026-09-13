@@ -20,3 +20,6 @@ venv/
 # Идеи
 .idea/
 .vscode/
+
+# Superpowers SDD workspace
+.superpowers/
