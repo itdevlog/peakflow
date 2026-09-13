@@ -23,3 +23,8 @@ venv/
 
 # Superpowers SDD workspace
 .superpowers/
+
+backups/
+logs/
+bot.pid
+data/
