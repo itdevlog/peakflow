@@ -122,6 +122,10 @@ DB_PATH=peakflow.db
 | `CHILD_NAME` | string | ❌ | `Ребёнок` | Имя ребёнка для отображения |
 | `TARGET_PEF` | int | ❌ | `260` | Целевая ПСВ от врача (л/мин) |
 | `DB_PATH` | string | ❌ | `peakflow.db` | Путь к SQLite файлу |
+| `TZ_OFFSET` | int | ❌ | `5` | Смещение часового пояса от UTC в часах |
+| `WEBAPP_HOST` | string | ❌ | `0.0.0.0` | Адрес прослушивания веб-сервера Mini App |
+| `WEBAPP_PORT` | int | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
+| `WEBAPP_URL` | string | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
 
 ### Константы в `config.py`
 
@@ -380,12 +384,35 @@ def main():
 
 ### Установка
 
+Ручная установка:
+
 ```bash
 cd /root/bot/picklo
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Установка на сервер одной командой через `manage.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+```
+
+Скрипт клонирует репозиторий (по умолчанию в `/opt/telegrambot-pick`), создаёт
+venv `.venv`, ставит зависимости, интерактивно настраивает `.env` и предлагает
+systemd-сервис `tg-pick-bot` (`Restart=on-failure`). Управление:
+`install`, `update`, `start`, `stop`, `restart`, `status`, `logs`, `backup`,
+`restore`, `doctor`, `caddy`, `uninstall`, `help` (флаг `--no-color`).
+
+### Веб-версия (Mini App)
+
+`web/api.py` (`create_app`) и `web/server.py` (`run_webapp`) поднимают FastAPI
+в том же процессе и event loop, что и aiogram. Слой включается при
+`WEBAPP_PORT > 0`; health-check — `GET /healthz` (статус и `manage.sh doctor`
+проверяют `http://localhost:$WEBAPP_PORT/healthz`). Переменные `.env`:
+`WEBAPP_HOST`, `WEBAPP_PORT`, `WEBAPP_URL`. HTTPS для Mini App даёт
+`deploy/Caddyfile` через `./manage.sh caddy` (Let's Encrypt).
 
 ### Настройка
 

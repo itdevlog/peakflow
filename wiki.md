@@ -32,6 +32,7 @@
 23. [Сценарии использования (потоки)](#23-сценарии-использования-потоки)
 24. [Известные проблемы (по аудиту roadmap.md)](#24-известные-проблемы)
 25. [Запуск и тесты](#25-запуск-и-тесты)
+26. [Веб-слой (Mini App) и эксплуатация (`manage.sh`)](#26-веб-слой-mini-app-и-эксплуатация-managesh)
 
 ---
 
@@ -89,6 +90,9 @@ telegrambot-pick/
 | `TARGET_PEF` | ❌ | `260` | Целевая ПСВ от врача (fallback для БД) |
 | `DB_PATH` | ❌ | `peakflow.db` | Путь к SQLite-файлу |
 | `TZ_OFFSET` | ❌ | `5` (UTC+5) | Смещение часового пояса в часах |
+| `WEBAPP_HOST` | ❌ | `0.0.0.0` | Адрес прослушивания веб-сервера Mini App |
+| `WEBAPP_PORT` | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
+| `WEBAPP_URL` | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
 
 ### Константы `config.py`
 
@@ -665,6 +669,56 @@ python -m pytest test_bot.py -v   # 75 тестов
 ```
 
 `test_bot.py` (**75 тестов**): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry (создание, перезапись ручным, исключение из статистики/графика), планировщик (пинг ребёнку, эскалация с «скорректируйте», подавление при замере), клавиатуры (ребёнок, настройки, напоминания, навигация графика, периоды CSV), рендер PNG, CSV за месяц. Хендлеры через mock-объекты aiogram; `bot.py` импортируется целиком — нужны установленный aiogram и `.env`.
+
+---
+
+## 26. Веб-слой (Mini App) и эксплуатация (`manage.sh`)
+
+### Веб-слой в процессе бота
+
+Веб-сервер поднимается **в том же процессе и event loop**, что и long polling
+aiogram (отдельного сервиса/порта процессов нет). Слой включается, когда
+`WEBAPP_PORT > 0`.
+
+| Модуль | Что делает |
+|--------|-----------|
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. В SP1 реализован только `GET /healthz` (возвращает `{"status": "ok"}`); REST API для данных — задача SP2 |
+| `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
+
+Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
+`0.0.0.0`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
+(публичный HTTPS-URL; пусто — кнопка Mini App не добавляется). Health-check
+`GET /healthz` используется командами `manage.sh status`/`doctor`.
+
+### `manage.sh` — установка и эксплуатация
+
+`manage.sh` — единая точка установки и ops. Быстрый старт без ручного
+клонирования (каталог по умолчанию `/opt/telegrambot-pick`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+```
+
+| Команда | Назначение |
+|---------|-----------|
+| `install` | venv (`.venv`), зависимости, интерактивный `.env`, systemd-сервис `tg-pick-bot` |
+| `update` | `git pull` с бэкапом и откатом при неудачном health-check |
+| `start` / `stop` / `restart` | Управление сервисом или ручным процессом |
+| `status` | Статус systemd/процесса + health-check `/healthz` |
+| `logs` | `journalctl -u tg-pick-bot -f` или `tail -f logs/bot.log` |
+| `backup` | Бэкап БД (`.backup`) + `.env` в `backups/` (хранит последние 10) |
+| `restore` | Восстановление из последнего бэкапа |
+| `doctor` | Проверка venv, зависимостей, `.env`, сервиса, `/healthz` и HTTPS |
+| `caddy` | HTTPS для Mini App: Caddy + Let's Encrypt по домену из `WEBAPP_URL` |
+| `uninstall` | Остановка и удаление сервиса (с подтверждениями) |
+| `help` | Справка; флаг `--no-color` отключает цвета |
+
+systemd-юнит — `tg-pick-bot` с `Restart=on-failure`, `RestartSec=10`,
+`ExecStart=.../.venv/bin/python bot.py`. HTTPS обеспечивает `deploy/Caddyfile`
+(`reverse_proxy 127.0.0.1:$WEBAPP_PORT`) через `./manage.sh caddy`.
+
+Новые зависимости SP1: `fastapi==0.141.1`, `uvicorn==0.52.4`; для тестов —
+`httpx==0.28.1` (`requirements-dev.txt`).
 
 ---
 

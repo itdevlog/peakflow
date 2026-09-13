@@ -179,10 +179,12 @@
 ### 23. Развёртывание и бэкапы
 - **Факт:** запуск ручной (`python bot.py`), systemd-юнита/Dockerfile нет. Автоперезапуск при падении отсутствует, а падать есть на что (№8). Прод-БД с 183 медицинскими записями — **в одном экземпляре, без бэкапов**.
 - **Фикс:** systemd-сервис с `Restart=on-failure`; cron с `sqlite3 .backup`; (быстро) кнопка «📥 Скачать бэкап» родителям.
+- **Сделано (SP1, 2026-09-13):** systemd-сервис `tg-pick-bot` (`Restart=on-failure`, `RestartSec=10`) ставится через `./manage.sh install`; `manage.sh backup`/`restore` делают `sqlite3 .backup` БД + `.env` в `backups/` (хранятся последние 10); добавлен health-check `GET /healthz` (используется `status`/`doctor`/`update`); `./manage.sh update` — обновление с GitHub, бэкапом и откатом при неудачном health-check; HTTPS для Mini App через `deploy/Caddyfile` и `./manage.sh caddy` (Let's Encrypt). REST API и фронтенд Mini App — **SP2**.
 
 ### 24. Мусор в рабочей папке
 - **Факт:** лежит `test_peakflow.db-journal` — фикстура тестов (`test_bot.py:10`) чистит `-wal`/`-shm`, но не `-journal`.
 - **Фикс:** чистить все `*.db*` в фикстуре; файл удалить.
+- **Сделано (SP1, 2026-09-13):** рантайм-мусор (`backups/`, `logs/`, `bot.pid`, `data/`) исключён через `.gitignore`.
 
 ---
 

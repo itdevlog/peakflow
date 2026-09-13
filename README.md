@@ -39,6 +39,38 @@ source venv/bin/activate
 python bot.py
 ```
 
+## Установка на сервер
+
+Быстрая установка с нуля:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+```
+
+Скрипт спросит каталог установки (по умолчанию `/opt/telegrambot-pick`),
+склонирует репозиторий, поставит Python-окружение и зависимости, интерактивно
+настроит `.env` и предложит systemd-сервис.
+
+Управление из каталога установки:
+
+| Команда | Что делает |
+|---------|------------|
+| `./manage.sh install` | Установка: venv, зависимости, `.env`, systemd |
+| `./manage.sh update` | Обновление с GitHub + бэкап + откат при сбое |
+| `./manage.sh start` / `stop` / `restart` | Управление ботом |
+| `./manage.sh status` | Статус + health-check `/healthz` |
+| `./manage.sh logs` | Логи в реальном времени |
+| `./manage.sh backup` | Бэкап БД + `.env` (последние 10) |
+| `./manage.sh restore` | Восстановление из бэкапа |
+| `./manage.sh doctor` | Диагностика конфигурации |
+| `./manage.sh caddy` | HTTPS для Mini App (Let's Encrypt) |
+| `./manage.sh uninstall` | Остановка и удаление сервиса |
+
+### Веб-версия (Telegram Mini App)
+
+Переменные `.env`: `WEBAPP_HOST`, `WEBAPP_PORT` (`0` = выключить веб-сервер),
+`WEBAPP_URL` (публичный HTTPS-URL). Для HTTPS запустите `./manage.sh caddy`.
+
 ## Тесты
 
 ```bash
