@@ -6,6 +6,30 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DB_PATH = os.getenv("DB_PATH", "peakflow.db")
 
+
+def normalize_webapp_url(url: str) -> str:
+    """Публичный URL Mini App: http(s) без хвостового слеша; иначе пусто."""
+    if not url:
+        return ""
+    url = url.strip().rstrip("/")
+    if not url:
+        return ""
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return ""
+    return url
+
+
+def _parse_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+WEBAPP_HOST = os.getenv("WEBAPP_HOST", "0.0.0.0")
+WEBAPP_PORT = _parse_int(os.getenv("WEBAPP_PORT", "8080") or "0", 0)
+WEBAPP_URL = normalize_webapp_url(os.getenv("WEBAPP_URL", ""))
+
 # Часовой пояс (смещение от UTC в часах). По умолчанию UTC+5 (Екатеринбург).
 # Примеры: Москва=3, Екатеринбург=5, Владивосток=10
 TZ_OFFSET = int(os.getenv("TZ_OFFSET", "5"))
