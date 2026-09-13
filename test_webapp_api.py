@@ -16,3 +16,9 @@ def test_healthz_ok():
 
 def test_unknown_path_404():
     assert _client().get("/nope").status_code == 404
+
+
+def test_healthz_bot_down_returns_503():
+    r = TestClient(create_app({"config": None, "state": {"bot_ok": False}})).get("/healthz")
+    assert r.status_code == 503
+    assert r.json() == {"status": "bot down"}

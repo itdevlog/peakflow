@@ -1578,23 +1578,43 @@ async def scheduler_loop():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def _web_services() -> dict:
-    return {"config": app_config}
+def _web_services(state: dict, shutdown_event: asyncio.Event) -> dict:
+    return {"config": app_config, "state": state, "shutdown_event": shutdown_event}
 
 
-async def run_async():
+async def run_async() -> int:
     dp.startup.register(on_startup)
+
+    state = {"bot_ok": False, "crashed": False}
+    shutdown_event = asyncio.Event()
+
+    async def _run_polling():
+        state["bot_ok"] = True
+        try:
+            await dp.start_polling(bot, handle_signals=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            state["crashed"] = True
+            logger.error("Polling остановлен с ошибкой: %s", e)
+            shutdown_event.set()
+        finally:
+            state["bot_ok"] = False
+
     if not WEBAPP_PORT:
         await dp.start_polling(bot)
-        return
-    polling = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
+        return 0
+
+    polling = asyncio.create_task(_run_polling())
     try:
-        await run_webapp(_web_services())
+        await run_webapp(_web_services(state, shutdown_event))
     finally:
         polling.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await polling
         await bot.session.close()
+
+    return 1 if state["crashed"] else 0
 
 
 def main():
@@ -1612,7 +1632,9 @@ def main():
     try:
         init_db(DB_PATH)
         logger.info("Пикфлоуметр: %s, родители: %s", CHILD_NAME, PARENT_IDS)
-        asyncio.run(run_async())
+        exit_code = asyncio.run(run_async())
+        if exit_code:
+            sys.exit(exit_code)
     finally:
         release_lock(lock_fd)
 

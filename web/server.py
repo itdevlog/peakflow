@@ -41,8 +41,24 @@ async def run_webapp(services: dict) -> None:
         access_log=False,
     ))
     logger.info("Веб-сервер Mini App: http://%s:%s", config.WEBAPP_HOST, config.WEBAPP_PORT)
-    with _defer_shutdown_signals():
-        await server.serve()
+    shutdown_event = services.get("shutdown_event")
+    if shutdown_event is None:
+        with _defer_shutdown_signals():
+            await server.serve()
+        return
+
+    async def _watch_shutdown():
+        await shutdown_event.wait()
+        server.should_exit = True
+
+    watcher = asyncio.create_task(_watch_shutdown())
+    try:
+        with _defer_shutdown_signals():
+            await server.serve()
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
 
 
 async def wait_forever() -> None:

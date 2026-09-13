@@ -70,7 +70,13 @@ token_configured() {
 get_port() {
     local port
     port=$(env_get WEBAPP_PORT)
-    echo "${port:-8080}"
+    if ! grep -qE '^WEBAPP_PORT=' "$ENV_FILE" 2>/dev/null; then
+        echo "8080"
+    elif [[ "$port" =~ ^[0-9]+$ ]]; then
+        echo "$port"
+    else
+        echo "0"
+    fi
 }
 
 get_db_file() {
@@ -551,8 +557,12 @@ cmd_backup() {
             local was_running=false
             service_running && was_running=true
             do_stop || true
-            cp -f "$db_file" "${staging}/${db_name}" \
-                || { warn "Не удалось скопировать БД"; rm -rf "$staging"; rm -f "$target"; return 1; }
+            if ! cp -f "$db_file" "${staging}/${db_name}"; then
+                warn "Не удалось скопировать БД"
+                [[ "$was_running" == "true" ]] && do_start || true
+                rm -rf "$staging"; rm -f "$target"
+                return 1
+            fi
             [[ -f "${db_file}-wal" ]] && cp -f "${db_file}-wal" "${staging}/${db_name}-wal" 2>/dev/null || true
             [[ -f "${db_file}-shm" ]] && cp -f "${db_file}-shm" "${staging}/${db_name}-shm" 2>/dev/null || true
             if [[ "$was_running" == "true" ]]; then
@@ -590,7 +600,23 @@ cmd_restore() {
 
     confirm "Восстановить ${latest}? Бот будет остановлен." n || exit 0
     do_stop || true
-    tar -xzf "$latest" -C "$SCRIPT_DIR" || die "Не удалось распаковать бэкап"
+
+    local db_file db_name tmp
+    db_file=$(get_db_file)
+    db_name=$(basename "$db_file")
+    tmp=$(mktemp -d "${BACKUP_DIR}/.restore-XXXXXX") || die "Не удалось создать временный каталог"
+    tar -xzf "$latest" -C "$tmp" || { rm -rf "$tmp"; die "Не удалось распаковать бэкап"; }
+
+    if [[ -f "${tmp}/${db_name}" ]]; then
+        mkdir -p "$(dirname "$db_file")"
+        rm -f "${db_file}-wal" "${db_file}-shm"
+        cp -f "${tmp}/${db_name}" "$db_file" || { rm -rf "$tmp"; die "Не удалось восстановить БД"; }
+        [[ -f "${tmp}/${db_name}-wal" ]] && cp -f "${tmp}/${db_name}-wal" "${db_file}-wal" || true
+        [[ -f "${tmp}/${db_name}-shm" ]] && cp -f "${tmp}/${db_name}-shm" "${db_file}-shm" || true
+    fi
+    [[ -f "${tmp}/.env" ]] && cp -f "${tmp}/.env" "$ENV_FILE" || true
+    rm -rf "$tmp"
+
     ok "Восстановлено из $(basename "$latest")"
     do_start
     if health_check "$(get_port)"; then ok "Бот работает"; else warn "Проверьте логи: ./manage.sh logs"; fi
