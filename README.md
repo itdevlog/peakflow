@@ -70,6 +70,10 @@ curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/mana
 
 Переменные `.env`: `WEBAPP_HOST`, `WEBAPP_PORT` (`0` = выключить веб-сервер),
 `WEBAPP_URL` (публичный HTTPS-URL). Для HTTPS запустите `./manage.sh caddy`.
+Когда `WEBAPP_URL` задан, бот добавляет кнопку меню «💨 Дневник» — она открывает
+Mini App с историей, графиком, статистикой и сводкой. Доступ только у ребёнка и
+родителей (проверка Telegram initData). Добавление/редактирование замеров,
+настройки, CSV и бэкап в Mini App — следующие подпроекты (SP2b/SP2c).
 
 ## Тесты
 

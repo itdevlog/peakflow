@@ -685,6 +685,17 @@ aiogram (отдельного сервиса/порта процессов не�
 | `web/api.py` | `create_app(services)` — FastAPI-приложение. В SP1 реализован только `GET /healthz` (возвращает `{"status": "ok"}`); REST API для данных — задача SP2 |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
+#### Mini App (SP2a): чтение
+
+- `web/auth.py` — проверка HMAC-подписи Telegram `initData` (заголовок
+  `X-Telegram-Init-Data`); доступ только у `CHILD_ID` и `PARENT_IDS`, иначе 403.
+- `web/api.py` — read-only эндпоинты: `/api/me`, `/api/status`, `/api/summary`,
+  `/api/history`, `/api/chart`, `/api/stats`, `/api/weekly`.
+- `web/static/` — `index.html`, `app.js` (vanilla JS + Telegram WebApp SDK,
+  интерактивный график на `<canvas>`), `style.css`.
+- Кнопка «💨 Дневник» ставится в `bot._setup_menu_button()`, если задан
+  `WEBAPP_URL`. Наружу биндить только за Caddy (HTTPS обязателен для initData).
+
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `0.0.0.0`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
 (публичный HTTPS-URL; пусто — кнопка Mini App не добавляется). Health-check
