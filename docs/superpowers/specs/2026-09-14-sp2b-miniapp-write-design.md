@@ -111,9 +111,11 @@ def require_parent(auth: dict = Depends(require_user)) -> dict:
 ## 5. Уведомления (`web/notify.py`)
 
 ```python
-async def notify_added(bot, who: int, pef: int, tod: str, target: int) -> None
-async def notify_red_zone(bot, pef: int, tod: str, target: int) -> None
+async def notify_added(bot, config, who: int, pef: int, tod: str, target: int) -> None
+async def notify_red_zone(bot, config, pef: int, tod: str, target: int) -> None
 ```
+`config` нужен для `CHILD_NAME`, `PARENT_IDS`, `CHILD_ID`, порогов зон; сам `bot`
+может быть `None` (no-op, для тестов/режима без Telegram).
 - `notify_added`: имя автора (`_user_display_name`-эквивалент: CHILD_NAME для
   CHILD_ID, «Родитель» для parent, иначе «Кто-то») + текст
   `📝 <Имя> добавил для <CHILD_NAME>: <pef> л/мин <zone_emoji> (<tod label>)`.
