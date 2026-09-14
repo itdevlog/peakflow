@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-0078D4.svg)](https://docs.aiogram.dev)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57.svg)](https://sqlite.org)
-[![Tests](https://img.shields.io/badge/Tests-19%20passed-brightgreen.svg)](test_bot.py)
+[![Tests](https://img.shields.io/badge/Tests-171%20passed-brightgreen.svg)](test/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
@@ -155,7 +155,7 @@ picklo/
 ├── bot.py              # Main bot logic (~790 lines)
 ├── database.py         # SQLite CRUD (~275 lines)
 ├── config.py           # Settings, family IDs, thresholds (~70 lines)
-├── test_bot.py         # Pytest tests (19 tests)
+├── test/               # Pytest tests (test/test_bot.py etc.)
 ├── requirements.txt    # Python dependencies
 ├── .env                # Environment variables
 ├── .env.example        # .env template
@@ -169,7 +169,7 @@ picklo/
 ## 🧪 Tests
 
 ```bash
-python -m pytest test_bot.py -v
+python -m pytest test/ -v
 ```
 
 ```

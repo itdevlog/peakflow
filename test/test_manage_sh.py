@@ -2,7 +2,7 @@
 import pathlib
 import subprocess
 
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 MANAGE = ROOT / "manage.sh"
 
 COMMANDS = [

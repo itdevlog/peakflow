@@ -83,7 +83,7 @@ Mini App с историей, графиком, статистикой и сво
 ## Тесты
 
 ```bash
-python -m pytest test_bot.py -v
+python -m pytest test/ -v
 ```
 
 ## Структура
@@ -93,7 +93,7 @@ picklo/
 ├── bot.py          # Логика бота
 ├── database.py     # SQLite CRUD
 ├── config.py       # Настройки + ID семьи
-├── test_bot.py     # 19 тестов
+├── test/           # pytest-тесты
 ├── .env            # Ваш файл с ID
 └── requirements.txt
 ```

@@ -182,7 +182,7 @@
 - **Сделано (SP1, 2026-09-13):** systemd-сервис `peakflow-bot` (`Restart=on-failure`, `RestartSec=10`) ставится через `./manage.sh install`; `manage.sh backup`/`restore` делают `sqlite3 .backup` БД + `.env` в `backups/` (хранятся последние 10); добавлен health-check `GET /healthz` (используется `status`/`doctor`/`update`); `./manage.sh update` — обновление с GitHub, бэкапом и откатом при неудачном health-check; HTTPS для Mini App через `deploy/Caddyfile` и `./manage.sh caddy` (Let's Encrypt). SP2a (Mini App чтение: статус/история/график/статистика) — сделано 2026-09-13; запись (SP2b: add/edit/delete замеров и заметки с уведомлениями) — сделано 2026-09-14; настройки/CSV/бэкап (SP2c) — сделано 2026-09-14 (Mini App полностью паритетен боту).
 
 ### 24. Мусор в рабочей папке
-- **Факт:** лежит `test_peakflow.db-journal` — фикстура тестов (`test_bot.py:10`) чистит `-wal`/`-shm`, но не `-journal`.
+- **Факт:** лежит `test_peakflow.db-journal` — фикстура тестов (`test/test_bot.py`) чистит `-wal`/`-shm`, но не `-journal`.
 - **Фикс:** чистить все `*.db*` в фикстуре; файл удалить.
 - **Сделано (SP1, 2026-09-13):** рантайм-мусор (`backups/`, `logs/`, `bot.pid`, `data/`) исключён через `.gitignore`.
 

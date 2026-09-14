@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-0078D4.svg)](https://docs.aiogram.dev)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57.svg)](https://sqlite.org)
-[![Tests](https://img.shields.io/badge/Tests-19%20passed-brightgreen.svg)](test_bot.py)
+[![Tests](https://img.shields.io/badge/Tests-171%20passed-brightgreen.svg)](test/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
@@ -155,7 +155,7 @@ picklo/
 ├── bot.py              # Основная логика бота (~790 строк)
 ├── database.py         # SQLite CRUD (~275 строк)
 ├── config.py           # Настройки, ID семьи, пороги (~70 строк)
-├── test_bot.py         # Pytest тесты (19 тестов)
+├── test/               # Pytest тесты (test/test_bot.py и др.)
 ├── requirements.txt    # Python зависимости
 ├── .env                # Переменные окружения
 ├── .env.example        # Шаблон .env
@@ -168,7 +168,7 @@ picklo/
 ## 🧪 Тесты
 
 ```bash
-python -m pytest test_bot.py -v
+python -m pytest test/ -v
 ```
 
 ```
