@@ -51,18 +51,20 @@ function pct(value) {
   return state.target ? Math.round((value / state.target) * 100) : 100;
 }
 
-function measureCard(m) {
+function measureCardInner(m) {
   const p = pct(m.pef_value);
   const auto = (m.source === "auto") ? ' <span class="auto">🤖</span>' : "";
   const note = m.note ? `<div class="note">ℹ️ ${esc(m.note)}</div>` : "";
-  return `<div class="card">
-    <div class="row">
+  return `<div class="row">
       <span class="label">${todLabel(m.time_of_day)}</span>
       <span class="label">${esc(String(m.measured_at).slice(5, 16))}</span>
     </div>
     <div class="big ${zoneClass(p)}">${m.pef_value} <span class="label">${p}%</span>${auto}</div>
-    ${note}
-  </div>`;
+    ${note}`;
+}
+
+function measureCard(m) {
+  return `<div class="card">${measureCardInner(m)}</div>`;
 }
 
 async function loadToday() {
@@ -87,7 +89,14 @@ async function loadHistory(page = 1) {
     el.innerHTML = `<div class="hint">История пуста</div>`;
     return;
   }
-  el.innerHTML = h.items.map(measureCard).join("") + `<div class="pager">
+  const isParent = state.role === "parent";
+  el.innerHTML = h.items.map((m) => `<div class="card">
+    ${measureCardInner(m)}
+    ${isParent ? `<div class="row" style="margin-top:6px">
+      <button class="mini" data-edit="${m.id}">✏️</button>
+      <button class="mini" data-del="${m.id}">🗑️</button>
+    </div>` : ""}
+  </div>`).join("") + `<div class="pager">
     <button id="hist-prev" ${page <= 1 ? "disabled" : ""}>‹</button>
     <span class="label">${page} / ${h.total_pages}</span>
     <button id="hist-next" ${page >= h.total_pages ? "disabled" : ""}>›</button>
@@ -95,6 +104,20 @@ async function loadHistory(page = 1) {
   const prev = $("hist-prev"), next = $("hist-next");
   if (prev) prev.onclick = () => loadHistory(page - 1);
   if (next) next.onclick = () => loadHistory(page + 1);
+  if (isParent) {
+    el.querySelectorAll("[data-edit]").forEach((b) =>
+      b.onclick = () => openForm("edit", Number(b.dataset.edit)));
+    el.querySelectorAll("[data-del]").forEach((b) =>
+      b.onclick = () => deleteMeasurement(Number(b.dataset.del)));
+  }
+}
+
+async function deleteMeasurement(mid) {
+  if (!window.confirm("Удалить запись? Действие необратимо.")) return;
+  try {
+    await api(`/api/measurements/${mid}`, { method: "DELETE" });
+    await loadHistory(state.history.page);
+  } catch (e) { showError(e.message); }
 }
 
 async function loadStats() {
