@@ -41,12 +41,16 @@ is_repo() {
 }
 
 # --- Цветной вывод -----------------------------------------------------------
-if [[ "${1:-}" == "--no-color" || "${NO_COLOR:-}" == "1" ]]; then
-    C_OK=""; C_ERR=""; C_WARN=""; C_INFO=""; C_DIM=""; C_OFF=""
-else
-    C_OK=$'\033[32m'; C_ERR=$'\033[31m'; C_WARN=$'\033[33m'
-    C_INFO=$'\033[36m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
-fi
+set_colors() {
+    # set_colors <on|off> — off, если NO_COLOR задан (любым значением) или передан --no-color
+    if [[ "$1" == "off" || -n "${NO_COLOR:-}" ]]; then
+        C_OK=""; C_ERR=""; C_WARN=""; C_INFO=""; C_DIM=""; C_OFF=""
+    else
+        C_OK=$'\033[32m'; C_ERR=$'\033[31m'; C_WARN=$'\033[33m'
+        C_INFO=$'\033[36m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+    fi
+}
+set_colors on
 
 ok()   { printf '%s[OK]%s %s\n' "$C_OK" "$C_OFF" "$*"; }
 fail() { printf '%s[FAIL]%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; }
@@ -284,8 +288,8 @@ cmd_install() {
         || die "Не удалось установить зависимости"
     ok "Зависимости установлены"
 
-    mkdir -p "$LOG_DIR" "$BACKUP_DIR"
-    ok "Директории logs/ backups/ готовы"
+    mkdir -p "$LOG_DIR" "$BACKUP_DIR" "${SCRIPT_DIR}/data"
+    ok "Директории data/ logs/ backups/ готовы"
 
     if [[ -f "$ENV_FILE" ]]; then
         info "Файл .env уже существует — пропускаю настройку"
@@ -786,7 +790,9 @@ cmd_caddy() {
     printf '[Service]\nEnvironment=WEBAPP_DOMAIN=%s\nEnvironment=WEBAPP_PORT=%s\n' \
         "$domain" "$port" | run_root tee "${dropin_dir}/webapp.conf" >/dev/null
 
-    run_root caddy validate --config "$caddyfile" --adapter caddyfile \
+    # Проверяем конфиг с теми же env, что получит systemd (иначе валидируются дефолты localhost:8080)
+    run_root env WEBAPP_DOMAIN="$domain" WEBAPP_PORT="$port" \
+        caddy validate --config "$caddyfile" --adapter caddyfile \
         || die "Конфиг Caddy некорректен — проверьте ${caddyfile}"
 
     if systemd_available; then
@@ -911,8 +917,22 @@ cmd_bootstrap_install() {
 
 # --- main ----------------------------------------------------------------------
 main() {
-    if [[ "${1:-}" == "--no-color" ]]; then
-        shift
+    # --no-color распознаётся в любой позиции (не только первой)
+    local args=() no_color=false arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--no-color" ]]; then
+            no_color=true
+        else
+            args+=("$arg")
+        fi
+    done
+    if [[ "$no_color" == "true" ]]; then
+        set_colors off
+    fi
+    if [[ ${#args[@]} -gt 0 ]]; then
+        set -- "${args[@]}"
+    else
+        set --
     fi
     local cmd="${1:-help}"
     shift 2>/dev/null || true
