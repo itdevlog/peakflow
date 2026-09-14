@@ -6,8 +6,14 @@ from report import (
     parse_month,
     pct_of,
     pef_zone,
+    tod_emoji,
     tod_label,
 )
+
+
+def test_tod_emoji():
+    assert tod_emoji("morning") == "☀️"
+    assert tod_emoji("evening") == "🌙"
 
 
 def test_month_title():

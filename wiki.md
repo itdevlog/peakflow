@@ -682,7 +682,7 @@ aiogram (отдельного сервиса/порта процессов не�
 
 | Модуль | Что делает |
 |--------|-----------|
-| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check) и read-only REST API SP2a: `/api/me`, `/api/status`, `/api/summary`, `/api/history`, `/api/chart`, `/api/stats`, `/api/weekly` |
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/summary`, `/history`, `/chart`, `/stats`, `/weekly`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`) |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
 #### Mini App (SP2a): чтение
