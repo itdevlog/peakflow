@@ -705,6 +705,18 @@ aiogram (отдельного сервиса/порта процессов не�
 - `web/notify.py` — Telegram-уведомления (паритет с ботом, no-op без бота).
 - `bot._web_services` передаёт `bot` в web-слой.
 
+#### Mini App (SP2c): настройки, CSV, бэкап (только родители)
+
+- `GET/PUT /api/settings`, `PUT /api/settings/target` (100–800),
+  `PUT /api/settings/reminders` (часы 0–23).
+- `GET /api/export/periods`, `GET /api/export/csv?period=all|YYYY-MM`
+  (UTF-8 BOM, те же колонки, что в боте), `GET /api/backup` (согласованный
+  `sqlite3.backup`, файл удаляется после отдачи).
+- `report.py` — общие чистые хелперы (`pef_zone`, `pct_of`, `month_title`,
+  `parse_month`, `build_csv_content`, `display_name`); `bot.py` ре-экспортирует
+  их для совместимости.
+- Фронтенд: таб «⚙️ Настройки» (скрыт у ребёнка), скачивание через fetch+blob.
+
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `0.0.0.0`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
 (публичный HTTPS-URL; пусто — кнопка Mini App не добавляется). Health-check
