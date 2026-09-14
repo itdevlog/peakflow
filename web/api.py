@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from database import (
     add_measurement,
+    delete_measurement,
+    edit_measurement,
     get_all_measurements,
     get_available_months,
     get_last_measurement,
@@ -203,6 +205,18 @@ def create_app(services: dict) -> FastAPI:
             await notify_red_zone(services.get("bot"), config, body.pef, tod, target)
         return {"id": mid, "pef": body.pef, "tod": tod,
                 "zone": _pef_zone(body.pef, target, config), "pct": pct, "diff": diff}
+
+    @app.patch("/api/measurements/{mid}")
+    async def edit(mid: int, body: MeasurementIn, auth: dict = Depends(require_parent)):
+        if not edit_measurement(config.DB_PATH, mid, body.pef, config.CHILD_ID):
+            raise HTTPException(404, "Запись не найдена")
+        return {"id": mid, "pef": body.pef}
+
+    @app.delete("/api/measurements/{mid}")
+    async def remove(mid: int, auth: dict = Depends(require_parent)):
+        if not delete_measurement(config.DB_PATH, mid, config.CHILD_ID):
+            raise HTTPException(404, "Запись не найдена")
+        return {"deleted": True, "id": mid}
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):

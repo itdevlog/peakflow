@@ -121,3 +121,47 @@ def test_add_pef_out_of_range():
 def test_add_requires_auth():
     _setup_db()
     assert _client().post("/api/measurements", json={"pef": 250}).status_code == 403
+
+
+def _add(pef=250, tod="morning"):
+    return add_measurement(TEST_DB, pef, tod, CHILD_ID, CHILD_ID)
+
+
+def test_edit_parent_ok_child_forbidden():
+    _setup_db()
+    mid = _add(250)
+    assert _client().patch(f"/api/measurements/{mid}", json={"pef": 300},
+                           headers=_auth(CHILD_ID)).status_code == 403
+    r = _client().patch(f"/api/measurements/{mid}", json={"pef": 300}, headers=_auth(PARENT_IDS[0]))
+    assert r.status_code == 200
+    assert r.json()["pef"] == 300
+    assert get_all_measurements(TEST_DB, CHILD_ID)[0]["pef_value"] == 300
+
+
+def test_delete_parent_ok_child_forbidden():
+    _setup_db()
+    mid = _add(250)
+    assert _client().delete(f"/api/measurements/{mid}", headers=_auth(CHILD_ID)).status_code == 403
+    r = _client().delete(f"/api/measurements/{mid}", headers=_auth(PARENT_IDS[0]))
+    assert r.status_code == 200
+    assert r.json() == {"deleted": True, "id": mid}
+    assert get_all_measurements(TEST_DB, CHILD_ID) == []
+
+
+def test_edit_missing_returns_404():
+    _setup_db()
+    assert _client().patch("/api/measurements/99999", json={"pef": 300},
+                           headers=_auth(PARENT_IDS[0])).status_code == 404
+
+
+def test_delete_missing_returns_404():
+    _setup_db()
+    assert _client().delete("/api/measurements/99999",
+                            headers=_auth(PARENT_IDS[0])).status_code == 404
+
+
+def test_edit_pef_out_of_range():
+    _setup_db()
+    mid = _add()
+    assert _client().patch(f"/api/measurements/{mid}", json={"pef": 50},
+                           headers=_auth(PARENT_IDS[0])).status_code == 422
