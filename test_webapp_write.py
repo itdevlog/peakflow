@@ -93,6 +93,17 @@ def test_add_replaces_auto_record():
     assert rows[0]["source"] == "manual"
 
 
+def test_add_replaces_auto_returns_replaced_slot_id():
+    _setup_db()
+    auto_id = add_measurement(TEST_DB, 180, "morning", CHILD_ID, 0, source="auto")
+    # a newer manual evening row that get_last_measurement would return instead
+    add_measurement(TEST_DB, 220, "evening", CHILD_ID, CHILD_ID)
+    r = _client().post("/api/measurements", json={"pef": 250}, headers=_auth(CHILD_ID))
+    assert r.status_code == 200, r.text
+    assert r.json()["tod"] == "morning"
+    assert r.json()["id"] == auto_id
+
+
 def test_add_second_slot_goes_to_other_tod():
     _setup_db()
     add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID)

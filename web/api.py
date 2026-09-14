@@ -12,6 +12,7 @@ from database import (
     get_all_measurements,
     get_available_months,
     get_last_measurement,
+    get_last_of_tod,
     get_last_two_weeks,
     get_measurements_for_month,
     get_measurements_paginated,
@@ -188,7 +189,8 @@ def create_app(services: dict) -> FastAPI:
         target = _effective_target(config)
         replaced = replace_auto_measurement(config.DB_PATH, config.CHILD_ID, tod, body.pef, who)
         if replaced:
-            mid = get_last_measurement(config.DB_PATH, config.CHILD_ID)["id"]
+            row = get_last_of_tod(config.DB_PATH, config.CHILD_ID, tod)
+            mid = row["id"] if row else None
         else:
             mid = add_measurement(config.DB_PATH, body.pef, tod, config.CHILD_ID, who)
         all_m = get_all_measurements(config.DB_PATH, config.CHILD_ID)
