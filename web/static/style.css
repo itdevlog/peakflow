@@ -62,3 +62,5 @@ body { margin: 0; background: var(--bg); color: var(--fg);
   background: var(--accent); color: #fff; font-size: 16px; margin-bottom: 8px; }
 .mini { padding: 8px 14px; border: none; border-radius: 8px; background: var(--card);
   color: var(--fg); font-size: 15px; }
+#tab-settings[hidden] { display: none !important; }
+#screen-settings .row { justify-content: space-between; }

@@ -188,3 +188,9 @@ def test_api_not_shadowed_by_static():
 def test_static_index_has_form_overlay():
     r = _client().get("/")
     assert 'id="form-overlay"' in r.text
+
+
+def test_static_index_has_settings_screen():
+    r = _client().get("/")
+    assert 'id="screen-settings"' in r.text
+    assert 'data-screen="settings"' in r.text

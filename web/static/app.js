@@ -37,6 +37,25 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
+async function download(path, fallbackName) {
+  const r = await fetch(path, { headers: { "X-Telegram-Init-Data": tg.initData || "" } });
+  if (!r.ok) {
+    const b = await r.json().catch(() => ({ detail: "Ошибка" }));
+    throw new Error(b.detail || `HTTP ${r.status}`);
+  }
+  const cd = r.headers.get("Content-Disposition") || "";
+  let name = fallbackName;
+  const star = /filename\*=utf-8''([^;]+)/i.exec(cd);
+  const plain = /filename="?([^";]+)"?/i.exec(cd);
+  if (star) name = decodeURIComponent(star[1]);
+  else if (plain) name = plain[1];
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(url);
+}
+
 function showError(msg) {
   const el = $("error");
   el.textContent = msg;
@@ -145,12 +164,15 @@ async function switchTo(name) {
     t.classList.toggle("active", t.dataset.screen === name));
   document.querySelectorAll(".screen").forEach((s) =>
     s.hidden = (s.id !== `screen-${name}`));
+  const setTab = document.getElementById("tab-settings");
+  if (setTab) setTab.hidden = (state.role !== "parent");
   clearError();
   try {
     if (name === "today") await loadToday();
     else if (name === "history") await loadHistory(1);
     else if (name === "stats") await loadStats();
     else if (name === "chart") await loadChart();
+    else if (name === "settings") await loadSettings();
   } catch (e) { showError(e.message); }
 }
 
@@ -388,6 +410,69 @@ function openNote(mid) {
     } catch (e) { showError(e.message); }
   };
   $("note-cancel").onclick = () => { closeForm(); switchTo("today"); };
+}
+
+/* ---- settings tab (parents only) ---- */
+async function loadSettings() {
+  const s = await api("/api/settings");
+  const el = $("screen-settings");
+  const h = s.reminder_hours;
+  const periods = (await api("/api/export/periods")).months;
+  const periodBtns = [`<button class="mini" data-csv="all">Всё время</button>`]
+    .concat(periods.slice().reverse().map((p) => `<button class="mini" data-csv="${p}">${p}</button>`))
+    .join(" ");
+  el.innerHTML = `
+    <div class="card"><div class="label">Ребёнок</div><div class="big">${esc(s.child_name)}</div></div>
+    <div class="card">
+      <div class="label">🎯 Целевая ПСВ</div>
+      <div class="big">${s.target_pef} <span class="label">л/мин</span></div>
+      <button class="mini" id="set-target">Изменить</button>
+    </div>
+    <div class="card">
+      <div class="label">⏰ Напоминания</div>
+      <div class="row"><span>🌅 Ребёнку утром</span><button class="mini" data-hour="child_morning">${h.child_morning}:00</button></div>
+      <div class="row"><span>🌙 Ребёнку вечером</span><button class="mini" data-hour="child_evening">${h.child_evening}:00</button></div>
+      <div class="row"><span>🌅 Родителям (утро)</span><button class="mini" data-hour="parent_morning">${h.parent_morning}:00</button></div>
+      <div class="row"><span>🌙 Родителям (вечер)</span><button class="mini" data-hour="parent_evening">${h.parent_evening}:00</button></div>
+    </div>
+    <div class="card">
+      <div class="label">📥 Экспорт CSV</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px">${periodBtns}</div>
+    </div>
+    <div class="card">
+      <div class="label">💾 Бэкап БД</div>
+      <button class="mini" id="set-backup">Скачать бэкап</button>
+    </div>`;
+  $("set-target").onclick = changeTarget;
+  $("set-backup").onclick = () => download("/api/backup", "peakflow_backup.db").catch((e) => showError(e.message));
+  el.querySelectorAll("[data-csv]").forEach((b) =>
+    b.onclick = () => download(`/api/export/csv?period=${b.dataset.csv}`, "peakflow.csv").catch((e) => showError(e.message)));
+  el.querySelectorAll("[data-hour]").forEach((b) =>
+    b.onclick = () => changeHour(b.dataset.hour, h));
+}
+
+async function changeTarget() {
+  const cur = await api("/api/settings");
+  const input = window.prompt("Целевая ПСВ (100–800)", String(cur.target_pef));
+  if (input == null) return;
+  const val = Number(input);
+  if (!(val >= 100 && val <= 800)) { showError("Диапазон: 100–800"); return; }
+  try {
+    await api("/api/settings/target", { method: "PUT", body: { target_pef: val } });
+    await loadSettings();
+  } catch (e) { showError(e.message); }
+}
+
+async function changeHour(key, hours) {
+  const input = window.prompt("Час (0–23)", String(hours[key]));
+  if (input == null) return;
+  const val = Number(input);
+  if (!(val >= 0 && val <= 23)) { showError("Диапазон: 0–23"); return; }
+  const body = { ...hours, [key]: val };
+  try {
+    await api("/api/settings/reminders", { method: "PUT", body });
+    await loadSettings();
+  } catch (e) { showError(e.message); }
 }
 
 async function boot() {
