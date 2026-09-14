@@ -18,12 +18,14 @@ from database import (
     get_last_two_weeks,
     get_measurements_for_month,
     get_measurements_paginated,
+    get_reminder_hours,
     get_setting,
     get_stats,
     get_today_measurements,
     has_today_measurement,
     replace_auto_measurement,
     set_note,
+    set_setting,
 )
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
@@ -67,6 +69,20 @@ class MeasurementIn(BaseModel):
 
 class NoteIn(BaseModel):
     note: str = ""
+
+
+class TargetIn(BaseModel):
+    target_pef: int = Field(ge=100, le=800)
+
+
+class RemindersIn(BaseModel):
+    child_morning: int = Field(ge=0, le=23)
+    child_evening: int = Field(ge=0, le=23)
+    parent_morning: int = Field(ge=0, le=23)
+    parent_evening: int = Field(ge=0, le=23)
+
+
+REMINDER_KEYS = ("child_morning", "child_evening", "parent_morning", "parent_evening")
 
 
 def create_app(services: dict) -> FastAPI:
@@ -230,6 +246,26 @@ def create_app(services: dict) -> FastAPI:
         if not set_note(config.DB_PATH, mid, note_text, config.CHILD_ID):
             raise HTTPException(404, "Запись не найдена")
         return {"id": mid, "note": note_text, "truncated": len(raw.strip()) > 200}
+
+    @app.get("/api/settings")
+    async def settings(auth: dict = Depends(require_parent)):
+        return {
+            "target_pef": _effective_target(config),
+            "child_name": getattr(config, "CHILD_NAME", "Ребёнок"),
+            "total": len(get_all_measurements(config.DB_PATH, config.CHILD_ID, include_auto=True)),
+            "reminder_hours": get_reminder_hours(config.DB_PATH),
+        }
+
+    @app.put("/api/settings/target")
+    async def put_target(body: TargetIn, auth: dict = Depends(require_parent)):
+        set_setting(config.DB_PATH, "target_pef", str(body.target_pef))
+        return {"target_pef": body.target_pef}
+
+    @app.put("/api/settings/reminders")
+    async def put_reminders(body: RemindersIn, auth: dict = Depends(require_parent)):
+        for key in REMINDER_KEYS:
+            set_setting(config.DB_PATH, f"reminder_{key}", str(getattr(body, key)))
+        return {"reminder_hours": get_reminder_hours(config.DB_PATH)}
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
