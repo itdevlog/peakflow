@@ -172,3 +172,14 @@ def test_api_weekly_shape():
     body = _client().get("/api/weekly?offset=0", headers=_auth(CHILD_ID)).json()
     assert isinstance(body["this_week"], list)
     assert isinstance(body["prev_week"], list)
+
+
+def test_static_index_served():
+    r = _client().get("/")
+    assert r.status_code == 200
+    assert "telegram-web-app.js" in r.text
+    assert 'id="app"' in r.text
+
+
+def test_api_not_shadowed_by_static():
+    assert _client().get("/api/me").status_code == 403

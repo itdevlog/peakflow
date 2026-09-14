@@ -1,8 +1,10 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from database import (
     get_available_months,
@@ -142,5 +144,9 @@ def create_app(services: dict) -> FastAPI:
     async def weekly(offset: int = Query(0, ge=0, le=0), auth: dict = Depends(require_user)):
         this_week, prev_week = get_last_two_weeks(config.DB_PATH, config.CHILD_ID)
         return {"this_week": this_week, "prev_week": prev_week, "offset": offset}
+
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    if os.path.isdir(static_dir):
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
     return app
