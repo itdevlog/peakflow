@@ -149,3 +149,26 @@ def test_api_chart_explicit_month_and_nav():
     assert body["points"] == []
     assert body["can_next"] is True
     assert body["can_prev"] is False
+
+
+def test_api_stats():
+    _setup_db()
+    for i in range(3):
+        add_measurement(TEST_DB, 200 + i * 10, "morning", CHILD_ID, CHILD_ID)
+    body = _client().get("/api/stats", headers=_auth(CHILD_ID)).json()
+    assert body["total"] == 3
+    assert body["avg"] == 210
+    assert body["target_pef"] == 260
+
+
+def test_api_stats_empty():
+    _setup_db()
+    body = _client().get("/api/stats", headers=_auth(CHILD_ID)).json()
+    assert body["total"] == 0
+
+
+def test_api_weekly_shape():
+    _setup_db()
+    body = _client().get("/api/weekly?offset=0", headers=_auth(CHILD_ID)).json()
+    assert isinstance(body["this_week"], list)
+    assert isinstance(body["prev_week"], list)

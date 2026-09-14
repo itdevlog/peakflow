@@ -7,9 +7,11 @@ from fastapi.responses import JSONResponse
 from database import (
     get_available_months,
     get_last_measurement,
+    get_last_two_weeks,
     get_measurements_for_month,
     get_measurements_paginated,
     get_setting,
+    get_stats,
     get_today_measurements,
 )
 from web.auth import get_user_from_init_data
@@ -129,5 +131,16 @@ def create_app(services: dict) -> FastAPI:
             "can_next": any(m > requested for m in available),
             "available_months": [f"{y:04d}-{m:02d}" for y, m in available],
         }
+
+    @app.get("/api/stats")
+    async def stats(auth: dict = Depends(require_user)):
+        data = get_stats(config.DB_PATH, config.CHILD_ID)
+        data["target_pef"] = _effective_target(config)
+        return data
+
+    @app.get("/api/weekly")
+    async def weekly(offset: int = Query(0, ge=0, le=0), auth: dict = Depends(require_user)):
+        this_week, prev_week = get_last_two_weeks(config.DB_PATH, config.CHILD_ID)
+        return {"this_week": this_week, "prev_week": prev_week, "offset": offset}
 
     return app
