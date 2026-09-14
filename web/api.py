@@ -5,8 +5,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from database import (
+    add_measurement,
+    get_all_measurements,
     get_available_months,
     get_last_measurement,
     get_last_two_weeks,
@@ -15,8 +18,11 @@ from database import (
     get_setting,
     get_stats,
     get_today_measurements,
+    has_today_measurement,
+    replace_auto_measurement,
 )
 from web.auth import get_user_from_init_data
+from web.notify import notify_added, notify_red_zone
 
 MONTH_NAMES = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -30,6 +36,29 @@ def _effective_target(config) -> int:
         return val if val > 0 else 300
     except (ValueError, Exception):
         return getattr(config, "TARGET_PEF", 0) or 300
+
+
+def _auto_time_of_day(config) -> str:
+    offset = getattr(config, "TZ_OFFSET", 0)
+    hour = datetime.now(timezone(timedelta(hours=offset))).hour
+    return "morning" if hour < 12 else "evening"
+
+
+def _pct_of(pef: int, target: int) -> int:
+    return int((pef / target) * 100) if target else 100
+
+
+def _pef_zone(pef: int, target: int, config) -> str:
+    pct = (pef / target) * 100 if target else 100
+    if pct >= getattr(config, "ZONE_GREEN", 80):
+        return "green"
+    if pct >= getattr(config, "ZONE_YELLOW", 60):
+        return "yellow"
+    return "red"
+
+
+class MeasurementIn(BaseModel):
+    pef: int = Field(ge=100, le=690)
 
 
 def create_app(services: dict) -> FastAPI:
@@ -54,6 +83,11 @@ def create_app(services: dict) -> FastAPI:
 
     def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
         return _resolve_user(x_telegram_init_data)
+
+    def require_parent(auth: dict = Depends(require_user)) -> dict:
+        if auth["role"] != "parent":
+            raise HTTPException(403, "Только родители")
+        return auth
 
     @app.get("/healthz")
     async def healthz():
@@ -144,6 +178,29 @@ def create_app(services: dict) -> FastAPI:
     async def weekly(offset: int = Query(0, ge=0, le=0), auth: dict = Depends(require_user)):
         this_week, prev_week = get_last_two_weeks(config.DB_PATH, config.CHILD_ID)
         return {"this_week": this_week, "prev_week": prev_week, "offset": offset}
+
+    @app.post("/api/measurements")
+    async def add(body: MeasurementIn, auth: dict = Depends(require_user)):
+        who = auth["user"]["id"]
+        tod = _auto_time_of_day(config)
+        if has_today_measurement(config.DB_PATH, config.CHILD_ID, tod, skip_auto=True):
+            tod = "evening" if tod == "morning" else "morning"
+        target = _effective_target(config)
+        replaced = replace_auto_measurement(config.DB_PATH, config.CHILD_ID, tod, body.pef, who)
+        if replaced:
+            mid = get_last_measurement(config.DB_PATH, config.CHILD_ID)["id"]
+        else:
+            mid = add_measurement(config.DB_PATH, body.pef, tod, config.CHILD_ID, who)
+        all_m = get_all_measurements(config.DB_PATH, config.CHILD_ID)
+        diff = None
+        if len(all_m) >= 2:
+            diff = body.pef - all_m[1]["pef_value"]
+        pct = _pct_of(body.pef, target)
+        await notify_added(services.get("bot"), config, who, body.pef, tod, target)
+        if pct < getattr(config, "ZONE_YELLOW", 60):
+            await notify_red_zone(services.get("bot"), config, body.pef, tod, target)
+        return {"id": mid, "pef": body.pef, "tod": tod,
+                "zone": _pef_zone(body.pef, target, config), "pct": pct, "diff": diff}
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
