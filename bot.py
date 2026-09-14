@@ -1595,7 +1595,7 @@ async def scheduler_loop():
 # Main
 # ---------------------------------------------------------------------------
 def _web_services(state: dict, shutdown_event: asyncio.Event) -> dict:
-    return {"config": app_config, "state": state, "shutdown_event": shutdown_event}
+    return {"config": app_config, "bot": bot, "state": state, "shutdown_event": shutdown_event}
 
 
 async def run_async() -> int:
