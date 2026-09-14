@@ -814,11 +814,31 @@ port_in_use() {
     return 1
 }
 
+remove_legacy_caddy_dropin() {
+    # Старый manage.sh задавал домен/порт через systemd drop-in для Caddy.
+    # Теперь это не нужно и может мешать — удаляем.
+    local dropin="/etc/systemd/system/caddy.service.d/webapp.conf"
+    [[ -f "$dropin" ]] || return 0
+    run_root rm -f "$dropin"
+    systemd_available && run_root systemctl daemon-reload >/dev/null 2>&1 || true
+    dim "Удалён устаревший drop-in ${dropin}"
+}
+
 ensure_main_caddyfile() {
     # Базовый /etc/caddy/Caddyfile держит только импорт фрагментов ботов.
     # Создаём, если нет; дописываем import, если отсутствует; чужое не затираем.
     run_root mkdir -p "${CADDY_DIR}/conf.d"
-    if [[ ! -f "$CADDY_MAIN" ]]; then
+
+    if [[ -f "$CADDY_MAIN" ]] && grep -qF '{$WEBAPP_DOMAIN' "$CADDY_MAIN" 2>/dev/null; then
+        # Старый manage.sh писал сюда один vhost с плейсхолдерами. Оставлять его
+        # нельзя: домен совпадёт с фрагментом в conf.d и Caddy упадёт с
+        # "ambiguous site definition". Заменяем на чистый import.
+        info "Мигрирую ${CADDY_MAIN}: убираю vhost с плейсхолдерами -> import conf.d/*.caddy"
+        printf '# Управляется manage.sh: базовый конфиг + фрагменты ботов в conf.d/\nimport %s/conf.d/*.caddy\n' "$CADDY_DIR" \
+            | run_root tee "$CADDY_MAIN" >/dev/null
+        remove_legacy_caddy_dropin
+        ok "Обновлён ${CADDY_MAIN}"
+    elif [[ ! -f "$CADDY_MAIN" ]]; then
         printf '# Управляется manage.sh: базовый конфиг + фрагменты ботов в conf.d/\nimport %s/conf.d/*.caddy\n' "$CADDY_DIR" \
             | run_root tee "$CADDY_MAIN" >/dev/null
         ok "Создан ${CADDY_MAIN} (импорт conf.d/*.caddy)"
