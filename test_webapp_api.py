@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 
-from database import init_db
+from database import add_measurement, init_db
 from web.api import create_app
 
 TEST_DB = "test_peakflow.db"
@@ -96,3 +96,33 @@ def test_api_parent_role():
     _setup_db()
     body = _client().get("/api/me", headers=_auth(PARENT_IDS[0])).json()
     assert body["role"] == "parent"
+
+
+def test_api_status_and_summary_empty():
+    _setup_db()
+    body = _client().get("/api/status", headers=_auth(CHILD_ID)).json()
+    assert body["today"] == []
+    assert body["last"] is None
+    assert body["target_pef"] == 260
+    summary = _client().get("/api/summary", headers=_auth(CHILD_ID)).json()
+    assert summary["today"] == []
+
+
+def test_api_history_pagination():
+    _setup_db()
+    for i in range(3):
+        add_measurement(TEST_DB, 200 + i, "morning", CHILD_ID, PARENT_IDS[0])
+    body = _client().get("/api/history?page=1&per_page=2", headers=_auth(CHILD_ID)).json()
+    assert body["total"] == 3
+    assert body["total_pages"] == 2
+    assert len(body["items"]) == 2
+    # measured_at has second precision: don't assert intra-page order
+    assert {it["pef_value"] for it in body["items"]} <= {200, 201, 202}
+
+
+def test_api_status_has_today():
+    _setup_db()
+    add_measurement(TEST_DB, 240, "morning", CHILD_ID, CHILD_ID)
+    body = _client().get("/api/status", headers=_auth(CHILD_ID)).json()
+    assert len(body["today"]) == 1
+    assert body["last"]["pef_value"] == 240

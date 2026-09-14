@@ -1,8 +1,13 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from database import get_setting
+from database import (
+    get_last_measurement,
+    get_measurements_paginated,
+    get_setting,
+    get_today_measurements,
+)
 from web.auth import get_user_from_init_data
 
 
@@ -52,5 +57,31 @@ def create_app(services: dict) -> FastAPI:
             "child_name": getattr(config, "CHILD_NAME", "Ребёнок"),
             "target_pef": _effective_target(config),
         }
+
+    @app.get("/api/status")
+    async def status(auth: dict = Depends(require_user)):
+        return {
+            "today": get_today_measurements(config.DB_PATH, config.CHILD_ID),
+            "last": get_last_measurement(config.DB_PATH, config.CHILD_ID),
+            "target_pef": _effective_target(config),
+        }
+
+    @app.get("/api/summary")
+    async def summary(auth: dict = Depends(require_user)):
+        return {
+            "today": get_today_measurements(config.DB_PATH, config.CHILD_ID),
+            "target_pef": _effective_target(config),
+        }
+
+    @app.get("/api/history")
+    async def history(
+        page: int = Query(1, ge=1),
+        per_page: int = Query(10, ge=1, le=50),
+        auth: dict = Depends(require_user),
+    ):
+        items, total, total_pages = get_measurements_paginated(
+            config.DB_PATH, config.CHILD_ID, page, per_page
+        )
+        return {"items": items, "page": page, "total": total, "total_pages": total_pages}
 
     return app
