@@ -61,7 +61,7 @@
 | python-dotenv | Загрузка `.env` |
 
 ```
-telegrambot-pick/
+peakflow/
 ├── bot.py          # Вся логика бота (~1200 строк): хендлеры, FSM, клавиатуры,
 │                   #   уведомления, планировщик, singleton-lock, main()
 ├── config.py       # Чтение .env, ID семьи, константы (зоны, часы напоминаний)
@@ -725,19 +725,19 @@ aiogram (отдельного сервиса/порта процессов не�
 ### `manage.sh` — установка и эксплуатация
 
 `manage.sh` — единая точка установки и ops. Быстрый старт без ручного
-клонирования (каталог по умолчанию `/opt/telegrambot-pick`):
+клонирования (каталог по умолчанию `/opt/peakflow`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
 ```
 
 | Команда | Назначение |
 |---------|-----------|
-| `install` | venv (`.venv`), зависимости, интерактивный `.env`, systemd-сервис `tg-pick-bot` |
+| `install` | venv (`.venv`), зависимости, интерактивный `.env`, systemd-сервис `peakflow-bot` |
 | `update` | `git pull` с бэкапом и откатом при неудачном health-check |
 | `start` / `stop` / `restart` | Управление сервисом или ручным процессом |
 | `status` | Статус systemd/процесса + health-check `/healthz` |
-| `logs` | `journalctl -u tg-pick-bot -f` или `tail -f logs/bot.log` |
+| `logs` | `journalctl -u peakflow-bot -f` или `tail -f logs/bot.log` |
 | `backup` | Бэкап БД (`.backup`) + `.env` в `backups/` (хранит последние 10) |
 | `restore` | Восстановление из последнего бэкапа |
 | `doctor` | Проверка venv, зависимостей, `.env`, сервиса, `/healthz` и HTTPS |
@@ -745,7 +745,7 @@ curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/mana
 | `uninstall` | Остановка и удаление сервиса (с подтверждениями) |
 | `help` | Справка; флаг `--no-color` отключает цвета |
 
-systemd-юнит — `tg-pick-bot` с `Restart=on-failure`, `RestartSec=10`,
+systemd-юнит — `peakflow-bot` с `Restart=on-failure`, `RestartSec=10`,
 `ExecStart=.../.venv/bin/python bot.py`. HTTPS обеспечивает `deploy/Caddyfile`
 (`reverse_proxy 127.0.0.1:$WEBAPP_PORT`) через `./manage.sh caddy`.
 

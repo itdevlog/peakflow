@@ -125,9 +125,9 @@ WEBAPP_URL  = normalize_webapp_url(os.getenv("WEBAPP_URL", ""))
 
 | Переменная | Значение |
 |-----------|----------|
-| `REPO_URL` | `https://github.com/itdevlog/telegrambot-pick.git` |
-| `INSTALL_DIR_DEFAULT` | `/opt/telegrambot-pick` |
-| `SERVICE_NAME` | `tg-pick-bot` |
+| `REPO_URL` | `https://github.com/itdevlog/peakflow.git` |
+| `INSTALL_DIR_DEFAULT` | `/opt/peakflow` |
+| `SERVICE_NAME` | `peakflow-bot` |
 | `VENV_DIR` | `${SCRIPT_DIR}/.venv` |
 | `ENV_FILE` / `ENV_EXAMPLE` | `${SCRIPT_DIR}/.env` / `.env.example` |
 | `DB_FILE` | `peakflow.db` (из `DB_PATH` в `.env`, дефолт) |

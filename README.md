@@ -44,10 +44,10 @@ python bot.py
 Быстрая установка с нуля:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
 ```
 
-Скрипт спросит каталог установки (по умолчанию `/opt/telegrambot-pick`),
+Скрипт спросит каталог установки (по умолчанию `/opt/peakflow`),
 склонирует репозиторий, поставит Python-окружение и зависимости, интерактивно
 настроит `.env` и предложит systemd-сервис.
 

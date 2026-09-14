@@ -19,7 +19,7 @@
 - БД — `peakflow.db` (`DB_PATH` из `.env`), данные медицинские: бэкап обязателен.
 - Секреты не коммитить; `.env`, `*.db`, `backups/`, `logs/`, `bot.pid` — в `.gitignore`.
 - Комментарии в коде не добавлять без необходимости; стиль проекта — существующий.
-- systemd-юнит: `SERVICE_NAME=tg-pick-bot`, `Restart=on-failure`.
+- systemd-юнит: `SERVICE_NAME=peakflow-bot`, `Restart=on-failure`.
 
 ---
 
@@ -612,18 +612,18 @@ Expected: FAIL — `manage.sh` отсутствует (или синтаксис
 # manage.sh — установка, обновление и эксплуатация Telegram-бота пикфлоуметрии
 # Использование: ./manage.sh <команда> [аргументы]
 # Быстрая установка с нуля (без ручного клонирования):
-#   curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+#   curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
 set -Eeuo pipefail
 
-REPO_URL="https://github.com/itdevlog/telegrambot-pick.git"
-INSTALL_DIR_DEFAULT="/opt/telegrambot-pick"
+REPO_URL="https://github.com/itdevlog/peakflow.git"
+INSTALL_DIR_DEFAULT="/opt/peakflow"
 
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 else
     SCRIPT_DIR=""   # запущен из пайпа (curl | bash) — репозитория рядом нет
 fi
-SERVICE_NAME="tg-pick-bot"
+SERVICE_NAME="peakflow-bot"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 VENV_DIR="${SCRIPT_DIR:-.}/.venv"
 ENV_FILE="${SCRIPT_DIR:-.}/.env"
@@ -1409,7 +1409,7 @@ cmd_help() {
 Использование: ./manage.sh <команда>
 
 Быстрая установка с нуля (клонирует в ${INSTALL_DIR_DEFAULT}):
-  curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+  curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
 
 Команды:
   install     Полная установка: venv, зависимости, .env, systemd (интерактивно).
@@ -1478,7 +1478,7 @@ main() {
             install) cmd_bootstrap_install ;;
             help|-h|--help|"") cmd_help ;;
             *) die "Эта команда работает только внутри установленного репозитория.
-Быстрая установка с нуля: curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install" ;;
+Быстрая установка с нуля: curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install" ;;
         esac
         return
     fi
@@ -1550,10 +1550,10 @@ git commit -m "feat(ops): manage.sh installer, systemd, backups, caddy"
 Быстрая установка с нуля:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
 ```
 
-Скрипт спросит каталог установки (по умолчанию `/opt/telegrambot-pick`),
+Скрипт спросит каталог установки (по умолчанию `/opt/peakflow`),
 склонирует репозиторий, поставит Python-окружение и зависимости, интерактивно
 настроит `.env` и предложит systemd-сервис.
 

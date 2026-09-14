@@ -396,12 +396,12 @@ pip install -r requirements.txt
 Установка на сервер одной командой через `manage.sh`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/itdevlog/telegrambot-pick/main/manage.sh | bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
 ```
 
-Скрипт клонирует репозиторий (по умолчанию в `/opt/telegrambot-pick`), создаёт
+Скрипт клонирует репозиторий (по умолчанию в `/opt/peakflow`), создаёт
 venv `.venv`, ставит зависимости, интерактивно настраивает `.env` и предлагает
-systemd-сервис `tg-pick-bot` (`Restart=on-failure`). Управление:
+systemd-сервис `peakflow-bot` (`Restart=on-failure`). Управление:
 `install`, `update`, `start`, `stop`, `restart`, `status`, `logs`, `backup`,
 `restore`, `doctor`, `caddy`, `uninstall`, `help` (флаг `--no-color`).
 
