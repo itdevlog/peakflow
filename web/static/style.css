@@ -9,6 +9,7 @@
   --red: #e5484d;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--fg);
   font-family: -apple-system, system-ui, Roboto, sans-serif; }
 #app { max-width: 720px; margin: 0 auto; padding: 12px; }

@@ -1,6 +1,6 @@
 /* Mini App «Дневник ПСВ»: vanilla JS + Telegram WebApp SDK. */
-const tg = window.Telegram.WebApp;
-try { tg.ready(); tg.expand(); } catch (e) {}
+const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : { initData: "" };
+try { tg.ready && tg.ready(); tg.expand && tg.expand(); } catch (e) {}
 
 const $ = (id) => document.getElementById(id);
 
@@ -61,7 +61,8 @@ async function loadToday() {
   $("target-badge").textContent = `цель ${s.target_pef}`;
   const el = $("screen-today");
   if (!s.today.length) {
-    el.innerHTML = `<div class="hint">Сегодня замеров ещё нет 💨</div>`;
+    el.innerHTML = (s.last ? `<div class="label">Последний замер</div>` + measureCard(s.last) : "") +
+      `<div class="hint">Сегодня замеров ещё нет 💨</div>`;
     return;
   }
   el.innerHTML = s.today.map(measureCard).join("");
@@ -90,7 +91,10 @@ async function loadStats() {
   state.target = s.target_pef || state.target;
   const el = $("screen-stats");
   if (!s.total) { el.innerHTML = `<div class="hint">Недостаточно данных</div>`; return; }
-  const trend = (s.trend == null) ? "—" : (s.trend > 0 ? `↑ +${s.trend.toFixed(1)}` : `↓ ${s.trend.toFixed(1)}`);
+  const trend = (s.trend == null) ? "—"
+    : s.trend > 0 ? `↑ +${s.trend.toFixed(1)}`
+    : s.trend < 0 ? `↓ ${Math.abs(s.trend).toFixed(1)}`
+    : "→ 0";
   const avg = (v) => (v == null ? "—" : Math.round(v));
   el.innerHTML = `
     <div class="card"><div class="label">Всего замеров</div><div class="big">${s.total}</div></div>
@@ -259,4 +263,15 @@ async function shiftMonth(delta) {
   await loadChart(Number(y), Number(m));
 }
 
-switchTo("today");
+async function boot() {
+  try {
+    const me = await api("/api/me");
+    $("child-name").textContent = me.child_name || "Дневник";
+  } catch (e) {
+    showError("Откройте приложение через Telegram");
+    return;
+  }
+  await switchTo("today");
+}
+
+boot();
