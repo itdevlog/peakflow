@@ -18,7 +18,7 @@ function zoneClass(pct) {
 
 const state = {
   target: 0, role: null,
-  chart: { year: null, month: null }, history: { page: 1 },
+  chart: { year: null, month: null }, chartData: null, history: { page: 1 },
   form: { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false },
 };
 
@@ -215,10 +215,12 @@ function drawChart(data, points) {
   const green = data.zones.green, yellow = data.zones.yellow;
   const band = (fromPct, toPct, color) => {
     if (!target) return;
-    const y1 = yToPx((toPct / 100) * target);
-    const y2 = yToPx((fromPct / 100) * target);
+    const clamp = (y) => Math.max(padT, Math.min(cssH - padB, y));
+    const yTop = clamp(yToPx((toPct / 100) * target));
+    const yBot = clamp(yToPx((fromPct / 100) * target));
+    if (yBot - yTop <= 0) return;
     ctx.fillStyle = color;
-    ctx.fillRect(padL, Math.max(padT, y1), plotW, Math.min(cssH - padB, y2) - Math.max(padT, y1));
+    ctx.fillRect(padL, yTop, plotW, yBot - yTop);
   };
   ctx.globalAlpha = 0.10;
   band(0, yellow, "#e5484d");
@@ -287,6 +289,7 @@ async function loadChart(year, month) {
   $("chart-next").disabled = !data.can_next;
   $("chart-tip").hidden = true;
   if (!data.points.length) {
+    state.chartData = null;
     initChart().ctx.clearRect(0, 0, 9999, 9999);
     $("chart").style.display = "none";
     $("screen-chart").querySelector(".hint")?.remove();
@@ -298,25 +301,38 @@ async function loadChart(year, month) {
   }
   $("chart").style.display = "block";
   $("screen-chart").querySelector(".hint")?.remove();
+  state.chartData = data;
   drawChart(data, data.points);
 }
 
-$("chart-prev").onclick = () => shiftMonth(-1);
-$("chart-next").onclick = () => shiftMonth(1);
+let _resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => {
+    const d = state.chartData;
+    if (d && d.points && d.points.length && $("chart").offsetParent) {
+      drawChart(d, d.points);
+    }
+  }, 200);
+});
+
+$("chart-prev").onclick = () => shiftMonth(-1).catch((e) => showError(e.message));
+$("chart-next").onclick = () => shiftMonth(1).catch((e) => showError(e.message));
 $("chart").addEventListener("click", chartClick);
 
 async function shiftMonth(delta) {
   const data = await api(`/api/chart?year=${state.chart.year}&month=${state.chart.month}`);
   const months = data.available_months;
   const cur = `${state.chart.year}-${state.chart.month}`;
-  let idx = months.indexOf(cur);
-  if (idx === -1) {
-    const sorted = [...months, cur].sort();
-    idx = sorted.indexOf(cur);
-  }
+  // Index in the sorted union of available months + the current one, so a
+  // month with no data still navigates to the nearest real neighbour.
+  const union = months.includes(cur) ? months.slice() : [...months, cur].sort();
+  const idx = union.indexOf(cur);
   const nextIdx = idx + delta;
-  if (nextIdx < 0 || nextIdx >= months.length) return;
-  const [y, m] = months[nextIdx].split("-");
+  if (nextIdx < 0 || nextIdx >= union.length) return;
+  const target = union[nextIdx];
+  if (target === cur) return;
+  const [y, m] = target.split("-");
   await loadChart(Number(y), Number(m));
 }
 
@@ -328,7 +344,7 @@ function renderForm() {
   const title = f.mode === "edit" ? "Изменить ПСВ (л/мин)" : "Выбери ПСВ (л/мин)";
   let body;
   if (f.step === "h") {
-    body = `<div class="grid">` +
+    body = `<div class="grid grid-h">` +
       [1, 2, 3, 4, 5, 6].map((h) => `<button data-h="${h}">${h}</button>`).join("") +
       `</div>`;
   } else {

@@ -25,7 +25,7 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 .screen { display: flex; flex-direction: column; gap: 8px; }
 .card { background: var(--card); border-radius: 10px; padding: 12px; }
 .card .big { font-size: 28px; font-weight: 700; }
-.card .label { color: var(--muted); font-size: 13px; }
+.label { color: var(--muted); font-size: 13px; }
 .zone-green { color: var(--green); }
 .zone-yellow { color: var(--yellow); }
 .zone-red { color: var(--red); }
@@ -52,6 +52,7 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 .form-box h3 { margin: 0 0 8px; font-size: 16px; }
 .form-value { font-size: 34px; font-weight: 700; text-align: center; margin: 8px 0; }
 .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.grid-h { grid-template-columns: repeat(6, 1fr); }
 .grid button { padding: 12px 0; border: none; border-radius: 8px; background: var(--card);
   color: var(--fg); font-size: 15px; }
 .form-actions { display: flex; gap: 8px; margin-top: 12px; }
