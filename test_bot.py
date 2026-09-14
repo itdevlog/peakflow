@@ -1065,5 +1065,39 @@ class TestEditDeleteExport:
         assert val == "260"
 
 
+class TestMenuButton:
+    def test_menu_button_set_when_url(self, monkeypatch):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(bot, "WEBAPP_URL", "https://pick.example.com")
+        monkeypatch.setattr(bot, "WEBAPP_PORT", 8080)
+        mock = AsyncMock()
+        monkeypatch.setattr(bot.bot, "set_chat_menu_button", mock)
+        asyncio.run(bot._setup_menu_button())
+        mock.assert_awaited_once()
+        assert mock.await_args.kwargs["menu_button"].web_app.url == "https://pick.example.com"
+
+    def test_menu_button_skipped_without_url(self, monkeypatch):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(bot, "WEBAPP_URL", "")
+        mock = AsyncMock()
+        monkeypatch.setattr(bot.bot, "set_chat_menu_button", mock)
+        asyncio.run(bot._setup_menu_button())
+        mock.assert_not_awaited()
+
+    def test_menu_button_error_is_swallowed(self, monkeypatch):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(bot, "WEBAPP_URL", "https://pick.example.com")
+        monkeypatch.setattr(bot, "WEBAPP_PORT", 8080)
+        monkeypatch.setattr(bot.bot, "set_chat_menu_button",
+                            AsyncMock(side_effect=RuntimeError("boom")))
+        asyncio.run(bot._setup_menu_button())  # must not raise
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

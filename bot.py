@@ -26,7 +26,7 @@ from config import (
     PEF_NORM_BY_AGE, ZONE_GREEN, ZONE_YELLOW, ZONE_RED,
     REMINDER_MORNING_DEADLINE, REMINDER_EVENING_DEADLINE,
     WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR, TZ_OFFSET,
-    WEBAPP_PORT,
+    WEBAPP_PORT, WEBAPP_URL,
     is_parent, is_child, get_effective_target,
 )
 from database import (
@@ -1467,6 +1467,22 @@ def _user_display_name(user_id: int) -> str:
 async def on_startup():
     asyncio.create_task(scheduler_loop())
     logger.info("Бот запущен, планировщик активен")
+    await _setup_menu_button()
+
+
+async def _setup_menu_button():
+    if not WEBAPP_URL or not WEBAPP_PORT:
+        return
+    try:
+        from aiogram.types import MenuButtonWebApp, WebAppInfo
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="💨 Дневник", web_app=WebAppInfo(url=WEBAPP_URL)
+            )
+        )
+        logger.info("Кнопка Mini App установлена: %s", WEBAPP_URL)
+    except Exception as e:
+        logger.error("Не удалось установить кнопку Mini App: %s", e)
 
 
 async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today: str):
