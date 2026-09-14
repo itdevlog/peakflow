@@ -1,9 +1,0 @@
-# Caddyfile — TLS reverse proxy для Telegram Mini App.
-#
-# Домен подставляется manage.sh из WEBAPP_URL (.env).
-# Плейсхолдеры (env Caddy):
-#   WEBAPP_DOMAIN — публичный домен без схемы
-#   WEBAPP_PORT   — локальный порт бота (по умолчанию 8080)
-{$WEBAPP_DOMAIN:localhost} {
-	reverse_proxy 127.0.0.1:{$WEBAPP_PORT:8080}
-}

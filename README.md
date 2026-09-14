@@ -68,8 +68,13 @@ curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | 
 
 ### Веб-версия (Telegram Mini App)
 
-Переменные `.env`: `WEBAPP_HOST`, `WEBAPP_PORT` (`0` = выключить веб-сервер),
-`WEBAPP_URL` (публичный HTTPS-URL). Для HTTPS запустите `./manage.sh caddy`.
+Переменные `.env`: `WEBAPP_HOST` (по умолчанию `127.0.0.1` — доступ только через
+Caddy), `WEBAPP_PORT` (`0` = выключить веб-сервер), `WEBAPP_URL` (публичный
+HTTPS-URL). Для HTTPS запустите `./manage.sh caddy`.
+Несколько ботов на одном сервере: каждый — свой каталог, свой `WEBAPP_PORT` и
+свой фрагмент Caddy. Имя инстанса берётся из имени каталога (`--instance`/
+`RASPISANIE_INSTANCE`), systemd-юнит — `peakflow-bot-<instance>`, Caddy-фрагмент —
+`/etc/caddy/conf.d/<instance>.caddy`; базовый `/etc/caddy/Caddyfile` общий.
 Когда `WEBAPP_URL` задан, бот добавляет кнопку меню «💨 Дневник» — она открывает
 Mini App с историей, графиком, статистикой и сводкой. Доступ только у ребёнка и
 родителей (проверка подписи Telegram initData; данные старше 24 часов отклоняются).

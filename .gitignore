@@ -28,4 +28,5 @@ venv/
 backups/
 logs/
 bot.pid
+bot.*.pid
 data/

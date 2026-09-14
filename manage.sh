@@ -13,15 +13,38 @@ if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
 else
     SCRIPT_DIR=""   # запущен из пайпа (curl | bash) — репозитория рядом нет
 fi
-SERVICE_NAME="peakflow-bot"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
 VENV_DIR="${SCRIPT_DIR:-.}/.venv"
 ENV_FILE="${SCRIPT_DIR:-.}/.env"
 ENV_EXAMPLE="${SCRIPT_DIR:-.}/.env.example"
 BACKUP_DIR="${SCRIPT_DIR:-.}/backups"
-PID_FILE="${SCRIPT_DIR:-.}/bot.pid"
 LOG_DIR="${SCRIPT_DIR:-.}/logs"
 HEALTH_TIMEOUT=30
+
+# --- Инстансы: несколько ботов на одном сервере -------------------------------
+# Имя инстанса задаёт имена systemd-юнита, PID-файла и Caddy-фрагмента, чтобы
+# боты в разных каталогах не перезаписывали сервисы и конфиг друг друга.
+# Приоритет: --instance NAME > RASPISANIE_INSTANCE > basename каталога установки.
+LEGACY_SERVICE_NAME="peakflow-bot"
+CADDY_DIR="/etc/caddy"
+CADDY_MAIN="${CADDY_DIR}/Caddyfile"
+
+sanitize_instance() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-' \
+        | sed -e 's/^-\+//' -e 's/-\+$//'
+}
+
+init_instance() {
+    local raw="${1:-${RASPISANIE_INSTANCE:-}}"
+    [[ -n "$raw" ]] || raw="$(basename "${SCRIPT_DIR:-peakflow}")"
+    INSTANCE="$(sanitize_instance "$raw")"
+    [[ -n "$INSTANCE" ]] || INSTANCE="peakflow"
+    SERVICE_NAME="${LEGACY_SERVICE_NAME}-${INSTANCE}"
+    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+    PID_FILE="${SCRIPT_DIR:-.}/bot.${INSTANCE}.pid"
+    CADDY_SITE="${CADDY_DIR}/conf.d/${INSTANCE}.caddy"
+}
+init_instance
 
 # Источник интерактивного ввода. При curl | bash stdin занят телом скрипта,
 # поэтому вопросы читаем напрямую с терминала. Нет tty — пусто (ответы = дефолт).
@@ -207,10 +230,27 @@ confirm() {
 }
 
 # --- install / service --------------------------------------------------------
+migrate_legacy_service() {
+    # Установки до поддержки мульти-инстанса держали единый юнит
+    # <legacy>.service. Если он указывает на наш каталог — заменяем его на
+    # инстансный, иначе не трогаем (это service другого бота).
+    local legacy_file="/etc/systemd/system/${LEGACY_SERVICE_NAME}.service"
+    [[ -f "$legacy_file" ]] || return 0
+    local wd
+    wd=$(grep -E '^WorkingDirectory=' "$legacy_file" 2>/dev/null | cut -d= -f2- || true)
+    [[ "$wd" == "$SCRIPT_DIR" ]] || return 0
+    info "Найден старый сервис ${LEGACY_SERVICE_NAME}.service для этого каталога — переношу в ${SERVICE_NAME}.service"
+    systemctl stop "${LEGACY_SERVICE_NAME}.service" >/dev/null 2>&1 || true
+    systemctl disable "${LEGACY_SERVICE_NAME}.service" >/dev/null 2>&1 || true
+    rm -f "$legacy_file"
+    systemctl daemon-reload 2>/dev/null || true
+}
+
 install_service() {
+    migrate_legacy_service
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Telegram Peakflow Bot
+Description=Telegram Peakflow Bot (${INSTANCE})
 After=network.target
 
 [Service]
@@ -319,8 +359,11 @@ cmd_install() {
         ask "5" "Смещение часового пояса от UTC (TZ_OFFSET, Екатеринбург=5)"
         sed -i "s|^TZ_OFFSET=.*|TZ_OFFSET=${REPLY}|" "$ENV_FILE"
 
-        ask "8080" "Порт веб-версии (0 = отключить)"
+        ask "8080" "Порт веб-версии (0 = отключить; 80/443 занимает Caddy)"
         sed -i "s|^WEBAPP_PORT=.*|WEBAPP_PORT=${REPLY}|" "$ENV_FILE"
+        if [[ "$REPLY" != "0" ]] && port_in_use "$REPLY"; then
+            warn "Порт ${REPLY} уже занят — возможно, другим ботом. Смените WEBAPP_PORT в ${ENV_FILE}"
+        fi
 
         ok ".env создан"
         warn "Проверьте .env: CHILD_NAME, TARGET_PEF при необходимости"
@@ -759,11 +802,38 @@ install_caddy() {
     ok "Caddy установлен: $(caddy version 2>/dev/null | head -1)"
 }
 
+port_in_use() {
+    # True если TCP-порт уже кем-то слушается (Caddy занимает 80/443 — это норма,
+    # поэтому проверяем только порт самого бота).
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q . && return 0
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+ensure_main_caddyfile() {
+    # Базовый /etc/caddy/Caddyfile держит только импорт фрагментов ботов.
+    # Создаём, если нет; дописываем import, если отсутствует; чужое не затираем.
+    run_root mkdir -p "${CADDY_DIR}/conf.d"
+    if [[ ! -f "$CADDY_MAIN" ]]; then
+        printf '# Управляется manage.sh: базовый конфиг + фрагменты ботов в conf.d/\nimport %s/conf.d/*.caddy\n' "$CADDY_DIR" \
+            | run_root tee "$CADDY_MAIN" >/dev/null
+        ok "Создан ${CADDY_MAIN} (импорт conf.d/*.caddy)"
+    elif ! grep -qE "^import[[:space:]]+${CADDY_DIR}/conf\.d/\*\.caddy" "$CADDY_MAIN" 2>/dev/null; then
+        printf '\n# Добавлено manage.sh: фрагменты ботов\nimport %s/conf.d/*.caddy\n' "$CADDY_DIR" \
+            | run_root tee -a "$CADDY_MAIN" >/dev/null
+        warn "В ${CADDY_MAIN} добавлен import conf.d/*.caddy (существующий конфиг сохранён)"
+    fi
+    run_root mkdir -p "$(dirname "$CADDY_SITE")"
+}
+
 cmd_caddy() {
-    local domain template port
+    local domain port
     domain=$(get_webapp_domain)
     port=$(get_port)
-    template="${SCRIPT_DIR}/deploy/Caddyfile"
 
     if [[ -z "$domain" ]]; then
         die "WEBAPP_URL не задан в ${ENV_FILE}. Укажите публичный HTTPS-URL, например:
@@ -773,35 +843,31 @@ cmd_caddy() {
     if [[ "$port" == "0" ]]; then
         die "WEBAPP_PORT=0 — веб-сервер бота отключён, Caddy проксировать некуда"
     fi
-    [[ -f "$template" ]] || die "Не найден ${template} (обновите код: ./manage.sh update)"
+    if [[ "$port" == "80" || "$port" == "443" ]]; then
+        die "WEBAPP_PORT=${port} — этот порт нужен Caddy для HTTPS и редиректов.
+Смените порт бота (например, 8080) в ${ENV_FILE} и перезапустите: ./manage.sh restart"
+    fi
 
-    info "Настройка Caddy для домена: ${domain} -> 127.0.0.1:${port}"
+    info "Настройка Caddy для ${INSTANCE}: ${domain} -> 127.0.0.1:${port}"
     info "Для выпуска сертификата Let's Encrypt нужны открытые порты 80 и 443 и DNS-запись на этот сервер."
 
     install_caddy
+    ensure_main_caddyfile
 
-    local caddyfile="/etc/caddy/Caddyfile"
-    run_root mkdir -p /etc/caddy
-    run_root tee "$caddyfile" >/dev/null < "$template"
-    ok "Конфиг: ${caddyfile}"
+    # Свой фрагмент — другие боты пишут свои, не конфликтуя.
+    printf '%s {\n\treverse_proxy 127.0.0.1:%s\n}\n' "$domain" "$port" \
+        | run_root tee "$CADDY_SITE" >/dev/null
+    ok "Фрагмент: ${CADDY_SITE} (${domain} -> 127.0.0.1:${port})"
 
-    local dropin_dir="/etc/systemd/system/caddy.service.d"
-    run_root mkdir -p "$dropin_dir"
-    printf '[Service]\nEnvironment=WEBAPP_DOMAIN=%s\nEnvironment=WEBAPP_PORT=%s\n' \
-        "$domain" "$port" | run_root tee "${dropin_dir}/webapp.conf" >/dev/null
-
-    # Проверяем конфиг с теми же env, что получит systemd (иначе валидируются дефолты localhost:8080)
-    run_root env WEBAPP_DOMAIN="$domain" WEBAPP_PORT="$port" \
-        caddy validate --config "$caddyfile" --adapter caddyfile \
-        || die "Конфиг Caddy некорректен — проверьте ${caddyfile}"
+    run_root caddy validate --config "$CADDY_MAIN" --adapter caddyfile \
+        || die "Конфиг Caddy некорректен — проверьте ${CADDY_MAIN} и ${CADDY_SITE}"
 
     if systemd_available; then
-        run_root systemctl daemon-reload
         run_root systemctl enable --now caddy >/dev/null 2>&1 || true
-        run_root systemctl restart caddy
-        ok "Caddy запущен (systemd)"
+        run_root systemctl reload caddy >/dev/null 2>&1 || run_root systemctl restart caddy
+        ok "Caddy перезапущен (systemd)"
     else
-        warn "systemd не найден — запустите Caddy вручную: caddy run --config ${caddyfile}"
+        warn "systemd не найден — запустите Caddy вручную: caddy run --config ${CADDY_MAIN}"
     fi
 
     info "Жду ответа https://${domain}/healthz (до ${HEALTH_TIMEOUT}с)..."
@@ -819,6 +885,7 @@ cmd_caddy() {
     warn "HTTPS не ответил за ${HEALTH_TIMEOUT}с. Проверьте:"
     dim "  • DNS ${domain} указывает на IP этого сервера"
     dim "  • порты 80/443 открыты (firewall)"
+    dim "  • фрагмент бота: ${CADDY_SITE}"
     dim "  • логи Caddy: journalctl -u caddy -n 50 --no-pager"
     return 1
 }
@@ -833,6 +900,18 @@ cmd_uninstall() {
         systemctl disable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
         rm -f "$SERVICE_FILE" && systemctl daemon-reload
         ok "systemd-сервис удалён"
+    fi
+
+    if [[ -f "$CADDY_SITE" ]]; then
+        if confirm "Удалить Caddy-фрагмент ${CADDY_SITE} для ${INSTANCE}?" y; then
+            run_root rm -f "$CADDY_SITE"
+            if systemd_available && command -v caddy >/dev/null 2>&1; then
+                run_root systemctl reload caddy >/dev/null 2>&1 || true
+            fi
+            ok "Caddy-фрагмент удалён (${INSTANCE})"
+        else
+            info "Caddy-фрагмент оставлен: ${CADDY_SITE}"
+        fi
     fi
 
     if confirm "Удалить виртуальное окружение (.venv)?" n; then
@@ -856,10 +935,17 @@ cmd_help() {
     cat <<EOF
 Управление Telegram-ботом пикфлоуметрии
 
-Использование: ./manage.sh <команда>
+Использование: ./manage.sh [--instance ИМЯ] <команда>
 
 Быстрая установка с нуля (клонирует в ${INSTALL_DIR_DEFAULT}):
   curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | bash -s -- install
+
+Несколько ботов на одном сервере:
+  Каждый бот — отдельный каталог со своим .env. Имя инстанса берётся из имени
+  каталога (или флагами --instance / RASPISANIE_INSTANCE) и разводит systemd-юнит
+  (${LEGACY_SERVICE_NAME}-<instance>), PID-файл и фрагмент Caddy
+  (/etc/caddy/conf.d/<instance>.caddy). Caddy ставится один, слушает 80/443,
+  а боты — на уникальных портах (8080, 8081, ...) и WEBAPP_HOST=127.0.0.1.
 
 Команды:
   install     Полная установка: venv, зависимости, .env, systemd (интерактивно).
@@ -874,11 +960,13 @@ cmd_help() {
   restore     Восстановление из последнего бэкапа
   doctor      Диагностика: venv, зависимости, .env, сервис, /healthz
   caddy       HTTPS для Mini App: ставит Caddy, берёт домен из WEBAPP_URL
-  uninstall   Остановка + удаление сервиса (с вопросами)
+  uninstall   Остановка + удаление сервиса и Caddy-фрагмента (с вопросами)
   help        Эта справка
 
-Флаги:
-  --no-color  Отключить цвета
+Флаги и переменные:
+  --instance ИМЯ        Имя инстанса (по умолчанию — имя каталога)
+  RASPISANIE_INSTANCE   То же через переменную окружения
+  --no-color            Отключить цвета
 EOF
 }
 
@@ -917,19 +1005,30 @@ cmd_bootstrap_install() {
 
 # --- main ----------------------------------------------------------------------
 main() {
-    # --no-color распознаётся в любой позиции (не только первой)
-    local args=() no_color=false arg
-    for arg in "$@"; do
+    # --no-color распознаётся в любой позиции; --instance ИМЯ — имя инстанса.
+    local args=() no_color=false instance="" arg
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
         if [[ "$arg" == "--no-color" ]]; then
             no_color=true
+            shift
+        elif [[ "$arg" == "--instance" ]]; then
+            [[ -n "${2:-}" ]] || die "--instance требует имя"
+            instance="$2"
+            shift 2
+        elif [[ "$arg" == --instance=* ]]; then
+            instance="${arg#*=}"
+            shift
         else
             args+=("$arg")
+            shift
         fi
     done
     if [[ "$no_color" == "true" ]]; then
         set_colors off
         export NO_COLOR=1
     fi
+    [[ -n "$instance" ]] && init_instance "$instance"
     if [[ ${#args[@]} -gt 0 ]]; then
         set -- "${args[@]}"
     else

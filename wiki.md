@@ -90,7 +90,7 @@ peakflow/
 | `TARGET_PEF` | ❌ | `260` | Целевая ПСВ от врача (fallback для БД) |
 | `DB_PATH` | ❌ | `peakflow.db` | Путь к SQLite-файлу |
 | `TZ_OFFSET` | ❌ | `5` (UTC+5) | Смещение часового пояса в часах |
-| `WEBAPP_HOST` | ❌ | `0.0.0.0` | Адрес прослушивания веб-сервера Mini App |
+| `WEBAPP_HOST` | ❌ | `127.0.0.1` | Адрес прослушивания веб-сервера Mini App (только через reverse proxy) |
 | `WEBAPP_PORT` | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
 | `WEBAPP_URL` | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
 
@@ -718,7 +718,7 @@ aiogram (отдельного сервиса/порта процессов не�
 - Фронтенд: таб «⚙️ Настройки» (скрыт у ребёнка), скачивание через fetch+blob.
 
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
-`0.0.0.0`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
+`127.0.0.1`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
 (публичный HTTPS-URL; пусто — кнопка Mini App не добавляется). Health-check
 `GET /healthz` используется командами `manage.sh status`/`doctor`.
 
@@ -733,21 +733,24 @@ curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | 
 
 | Команда | Назначение |
 |---------|-----------|
-| `install` | venv (`.venv`), зависимости, интерактивный `.env`, systemd-сервис `peakflow-bot` |
+| `install` | venv (`.venv`), зависимости, интерактивный `.env`, systemd-сервис `peakflow-bot-<instance>` |
 | `update` | `git pull` с бэкапом и откатом при неудачном health-check |
 | `start` / `stop` / `restart` | Управление сервисом или ручным процессом |
 | `status` | Статус systemd/процесса + health-check `/healthz` |
-| `logs` | `journalctl -u peakflow-bot -f` или `tail -f logs/bot.log` |
+| `logs` | `journalctl -u peakflow-bot-<instance> -f` или `tail -f logs/bot.log` |
 | `backup` | Бэкап БД (`.backup`) + `.env` в `backups/` (хранит последние 10) |
 | `restore` | Восстановление из последнего бэкапа |
 | `doctor` | Проверка venv, зависимостей, `.env`, сервиса, `/healthz` и HTTPS |
-| `caddy` | HTTPS для Mini App: Caddy + Let's Encrypt по домену из `WEBAPP_URL` |
-| `uninstall` | Остановка и удаление сервиса (с подтверждениями) |
-| `help` | Справка; флаг `--no-color` отключает цвета |
+| `caddy` | HTTPS для Mini App: общий Caddy + Let's Encrypt, фрагмент `/etc/caddy/conf.d/<instance>.caddy` по домену из `WEBAPP_URL` |
+| `uninstall` | Остановка и удаление сервиса и Caddy-фрагмента (с подтверждениями) |
+| `help` | Справка; `--no-color`, `--instance ИМЯ`/`RASPISANIE_INSTANCE` |
 
-systemd-юнит — `peakflow-bot` с `Restart=on-failure`, `RestartSec=10`,
-`ExecStart=.../.venv/bin/python bot.py`. HTTPS обеспечивает `deploy/Caddyfile`
-(`reverse_proxy 127.0.0.1:$WEBAPP_PORT`) через `./manage.sh caddy`.
+systemd-юнит — `peakflow-bot-<instance>` (`<instance>` = имя каталога или
+`--instance`) с `Restart=on-failure`, `RestartSec=10`,
+`ExecStart=.../.venv/bin/python bot.py`. HTTPS обеспечивает общий Caddy: база
+`/etc/caddy/Caddyfile` импортирует `conf.d/*.caddy`, каждый бот пишет свой
+фрагмент (`reverse_proxy 127.0.0.1:$WEBAPP_PORT`) через `./manage.sh caddy`
+(шаблон-справка — `deploy/Caddyfile.site`).
 
 Новые зависимости SP1: `fastapi==0.141.1`, `uvicorn==0.52.4`; для тестов —
 `httpx==0.28.1` (`requirements-dev.txt`).

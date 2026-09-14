@@ -123,7 +123,7 @@ DB_PATH=peakflow.db
 | `TARGET_PEF` | int | ❌ | `260` | Целевая ПСВ от врача (л/мин) |
 | `DB_PATH` | string | ❌ | `peakflow.db` | Путь к SQLite файлу |
 | `TZ_OFFSET` | int | ❌ | `5` | Смещение часового пояса от UTC в часах |
-| `WEBAPP_HOST` | string | ❌ | `0.0.0.0` | Адрес прослушивания веб-сервера Mini App |
+| `WEBAPP_HOST` | string | ❌ | `127.0.0.1` | Адрес прослушивания веб-сервера Mini App (только через reverse proxy) |
 | `WEBAPP_PORT` | int | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
 | `WEBAPP_URL` | string | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
 
@@ -401,9 +401,10 @@ curl -fsSL https://raw.githubusercontent.com/itdevlog/peakflow/main/manage.sh | 
 
 Скрипт клонирует репозиторий (по умолчанию в `/opt/peakflow`), создаёт
 venv `.venv`, ставит зависимости, интерактивно настраивает `.env` и предлагает
-systemd-сервис `peakflow-bot` (`Restart=on-failure`). Управление:
+systemd-сервис `peakflow-bot-<instance>` (`Restart=on-failure`). Управление:
 `install`, `update`, `start`, `stop`, `restart`, `status`, `logs`, `backup`,
-`restore`, `doctor`, `caddy`, `uninstall`, `help` (флаг `--no-color`).
+`restore`, `doctor`, `caddy`, `uninstall`, `help` (флаг `--no-color`,
+`--instance ИМЯ`/`RASPISANIE_INSTANCE` — имя инстанса для нескольких ботов).
 
 ### Веб-версия (Mini App)
 
@@ -411,8 +412,10 @@ systemd-сервис `peakflow-bot` (`Restart=on-failure`). Управление
 в том же процессе и event loop, что и aiogram. Слой включается при
 `WEBAPP_PORT > 0`; health-check — `GET /healthz` (статус и `manage.sh doctor`
 проверяют `http://localhost:$WEBAPP_PORT/healthz`). Переменные `.env`:
-`WEBAPP_HOST`, `WEBAPP_PORT`, `WEBAPP_URL`. HTTPS для Mini App даёт
-`deploy/Caddyfile` через `./manage.sh caddy` (Let's Encrypt).
+`WEBAPP_HOST` (по умолчанию `127.0.0.1`), `WEBAPP_PORT`, `WEBAPP_URL`. HTTPS для
+Mini App даёт общий Caddy через `./manage.sh caddy` (Let's Encrypt): каждый бот
+пишет фрагмент `/etc/caddy/conf.d/<instance>.caddy`, базовый `/etc/caddy/Caddyfile`
+импортирует `conf.d/*.caddy` (шаблон-справка — `deploy/Caddyfile.site`).
 
 ### Настройка
 

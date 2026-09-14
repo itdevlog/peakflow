@@ -1,0 +1,14 @@
+# Шаблон фрагмента Caddy для одного бота (не используется напрямую).
+#
+# manage.sh caddy генерирует /etc/caddy/conf.d/<instance>.caddy из WEBAPP_URL и
+# WEBAPP_PORT, поэтому плейсхолдеры ниже — только справка:
+#
+#   {$WEBAPP_DOMAIN:localhost} {
+#       reverse_proxy 127.0.0.1:{$WEBAPP_PORT:8080}
+#   }
+#
+# Базовый /etc/caddy/Caddyfile один на сервер и импортирует conf.d/*.caddy:
+#   import /etc/caddy/conf.d/*.caddy
+#
+# Несколько ботов: у каждого свой фрагмент со своим доменом и своим портом
+# (Caddy один раз слушает 80/443 и выпускает сертификаты на все домены).
