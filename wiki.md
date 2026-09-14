@@ -696,6 +696,15 @@ aiogram (отдельного сервиса/порта процессов не�
 - Кнопка «💨 Дневник» ставится в `bot._setup_menu_button()`, если задан
   `WEBAPP_URL`. Наружу биндить только за Caddy (HTTPS обязателен для initData).
 
+#### Mini App (SP2b): запись
+
+- `POST /api/measurements` — добавить замер (`{pef}`, 100–690): авто-время суток,
+  замена авто-записи, ответ `{id, pef, tod, zone, pct, diff}`; уведомляет родителей.
+- `PATCH /api/measurements/{id}` / `DELETE /api/measurements/{id}` — только родители.
+- `POST /api/measurements/{id}/note` — заметка (≤200 символов), обе роли.
+- `web/notify.py` — Telegram-уведомления (паритет с ботом, no-op без бота).
+- `bot._web_services` передаёт `bot` в web-слой.
+
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `0.0.0.0`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
 (публичный HTTPS-URL; пусто — кнопка Mini App не добавляется). Health-check
