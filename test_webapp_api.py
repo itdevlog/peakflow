@@ -126,3 +126,26 @@ def test_api_status_has_today():
     body = _client().get("/api/status", headers=_auth(CHILD_ID)).json()
     assert len(body["today"]) == 1
     assert body["last"]["pef_value"] == 240
+
+
+def test_api_chart_current_month_excludes_auto_and_has_zones():
+    _setup_db()
+    add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID)
+    add_measurement(TEST_DB, 180, "evening", CHILD_ID, CHILD_ID, source="auto")
+    body = _client().get("/api/chart", headers=_auth(CHILD_ID)).json()
+    assert body["target_pef"] == 260
+    assert body["zones"]["green"] == 80
+    assert body["zones"]["yellow"] == 60
+    assert len(body["points"]) == 1
+    assert body["points"][0]["pef"] == 250
+    assert body["points"][0]["tod"] == "morning"
+
+
+def test_api_chart_explicit_month_and_nav():
+    _setup_db()
+    add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID)
+    body = _client().get("/api/chart?year=2020&month=1", headers=_auth(CHILD_ID)).json()
+    assert body["month"] == "2020-01"
+    assert body["points"] == []
+    assert body["can_next"] is True
+    assert body["can_prev"] is False

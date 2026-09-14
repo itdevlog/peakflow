@@ -1,14 +1,23 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
+from datetime import datetime, timedelta, timezone
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from database import (
+    get_available_months,
     get_last_measurement,
+    get_measurements_for_month,
     get_measurements_paginated,
     get_setting,
     get_today_measurements,
 )
 from web.auth import get_user_from_init_data
+
+MONTH_NAMES = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
 
 
 def _effective_target(config) -> int:
@@ -83,5 +92,42 @@ def create_app(services: dict) -> FastAPI:
             config.DB_PATH, config.CHILD_ID, page, per_page
         )
         return {"items": items, "page": page, "total": total, "total_pages": total_pages}
+
+    @app.get("/api/chart")
+    async def chart(
+        year: int | None = Query(None, ge=2000, le=2100),
+        month: int | None = Query(None, ge=1, le=12),
+        auth: dict = Depends(require_user),
+    ):
+        offset = getattr(config, "TZ_OFFSET", 0)
+        now = datetime.now(timezone(timedelta(hours=offset)))
+        if year is None or month is None:
+            year, month = now.year, now.month
+        rows = get_measurements_for_month(config.DB_PATH, config.CHILD_ID, year, month)
+        points = [
+            {
+                "date": str(r["measured_at"])[:10],
+                "tod": r["time_of_day"],
+                "pef": r["pef_value"],
+                "source": r.get("source") or "manual",
+            }
+            for r in rows
+        ]
+        available = get_available_months(config.DB_PATH, config.CHILD_ID)
+        requested = (year, month)
+        return {
+            "points": points,
+            "target_pef": _effective_target(config),
+            "zones": {
+                "green": getattr(config, "ZONE_GREEN", 80),
+                "yellow": getattr(config, "ZONE_YELLOW", 60),
+                "red": getattr(config, "ZONE_RED", 50),
+            },
+            "month": f"{year:04d}-{month:02d}",
+            "title": f"{MONTH_NAMES[month - 1]} {year}",
+            "can_prev": any(m < requested for m in available),
+            "can_next": any(m > requested for m in available),
+            "available_months": [f"{y:04d}-{m:02d}" for y, m in available],
+        }
 
     return app
