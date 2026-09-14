@@ -1042,6 +1042,6 @@ git commit -m "docs: Mini App write ops (SP2b)"
 - §8 Тесты → Tasks 1, 3, 4, 5 (+ static test in 6).
 - §9 Файлы — все покрыты; §10 безопасность — auth/limits/уведомления плоским текстом.
 
-**2. Placeholder scan:** в коде шагов нет TBD/TODO. (Task 1 Step 3 warns against a leftover `_send_all`/`_LAST_TEXT` scaffold; the final file is defined.)
+**2. Placeholder scan:** в коде шагов нет TBD/TODO; все блоки дословные.
 
 **3. Type consistency:** `create_app(services)` сохраняет сигнатуру; `require_parent` зависит от `require_user`; ключи ответа (`id/pef/tod/zone/pct/diff`, `deleted`, `note/truncated`) совпадают между API (Tasks 3–5) и фронтендом (Tasks 6–7); `_auto_time_of_day` monkeypatch-ится в тестах; `notify_added(bot, config, who, pef, tod, target)` единообразно в Task 1 и Task 3.
