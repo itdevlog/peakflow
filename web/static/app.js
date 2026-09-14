@@ -19,7 +19,7 @@ function zoneClass(pct) {
 const state = {
   target: 0, role: null,
   chart: { year: null, month: null }, history: { page: 1 },
-  form: { open: false, step: "h", hundreds: null, mode: "add", editId: null },
+  form: { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false },
 };
 
 async function api(path, opts = {}) {
@@ -86,6 +86,7 @@ async function loadHistory(page = 1) {
   const h = await api(`/api/history?page=${page}&per_page=10`);
   const el = $("screen-history");
   if (!h.items.length) {
+    if (page > 1) { return loadHistory(page - 1); }
     el.innerHTML = `<div class="hint">История пуста</div>`;
     return;
   }
@@ -327,14 +328,17 @@ function renderForm() {
   if (back) back.onclick = () => { f.step = "h"; f.hundreds = null; renderForm(); };
 }
 
-function closeForm() { state.form.open = false; renderForm(); }
+function closeForm() { state.form = { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false }; renderForm(); }
 
 function openForm(mode, editId = null) {
-  state.form = { open: true, step: "h", hundreds: null, mode, editId };
+  state.form = { open: true, step: "h", hundreds: null, mode, editId, busy: false };
   renderForm();
 }
 
 async function submitMeasurement(pef, mode, editId) {
+  if (state.form.busy) return;
+  state.form.busy = true;
+  $("form-overlay").style.pointerEvents = "none";
   try {
     if (mode === "edit") {
       await api(`/api/measurements/${editId}`, { method: "PATCH", body: { pef } });
@@ -345,9 +349,11 @@ async function submitMeasurement(pef, mode, editId) {
       renderResult(res);
     }
   } catch (e) { closeForm(); showError(e.message); }
+  finally { $("form-overlay").style.pointerEvents = ""; }
 }
 
 function renderResult(res) {
+  state.form.busy = false;
   const ov = $("form-overlay");
   ov.innerHTML = `<div class="form-box">
     <h3>${res.tod === "morning" ? "☀️ Утро" : "🌙 Вечер"}</h3>
