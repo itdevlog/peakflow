@@ -1,7 +1,9 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
+import logging
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -33,6 +35,8 @@ from database import (
 from report import build_csv_content as _build_csv, month_title, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
+
+logger = logging.getLogger(__name__)
 
 MONTH_NAMES = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -107,6 +111,12 @@ def _who(config, added_by: int) -> str:
     if added_by in (getattr(config, "PARENT_IDS", []) or []):
         return "Родитель"
     return "Кто-то"
+
+
+def _content_disposition(filename: str) -> str:
+    """RFC 5987 attachment header safe for non-ASCII names."""
+    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii") or "export"
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=utf-8''{quote(filename)}"
 
 
 def create_app(services: dict) -> FastAPI:
@@ -322,7 +332,7 @@ def create_app(services: dict) -> FastAPI:
         return Response(
             content=content.encode("utf-8-sig"),
             media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": _content_disposition(filename)},
         )
 
     @app.get("/api/backup")
@@ -332,7 +342,8 @@ def create_app(services: dict) -> FastAPI:
         os.close(fd)
         try:
             backup_db(config.DB_PATH, dest)
-        except Exception:
+        except Exception as e:
+            logger.error("Ошибка бэкапа: %s", e)
             if os.path.exists(dest):
                 os.remove(dest)
             raise HTTPException(500, "Не удалось создать бэкап")

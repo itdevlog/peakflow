@@ -45,6 +45,12 @@ def _client():
     return TestClient(create_app({"config": _config(), "bot": None}))
 
 
+def _client_named(child_name):
+    cfg = _config()
+    cfg.CHILD_NAME = child_name
+    return TestClient(create_app({"config": cfg, "bot": None}))
+
+
 def _auth(uid: int) -> dict:
     return {"X-Telegram-Init-Data": make_init_data(uid)}
 
@@ -113,6 +119,14 @@ def test_csv_no_data_404():
 def test_export_periods():
     body = _client().get("/api/export/periods", headers=_auth(PARENT_IDS[0])).json()
     assert body["months"] == ["2026-08", "2026-09"]
+
+
+def test_csv_cyrillic_filename_ok():
+    r = _client_named("Ребёнок").get("/api/export/csv?period=all", headers=_auth(PARENT_IDS[0]))
+    assert r.status_code == 200, r.text
+    cd = r.headers["content-disposition"]
+    assert "filename*=utf-8''" in cd
+    assert "attachment" in cd
 
 
 def test_backup_returns_sqlite():
