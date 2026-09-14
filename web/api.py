@@ -1,14 +1,16 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from database import (
     add_measurement,
+    backup_db,
     delete_measurement,
     edit_measurement,
     get_all_measurements,
@@ -16,6 +18,7 @@ from database import (
     get_last_measurement,
     get_last_of_tod,
     get_last_two_weeks,
+    get_measurements_between,
     get_measurements_for_month,
     get_measurements_paginated,
     get_reminder_hours,
@@ -27,6 +30,7 @@ from database import (
     set_note,
     set_setting,
 )
+from report import build_csv_content as _build_csv, month_title, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
 
@@ -83,6 +87,26 @@ class RemindersIn(BaseModel):
 
 
 REMINDER_KEYS = ("child_morning", "child_evening", "parent_morning", "parent_evening")
+
+
+def _today(config) -> str:
+    offset = getattr(config, "TZ_OFFSET", 0)
+    return datetime.now(timezone(timedelta(hours=offset))).strftime("%Y-%m-%d")
+
+
+def _month_bounds(year: int, month: int) -> tuple[str, str]:
+    start = f"{year:04d}-{month:02d}-01"
+    first_next = (datetime(year, month, 28) + timedelta(days=4)).replace(day=1)
+    last_day = first_next - timedelta(days=1)
+    return start, last_day.strftime("%Y-%m-%d")
+
+
+def _who(config, added_by: int) -> str:
+    if added_by == getattr(config, "CHILD_ID", 0):
+        return getattr(config, "CHILD_NAME", "Ребёнок")
+    if added_by in (getattr(config, "PARENT_IDS", []) or []):
+        return "Родитель"
+    return "Кто-то"
 
 
 def create_app(services: dict) -> FastAPI:
@@ -266,6 +290,55 @@ def create_app(services: dict) -> FastAPI:
         for key in REMINDER_KEYS:
             set_setting(config.DB_PATH, f"reminder_{key}", str(getattr(body, key)))
         return {"reminder_hours": get_reminder_hours(config.DB_PATH)}
+
+    @app.get("/api/export/periods")
+    async def export_periods(auth: dict = Depends(require_parent)):
+        months = [f"{y:04d}-{m:02d}" for y, m in get_available_months(config.DB_PATH, config.CHILD_ID)]
+        return {"months": months, "latest": months[-1] if months else None}
+
+    @app.get("/api/export/csv")
+    async def export_csv(period: str = "all", auth: dict = Depends(require_parent)):
+        target = _effective_target(config)
+        child = getattr(config, "CHILD_NAME", "Ребёнок")
+        stamp = datetime.now(timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))).strftime("%Y%m%d_%H%M")
+        if period == "all":
+            rows = get_measurements_between(config.DB_PATH, config.CHILD_ID, "2000-01-01", _today(config))
+            filename = f"peakflow_{child}_{stamp}.csv"
+        else:
+            parsed = parse_month(period)
+            if not parsed:
+                raise HTTPException(422, "Неверный период")
+            y, m = parsed
+            start, end = _month_bounds(y, m)
+            rows = get_measurements_between(config.DB_PATH, config.CHILD_ID, start, end)
+            filename = f"peakflow_{child}_{y:04d}-{m:02d}.csv"
+        if not rows:
+            raise HTTPException(404, "Нет записей за период")
+        stats = get_stats(config.DB_PATH, config.CHILD_ID)
+        content = _build_csv(rows, target, child, stats=stats,
+                             display_name=lambda uid: _who(config, uid),
+                             zone_green=getattr(config, "ZONE_GREEN", 80),
+                             zone_yellow=getattr(config, "ZONE_YELLOW", 60))
+        return Response(
+            content=content.encode("utf-8-sig"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/backup")
+    async def backup(background: BackgroundTasks, auth: dict = Depends(require_parent)):
+        stamp = datetime.now(timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))).strftime("%Y%m%d_%H%M")
+        fd, dest = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            backup_db(config.DB_PATH, dest)
+        except Exception:
+            if os.path.exists(dest):
+                os.remove(dest)
+            raise HTTPException(500, "Не удалось создать бэкап")
+        background.add_task(os.remove, dest)
+        return FileResponse(dest, media_type="application/octet-stream",
+                            filename=f"peakflow_backup_{stamp}.db")
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
