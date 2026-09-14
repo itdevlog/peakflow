@@ -23,6 +23,7 @@ from database import (
     get_today_measurements,
     has_today_measurement,
     replace_auto_measurement,
+    set_note,
 )
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
@@ -62,6 +63,10 @@ def _pef_zone(pef: int, target: int, config) -> str:
 
 class MeasurementIn(BaseModel):
     pef: int = Field(ge=100, le=690)
+
+
+class NoteIn(BaseModel):
+    note: str = ""
 
 
 def create_app(services: dict) -> FastAPI:
@@ -217,6 +222,14 @@ def create_app(services: dict) -> FastAPI:
         if not delete_measurement(config.DB_PATH, mid, config.CHILD_ID):
             raise HTTPException(404, "Запись не найдена")
         return {"deleted": True, "id": mid}
+
+    @app.post("/api/measurements/{mid}/note")
+    async def note(mid: int, body: NoteIn, auth: dict = Depends(require_user)):
+        raw = body.note or ""
+        note_text = raw.strip()[:200]
+        if not set_note(config.DB_PATH, mid, note_text, config.CHILD_ID):
+            raise HTTPException(404, "Запись не найдена")
+        return {"id": mid, "note": note_text, "truncated": len(raw.strip()) > 200}
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.isdir(static_dir):
