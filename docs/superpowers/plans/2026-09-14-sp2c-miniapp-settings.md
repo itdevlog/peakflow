@@ -716,7 +716,7 @@ Add routes after `/api/settings/reminders`:
 
     @app.get("/api/backup")
     async def backup(background: BackgroundTasks, auth: dict = Depends(require_parent)):
-        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        stamp = datetime.now(timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))).strftime("%Y%m%d_%H%M")
         fd, dest = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
