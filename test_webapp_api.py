@@ -14,7 +14,6 @@ from web.api import create_app
 
 TEST_DB = "test_peakflow.db"
 BOT_TOKEN = "123456:ABC-DEF_token"
-SECRET = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
 CHILD_ID = 111
 PARENT_IDS = [222, 333]
 

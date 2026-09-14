@@ -49,7 +49,7 @@ from database import (
 
 import config as app_config
 
-from web.server import run_webapp, wait_forever
+from web.server import run_webapp
 
 # Часовой пояс из config (UTC+N)
 TZ = timezone(timedelta(hours=TZ_OFFSET))

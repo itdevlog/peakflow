@@ -32,7 +32,7 @@ from database import (
     set_note,
     set_setting,
 )
-from report import build_csv_content as _build_csv, month_title, parse_month
+from report import build_csv_content as _build_csv, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
 
@@ -48,7 +48,7 @@ def _effective_target(config) -> int:
     try:
         val = int(get_setting(config.DB_PATH, "target_pef", str(config.TARGET_PEF)))
         return val if val > 0 else 300
-    except (ValueError, Exception):
+    except Exception:
         return getattr(config, "TARGET_PEF", 0) or 300
 
 

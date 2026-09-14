@@ -1,5 +1,4 @@
 """Тесты write-API Mini App (SP2b)."""
-import asyncio
 import hashlib
 import hmac
 import json
