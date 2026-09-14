@@ -194,3 +194,4 @@ def test_static_index_has_settings_screen():
     r = _client().get("/")
     assert 'id="screen-settings"' in r.text
     assert 'data-screen="settings"' in r.text
+    assert 'id="tab-settings" hidden' in r.text
