@@ -183,3 +183,8 @@ def test_static_index_served():
 
 def test_api_not_shadowed_by_static():
     assert _client().get("/api/me").status_code == 403
+
+
+def test_static_index_has_form_overlay():
+    r = _client().get("/")
+    assert 'id="form-overlay"' in r.text

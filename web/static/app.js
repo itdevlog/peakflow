@@ -16,13 +16,23 @@ function zoneClass(pct) {
   return "zone-red";
 }
 
-const state = { target: 0, chart: { year: null, month: null }, history: { page: 1 } };
+const state = {
+  target: 0, role: null,
+  chart: { year: null, month: null }, history: { page: 1 },
+  form: { open: false, step: "h", hundreds: null, mode: "add", editId: null },
+};
 
-async function api(path) {
-  const r = await fetch(path, { headers: { "X-Telegram-Init-Data": tg.initData || "" } });
+async function api(path, opts = {}) {
+  const init = { headers: { "X-Telegram-Init-Data": tg.initData || "" } };
+  if (opts.method) init.method = opts.method;
+  if (opts.body) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(opts.body);
+  }
+  const r = await fetch(path, init);
   if (!r.ok) {
-    const body = await r.json().catch(() => ({ detail: "Ошибка сети" }));
-    throw new Error(body.detail || `HTTP ${r.status}`);
+    const b = await r.json().catch(() => ({ detail: "Ошибка сети" }));
+    throw new Error(b.detail || `HTTP ${r.status}`);
   }
   return r.json();
 }
@@ -60,12 +70,13 @@ async function loadToday() {
   state.target = s.target_pef;
   $("target-badge").textContent = `цель ${s.target_pef}`;
   const el = $("screen-today");
-  if (!s.today.length) {
-    el.innerHTML = (s.last ? `<div class="label">Последний замер</div>` + measureCard(s.last) : "") +
+  const btn = `<button id="add-btn">+ Замер</button>`;
+  const cards = s.today.length
+    ? s.today.map(measureCard).join("")
+    : (s.last ? `<div class="label">Последний замер</div>` + measureCard(s.last) : "") +
       `<div class="hint">Сегодня замеров ещё нет 💨</div>`;
-    return;
-  }
-  el.innerHTML = s.today.map(measureCard).join("");
+  el.innerHTML = btn + cards;
+  $("add-btn").onclick = () => openForm("add");
 }
 
 async function loadHistory(page = 1) {
@@ -263,9 +274,97 @@ async function shiftMonth(delta) {
   await loadChart(Number(y), Number(m));
 }
 
+/* ---- add/edit form (stepwise hundreds → tens) ---- */
+function renderForm() {
+  const ov = $("form-overlay");
+  const f = state.form;
+  if (!f.open) { ov.hidden = true; ov.innerHTML = ""; return; }
+  const title = f.mode === "edit" ? "Изменить ПСВ (л/мин)" : "Выбери ПСВ (л/мин)";
+  let body;
+  if (f.step === "h") {
+    body = `<div class="grid">` +
+      [1, 2, 3, 4, 5, 6].map((h) => `<button data-h="${h}">${h}</button>`).join("") +
+      `</div>`;
+  } else {
+    body = `<div class="form-value">${f.hundreds}__</div><div class="grid">` +
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((d) => `<button data-d="${d}">${String(d * 10).padStart(2, "0")}</button>`).join("") +
+      `</div>`;
+  }
+  ov.innerHTML = `<div class="form-box">
+    <h3>${title}</h3>${body}
+    <div class="form-actions">
+      <button class="secondary" id="form-cancel">Отмена</button>
+      ${f.step === "t" ? `<button class="secondary" id="form-back">‹ Назад</button>` : ""}
+    </div></div>`;
+  ov.hidden = false;
+  ov.querySelectorAll("[data-h]").forEach((b) => b.onclick = () => { f.hundreds = Number(b.dataset.h); f.step = "t"; renderForm(); });
+  ov.querySelectorAll("[data-d]").forEach((b) => b.onclick = () => submitMeasurement(f.hundreds * 100 + Number(b.dataset.d), f.mode, f.editId));
+  $("form-cancel").onclick = closeForm;
+  const back = $("form-back");
+  if (back) back.onclick = () => { f.step = "h"; f.hundreds = null; renderForm(); };
+}
+
+function closeForm() { state.form.open = false; renderForm(); }
+
+function openForm(mode, editId = null) {
+  state.form = { open: true, step: "h", hundreds: null, mode, editId };
+  renderForm();
+}
+
+async function submitMeasurement(pef, mode, editId) {
+  try {
+    if (mode === "edit") {
+      await api(`/api/measurements/${editId}`, { method: "PATCH", body: { pef } });
+      closeForm();
+      await loadHistory(state.history.page);
+    } else {
+      const res = await api("/api/measurements", { method: "POST", body: { pef } });
+      renderResult(res);
+    }
+  } catch (e) { closeForm(); showError(e.message); }
+}
+
+function renderResult(res) {
+  const ov = $("form-overlay");
+  ov.innerHTML = `<div class="form-box">
+    <h3>${res.tod === "morning" ? "☀️ Утро" : "🌙 Вечер"}</h3>
+    <div class="form-value ${zoneClass(res.pct)}">${res.pef} <span class="label">${res.pct}%</span></div>
+    ${res.diff != null ? `<div class="center label">Изменение: ${res.diff > 0 ? "+" : ""}${res.diff}</div>` : ""}
+    <div class="label center">Добавить заметку?</div>
+    <div class="form-actions">
+      <button id="res-note">📝 Да</button>
+      <button class="secondary" id="res-skip">Пропустить</button>
+    </div></div>`;
+  ov.hidden = false;
+  $("res-note").onclick = () => openNote(res.id);
+  $("res-skip").onclick = async () => { closeForm(); await switchTo("today"); };
+}
+
+function openNote(mid) {
+  const ov = $("form-overlay");
+  ov.innerHTML = `<div class="form-box">
+    <h3>Заметка (до 200 символов)</h3>
+    <textarea id="note-input" maxlength="200" rows="3" style="width:100%;box-sizing:border-box"></textarea>
+    <div class="form-actions">
+      <button id="note-save">Сохранить</button>
+      <button class="secondary" id="note-cancel">Отмена</button>
+    </div></div>`;
+  ov.hidden = false;
+  $("note-save").onclick = async () => {
+    const text = $("note-input").value;
+    try {
+      await api(`/api/measurements/${mid}/note`, { method: "POST", body: { note: text } });
+      closeForm();
+      await switchTo("today");
+    } catch (e) { showError(e.message); }
+  };
+  $("note-cancel").onclick = () => { closeForm(); switchTo("today"); };
+}
+
 async function boot() {
   try {
     const me = await api("/api/me");
+    state.role = me.role;
     $("child-name").textContent = me.child_name || "Дневник";
   } catch (e) {
     showError("Откройте приложение через Telegram");
