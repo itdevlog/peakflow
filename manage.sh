@@ -908,7 +908,7 @@ cmd_bootstrap_install() {
         git clone "$REPO_URL" "$install_dir" || die "Не удалось клонировать репозиторий"
     fi
 
-    if [[ "${NO_COLOR:-}" == "1" ]]; then
+    if [[ -n "${NO_COLOR:-}" ]]; then
         exec bash "$install_dir/manage.sh" --no-color install
     else
         exec bash "$install_dir/manage.sh" install
@@ -928,6 +928,7 @@ main() {
     done
     if [[ "$no_color" == "true" ]]; then
         set_colors off
+        export NO_COLOR=1
     fi
     if [[ ${#args[@]} -gt 0 ]]; then
         set -- "${args[@]}"
