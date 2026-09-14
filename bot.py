@@ -29,6 +29,12 @@ from config import (
     WEBAPP_PORT, WEBAPP_URL,
     is_parent, is_child, get_effective_target,
 )
+from report import (
+    MONTH_NAMES, month_title, tod_emoji, tod_label, pct_of,
+    parse_month as parse_csv_month,
+    build_csv_content as _report_build_csv,
+    pef_zone as _report_pef_zone,
+)
 from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
@@ -138,26 +144,9 @@ def is_reminder_minute(minute: int) -> bool:
     return minute < 2
 
 
-def tod_emoji(tod: str) -> str:
-    return "☀️" if tod == "morning" else "🌙"
-
-
-def tod_label(tod: str) -> str:
-    return "Утро" if tod == "morning" else "Вечер"
-
-
 def pef_zone(value: int, target: int) -> tuple[str, str]:
-    pct = (value / target) * 100 if target else 100
-    if pct >= ZONE_GREEN:
-        return "🟢", "Зелёная"
-    elif pct >= ZONE_YELLOW:
-        return "🟡", "Жёлтая"
-    else:
-        return "🔴", "Красная"
-
-
-def pct_of(value: int, target: int) -> int:
-    return int((value / target) * 100) if target else 100
+    """Зоны с порогами из config (обёртка над report.pef_zone)."""
+    return _report_pef_zone(value, target, ZONE_GREEN, ZONE_YELLOW)
 
 
 async def answer_callback(callback: types.CallbackQuery):
@@ -929,49 +918,12 @@ async def _send_settings_from_message(message: types.Message):
 # ---------------------------------------------------------------------------
 # EXPORT CSV — period selection screen
 # ---------------------------------------------------------------------------
-def build_csv_content(rows: list, target: int, include_summary: bool = True) -> str:
-    """CSV text for measurements (oldest first). Note + source columns included."""
-    lines = ["Дата,Время,Период,ПСВ (л/мин),% от нормы,Зона,Добавил,Заметка,Источник"]
-    for m in rows:  # rows must be oldest-first
-        ts = m["measured_at"].replace("T", " ")
-        date_part = ts[:10]
-        time_part = ts[11:16]
-        pct = pct_of(m["pef_value"], target)
-        zone_emoji, zone_name = pef_zone(m["pef_value"], target)
-        who = _user_display_name(m.get("added_by", 0))
-        note = (m.get("note") or "").replace(",", ";") or "—"
-        src = "авто" if m.get("source") == "auto" else "ручной"
-        lines.append(
-            f"{date_part},{time_part},{tod_label(m['time_of_day'])},"
-            f"{m['pef_value']},{pct}%,{zone_name},{who},{note},{src}"
-        )
-
-    csv_content = "\n".join(lines) + "\n"
-
-    if include_summary:
-        stats = get_stats(DB_PATH, CHILD_ID)
-        summary = (
-            f"\n# Статистика\n"
-            f"# Всего замеров: {stats.get('total', 0)}\n"
-            f"# Среднее: {stats.get('avg', 0):.0f} л/мин\n"
-            f"# Мин: {stats.get('min', 0)} | Макс: {stats.get('max', 0)}\n"
-            f"# Цель: {target} л/мин\n"
-            f"# Ребёнок: {CHILD_NAME}\n"
-        )
-        csv_content = summary + csv_content
-    return csv_content
-
-
-def parse_csv_month(payload: str):
-    """'csv_2026-08' → (2026, 8); invalid → None."""
-    try:
-        y, m = payload.replace("csv_", "").split("-")
-        y, m = int(y), int(m)
-        if 1 <= m <= 12 and 2000 <= y <= 2100:
-            return y, m
-    except (ValueError, AttributeError):
-        pass
-    return None
+def build_csv_content(rows, target, include_summary=True):
+    stats = get_stats(DB_PATH, CHILD_ID) if include_summary else None
+    return _report_build_csv(rows, target, CHILD_NAME, stats=stats,
+                             include_summary=include_summary,
+                             display_name=_user_display_name,
+                             zone_green=ZONE_GREEN, zone_yellow=ZONE_YELLOW)
 
 
 def kb_export_periods(months: list) -> InlineKeyboardMarkup:
@@ -1136,14 +1088,6 @@ async def _show_history_from_callback(callback: types.CallbackQuery):
 # ---------------------------------------------------------------------------
 # CHART — month navigation
 # ---------------------------------------------------------------------------
-MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-               "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
-
-
-def month_title(year: int, month: int) -> str:
-    return f"{MONTH_NAMES[month - 1]} {year}"
-
-
 def parse_chart_month(payload: str):
     """'chart_2026-08' → (2026, 8); invalid → None."""
     try:
