@@ -451,28 +451,51 @@ async function loadSettings() {
     b.onclick = () => changeHour(b.dataset.hour, h));
 }
 
+function openNumberEditor(title, current, min, max, onSave) {
+  const ov = $("form-overlay");
+  ov.innerHTML = `<div class="form-box">
+    <h3>${esc(title)}</h3>
+    <input id="num-input" type="number" inputmode="numeric" min="${min}" max="${max}"
+      value="${Number(current)}" style="width:100%;box-sizing:border-box;font-size:22px;padding:8px">
+    <div class="label center">Диапазон: ${min}–${max}</div>
+    <div class="form-actions">
+      <button id="num-save">Сохранить</button>
+      <button class="secondary" id="num-cancel">Отмена</button>
+    </div></div>`;
+  ov.hidden = false;
+  const input = $("num-input");
+  input.focus();
+  $("num-cancel").onclick = () => { ov.hidden = true; ov.innerHTML = ""; };
+  $("num-save").onclick = async () => {
+    const raw = input.value;
+    if (raw === "") { showError(`Диапазон: ${min}–${max}`); return; }
+    const val = Number(raw);
+    if (!(val >= min && val <= max)) { showError(`Диапазон: ${min}–${max}`); return; }
+    ov.hidden = true; ov.innerHTML = "";
+    await onSave(val);
+  };
+}
+
 async function changeTarget() {
-  const cur = await api("/api/settings");
-  const input = window.prompt("Целевая ПСВ (100–800)", String(cur.target_pef));
-  if (input == null) return;
-  const val = Number(input);
-  if (!(val >= 100 && val <= 800)) { showError("Диапазон: 100–800"); return; }
   try {
-    await api("/api/settings/target", { method: "PUT", body: { target_pef: val } });
-    await loadSettings();
+    const cur = await api("/api/settings");
+    openNumberEditor("Целевая ПСВ (л/мин)", cur.target_pef, 100, 800, async (val) => {
+      try {
+        await api("/api/settings/target", { method: "PUT", body: { target_pef: val } });
+        await loadSettings();
+      } catch (e) { showError(e.message); }
+    });
   } catch (e) { showError(e.message); }
 }
 
 async function changeHour(key, hours) {
-  const input = window.prompt("Час (0–23)", String(hours[key]));
-  if (input == null) return;
-  const val = Number(input);
-  if (!(val >= 0 && val <= 23)) { showError("Диапазон: 0–23"); return; }
-  const body = { ...hours, [key]: val };
-  try {
-    await api("/api/settings/reminders", { method: "PUT", body });
-    await loadSettings();
-  } catch (e) { showError(e.message); }
+  openNumberEditor("Час напоминания (0–23)", hours[key], 0, 23, async (val) => {
+    const body = { ...hours, [key]: val };
+    try {
+      await api("/api/settings/reminders", { method: "PUT", body });
+      await loadSettings();
+    } catch (e) { showError(e.message); }
+  });
 }
 
 async function boot() {

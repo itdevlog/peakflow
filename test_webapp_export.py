@@ -129,6 +129,14 @@ def test_csv_cyrillic_filename_ok():
     assert "attachment" in cd
 
 
+def test_csv_filename_with_quote_newline_is_safe():
+    r = _client_named('Ре"бёнок\nX').get("/api/export/csv?period=all", headers=_auth(PARENT_IDS[0]))
+    assert r.status_code == 200, r.text
+    cd = r.headers["content-disposition"]
+    assert "\n" not in cd and "\r" not in cd
+    assert "filename*=utf-8''" in cd
+
+
 def test_backup_returns_sqlite():
     r = _client().get("/api/backup", headers=_auth(PARENT_IDS[0]))
     assert r.status_code == 200

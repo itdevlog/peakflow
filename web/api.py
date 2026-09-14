@@ -115,8 +115,10 @@ def _who(config, added_by: int) -> str:
 
 def _content_disposition(filename: str) -> str:
     """RFC 5987 attachment header safe for non-ASCII names."""
-    ascii_fallback = filename.encode("ascii", "ignore").decode("ascii") or "export"
-    return f"attachment; filename=\"{ascii_fallback}\"; filename*=utf-8''{quote(filename)}"
+    safe = filename.replace("\r", " ").replace("\n", " ").replace('"', "'")
+    ascii_fallback = safe.encode("ascii", "ignore").decode("ascii") or "export"
+    encoded = quote(safe, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=utf-8''{encoded}"
 
 
 def create_app(services: dict) -> FastAPI:
