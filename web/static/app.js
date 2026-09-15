@@ -32,7 +32,17 @@ async function api(path, opts = {}) {
   const r = await fetch(path, init);
   if (!r.ok) {
     const b = await r.json().catch(() => ({ detail: "Ошибка сети" }));
-    throw new Error(b.detail || `HTTP ${r.status}`);
+    let detail = b.detail;
+    if (typeof detail === "string") {
+      try { detail = JSON.parse(detail); } catch (e) {}
+    }
+    if (detail && typeof detail === "object") {
+      const err = new Error(detail.message || `HTTP ${r.status}`);
+      err.detail = detail;
+      err.status = r.status;
+      throw err;
+    }
+    throw new Error(detail || `HTTP ${r.status}`);
   }
   return r.json();
 }
@@ -360,7 +370,7 @@ function renderForm() {
     </div></div>`;
   ov.hidden = false;
   ov.querySelectorAll("[data-h]").forEach((b) => b.onclick = () => { f.hundreds = Number(b.dataset.h); f.step = "t"; renderForm(); });
-  ov.querySelectorAll("[data-d]").forEach((b) => b.onclick = () => submitMeasurement(f.hundreds * 100 + Number(b.dataset.d), f.mode, f.editId));
+  ov.querySelectorAll("[data-d]").forEach((b) => b.onclick = () => submitMeasurement(f.hundreds * 100 + Number(b.dataset.d) * 10, f.mode, f.editId));
   $("form-cancel").onclick = closeForm;
   const back = $("form-back");
   if (back) back.onclick = () => { f.step = "h"; f.hundreds = null; renderForm(); };
@@ -373,7 +383,7 @@ function openForm(mode, editId = null) {
   renderForm();
 }
 
-async function submitMeasurement(pef, mode, editId) {
+async function submitMeasurement(pef, mode, editId, force = false) {
   if (state.form.busy) return;
   state.form.busy = true;
   $("form-overlay").style.pointerEvents = "none";
@@ -383,11 +393,34 @@ async function submitMeasurement(pef, mode, editId) {
       closeForm();
       await loadHistory(state.history.page);
     } else {
-      const res = await api("/api/measurements", { method: "POST", body: { pef } });
+      const q = force ? "?force=1" : "";
+      const res = await api(`/api/measurements${q}`, { method: "POST", body: { pef } });
       renderResult(res);
     }
-  } catch (e) { closeForm(); showError(e.message); }
-  finally { $("form-overlay").style.pointerEvents = ""; }
+  } catch (e) {
+    if (e.status === 409 && e.detail && e.detail.tod) {
+      state.form.busy = false;
+      renderDuplicatePrompt(pef, e.detail);
+      return;
+    }
+    closeForm();
+    showError(e.message);
+  } finally { $("form-overlay").style.pointerEvents = ""; }
+}
+
+function renderDuplicatePrompt(pef, detail) {
+  const ov = $("form-overlay");
+  ov.innerHTML = `<div class="form-box">
+    <h3>⚠️ Уже есть замер</h3>
+    <div class="label center">${esc(detail.message)}</div>
+    <div class="label center">Добавить ещё один?</div>
+    <div class="form-actions">
+      <button id="dup-force">✅ Всё равно</button>
+      <button class="secondary" id="dup-cancel">Отмена</button>
+    </div></div>`;
+  ov.hidden = false;
+  $("dup-force").onclick = () => submitMeasurement(pef, state.form.mode, state.form.editId, true);
+  $("dup-cancel").onclick = async () => { closeForm(); await switchTo("today"); };
 }
 
 function renderResult(res) {

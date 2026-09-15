@@ -1,4 +1,5 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
+import json
 import logging
 import os
 import tempfile
@@ -240,11 +241,17 @@ def create_app(services: dict) -> FastAPI:
         return {"this_week": this_week, "prev_week": prev_week, "offset": offset}
 
     @app.post("/api/measurements")
-    async def add(body: MeasurementIn, auth: dict = Depends(require_user)):
+    async def add(body: MeasurementIn, force: bool = False,
+                  auth: dict = Depends(require_user)):
         who = auth["user"]["id"]
         tod = _auto_time_of_day(config)
-        if has_today_measurement(config.DB_PATH, config.CHILD_ID, tod, skip_auto=True):
-            tod = "evening" if tod == "morning" else "morning"
+        if has_today_measurement(config.DB_PATH, config.CHILD_ID, tod, skip_auto=True) and not force:
+            row = get_last_of_tod(config.DB_PATH, config.CHILD_ID, tod)
+            raise HTTPException(409, detail=json.dumps({
+                "message": f"{'Утренний' if tod == 'morning' else 'Вечерний'} замер уже есть сегодня",
+                "tod": tod,
+                "existing_id": row["id"] if row else None,
+            }, ensure_ascii=False))
         target = _effective_target(config)
         replaced = replace_auto_measurement(config.DB_PATH, config.CHILD_ID, tod, body.pef, who)
         if replaced:

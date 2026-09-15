@@ -103,12 +103,32 @@ def test_add_replaces_auto_returns_replaced_slot_id():
     assert r.json()["id"] == auto_id
 
 
-def test_add_second_slot_goes_to_other_tod():
+def test_add_duplicate_slot_returns_409():
+    _setup_db()
+    mid = add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID)
+    r = _client().post("/api/measurements", json={"pef": 230}, headers=_auth(CHILD_ID))
+    assert r.status_code == 409
+    detail = json.loads(r.json()["detail"])
+    assert detail["tod"] == "morning"
+    assert detail["existing_id"] == mid
+    assert len(get_all_measurements(TEST_DB, CHILD_ID)) == 1
+
+
+def test_add_duplicate_force_creates_second_slot():
     _setup_db()
     add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID)
+    r = _client().post("/api/measurements?force=1", json={"pef": 230}, headers=_auth(CHILD_ID))
+    assert r.status_code == 200
+    assert r.json()["tod"] == "morning"
+    assert len(get_all_measurements(TEST_DB, CHILD_ID)) == 2
+
+
+def test_add_duplicate_other_slot_not_blocked():
+    _setup_db()
+    add_measurement(TEST_DB, 250, "evening", CHILD_ID, CHILD_ID)
     r = _client().post("/api/measurements", json={"pef": 230}, headers=_auth(CHILD_ID))
     assert r.status_code == 200
-    assert r.json()["tod"] == "evening"
+    assert r.json()["tod"] == "morning"
 
 
 def test_add_pef_out_of_range():
