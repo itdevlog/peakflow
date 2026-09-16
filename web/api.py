@@ -25,9 +25,9 @@ from database import (
     get_measurements_for_month,
     get_measurements_paginated,
     get_reminder_hours,
-    get_setting,
     get_stats,
     get_today_measurements,
+    get_effective_target as _db_effective_target,
     has_today_measurement,
     replace_auto_measurement,
     set_note,
@@ -46,11 +46,7 @@ MONTH_NAMES = [
 
 
 def _effective_target(config) -> int:
-    try:
-        val = int(get_setting(config.DB_PATH, "target_pef", str(config.TARGET_PEF)))
-        return val if val > 0 else 300
-    except Exception:
-        return getattr(config, "TARGET_PEF", 0) or 300
+    return _db_effective_target(config.DB_PATH, getattr(config, "TARGET_PEF", 0))
 
 
 def _auto_time_of_day(config) -> str:
