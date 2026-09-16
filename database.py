@@ -1,11 +1,14 @@
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-# Часовой пояс из .env (по умолчанию UTC+5)
-_TZ_OFFSET = int(os.getenv("TZ_OFFSET", "5"))
-_TZ = timezone(timedelta(hours=_TZ_OFFSET))
+from config import TZ_OFFSET
+
+# Часовой пояс — единый источник (config.py читает TZ_OFFSET из .env)
+_TZ = timezone(timedelta(hours=TZ_OFFSET))
+
+# Версия схемы БД (PRAGMA user_version). 1 = базовая схема + source/note/flags.
+SCHEMA_VERSION = 1
 
 
 def _now():
@@ -102,6 +105,9 @@ def init_db(db_path: str):
         ON measurements(user_id, measured_at)
     """)
 
+    # Record schema version (idempotent migrations above are v1).
+    c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
     conn.commit()
     conn.close()
 
@@ -159,7 +165,7 @@ def replace_auto_measurement(db_path: str, user_id: int, time_of_day: str,
     conn = get_connection(db_path)
     now_str = _now().strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute(
-        f"UPDATE measurements SET pef_value = ?, added_by = ?, source = 'manual', "
+        "UPDATE measurements SET pef_value = ?, added_by = ?, source = 'manual', "
         "measured_at = ? WHERE user_id = ? AND time_of_day = ? AND source = 'auto' AND measured_at LIKE ?",
         (pef_value, added_by, now_str, user_id, time_of_day, f"{today}%")
     )
@@ -192,6 +198,16 @@ def delete_measurement(db_path: str, measurement_id: int, user_id: int) -> bool:
     ok = cur.rowcount > 0
     conn.close()
     return ok
+
+
+def get_measurement_by_id(db_path: str, measurement_id: int) -> Optional[dict]:
+    """Fetch a single measurement by primary key (any user)."""
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT * FROM measurements WHERE id = ?", (measurement_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def get_last_measurement(db_path: str, user_id: int) -> Optional[dict]:
@@ -251,17 +267,6 @@ def has_today_measurement(db_path: str, user_id: int, time_of_day: str,
         ).fetchone()
     conn.close()
     return row[0] > 0
-
-
-def get_week_measurements(db_path: str, user_id: int, week_start: datetime) -> list:
-    week_end = week_start + timedelta(days=7)
-    conn = get_connection(db_path)
-    rows = conn.execute(
-        "SELECT * FROM measurements WHERE user_id = ? AND measured_at >= ? AND measured_at < ? ORDER BY measured_at ASC",
-        (user_id, week_start.strftime("%Y-%m-%d"), week_end.strftime("%Y-%m-%d"))
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
 
 
 def get_last_two_weeks(db_path: str, user_id: int) -> tuple:
@@ -428,6 +433,18 @@ def set_setting(db_path: str, key: str, value: str):
     )
     conn.commit()
     conn.close()
+
+
+def get_effective_target(db_path: str, fallback: int) -> int:
+    """Target PEF from DB settings, falling back to the env-configured value.
+
+    Single source of truth shared by bot and web layer.
+    """
+    try:
+        val = int(get_setting(db_path, "target_pef", str(fallback)))
+        return val if val > 0 else (fallback or 300)
+    except (TypeError, ValueError):
+        return fallback or 300
 
 
 # ============================================================================

@@ -2,7 +2,6 @@ import os
 import sys
 import io
 import fcntl
-import sqlite3
 import logging
 import asyncio
 import contextlib
@@ -23,14 +22,13 @@ import matplotlib.dates as mdates
 
 from config import (
     BOT_TOKEN, DB_PATH, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF,
-    PEF_NORM_BY_AGE, ZONE_GREEN, ZONE_YELLOW, ZONE_RED,
-    REMINDER_MORNING_DEADLINE, REMINDER_EVENING_DEADLINE,
+    ZONE_GREEN, ZONE_YELLOW,
     WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR, TZ_OFFSET,
     WEBAPP_PORT, WEBAPP_URL,
-    is_parent, is_child, get_effective_target,
+    is_parent, is_child,
 )
 from report import (
-    MONTH_NAMES, month_title, tod_emoji, tod_label, pct_of,
+    month_title, tod_emoji, tod_label, pct_of, escape_md,
     parse_month as parse_csv_month,
     build_csv_content as _report_build_csv,
     pef_zone as _report_pef_zone,
@@ -39,12 +37,14 @@ from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
     has_today_measurement, get_measurements_paginated,
-    get_measurements_for_chart, get_stats, get_last_two_weeks,
+    get_stats, get_last_two_weeks,
     mark_reminder_sent, was_reminder_sent,
-    get_setting, set_setting, set_note,
+    set_setting, set_note,
+    get_effective_target as _db_get_effective_target,
     get_reminder_hours, backup_db,
     get_measurements_for_month, get_available_months, get_measurements_between,
     get_last_of_tod, replace_auto_measurement,
+    get_measurement_by_id,
 )
 
 import config as app_config
@@ -110,7 +110,6 @@ dp.include_router(router)
 # FSM States
 # ---------------------------------------------------------------------------
 class Measurement(StatesGroup):
-    waiting_delete_confirm = State()
     editing_target_pef = State()
     editing_reminder_hour = State()
     waiting_note = State()
@@ -120,18 +119,28 @@ class Measurement(StatesGroup):
 
 
 def get_effective_target() -> int:
-    """Get target PEF from DB settings, fallback to config."""
-    try:
-        val = int(get_setting(DB_PATH, "target_pef", str(TARGET_PEF)))
-        return val if val > 0 else 300
-    except (ValueError, Exception):
-        return TARGET_PEF or 300
+    """Целевая ПСВ из БД (settings), fallback — TARGET_PEF из .env."""
+    return _db_get_effective_target(DB_PATH, TARGET_PEF)
 
 
 def auto_time_of_day() -> str:
     """Auto-detect morning/evening based on current hour."""
     hour = now_tz().hour
     return "morning" if hour < 12 else "evening"
+
+
+def parse_callback_int(data, prefix: str):
+    """Safely parse the integer suffix of a callback_data string.
+
+    Returns None for missing/non-numeric payloads instead of raising, so a
+    malformed callback cannot crash a handler.
+    """
+    if not data or not isinstance(data, str) or not data.startswith(prefix):
+        return None
+    try:
+        return int(data[len(prefix):])
+    except (TypeError, ValueError):
+        return None
 
 
 def is_reminder_minute(minute: int) -> bool:
@@ -165,13 +174,6 @@ async def respond(callback: types.CallbackQuery, text: str,
                   kb: InlineKeyboardMarkup = None, parse_mode: str = "Markdown"):
     await answer_callback(callback)
     return await callback.message.answer(text, parse_mode=parse_mode, reply_markup=kb)
-
-
-def safe_delete(msg):
-    try:
-        asyncio.create_task(msg.delete())
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +219,7 @@ def kb_pagination(page: int, total_pages: int, is_parent_user: bool, measurement
         for m in measurements:
             rows.append([
                 InlineKeyboardButton(text=f"✏️ {m['pef_value']}", callback_data=f"edit_{m['id']}"),
-                InlineKeyboardButton(text=f"🗑️", callback_data=f"del_{m['id']}"),
+                InlineKeyboardButton(text="🗑️", callback_data=f"del_{m['id']}"),
             ])
 
     # Page navigation
@@ -284,7 +286,7 @@ async def build_status_block() -> str:
         diff = f"\nПоследний: {all_m[0]['pef_value']} {zone} ({sign}{d})"
 
     return (
-        f"👋 *{CHILD_NAME}* | Целевая: {target} л/мин\n\n"
+        f"👋 *{escape_md(CHILD_NAME)}* | Целевая: {target} л/мин\n\n"
         f"Сегодня: {morning_display} | {evening_display}"
         f"{diff}"
     )
@@ -320,11 +322,26 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
         return
 
-    who = "👨‍👧 Родитель" if is_parent(uid) else f"👶 {CHILD_NAME}"
+    who = "👨‍👧 Родитель" if is_parent(uid) else f"👶 {escape_md(CHILD_NAME)}"
     await message.answer(f"✅ Привет! Вы вошли как *{who}*", parse_mode="Markdown")
     await send_main_menu(message, uid)
     await state.clear()
     logger.info("Пользователь %d (%s) вошёл в бот", uid, who)
+
+
+# ---------------------------------------------------------------------------
+# /cancel — exit any FSM state
+# ---------------------------------------------------------------------------
+@router.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    if not is_parent(uid) and not is_child(uid):
+        return
+    current = await state.get_state()
+    await state.clear()
+    if current:
+        await message.answer("❌ Действие отменено.")
+    await send_main_menu(message, uid)
 
 
 # ---------------------------------------------------------------------------
@@ -383,16 +400,36 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
     else:
         tod = auto_time_of_day()
         if has_today_measurement(DB_PATH, CHILD_ID, tod, skip_auto=True):
-            tod = "evening" if tod == "morning" else "morning"
+            # The auto-detected slot is already filled by a real entry.
+            # Never silently flip morning↔evening (that corrupts statistics) —
+            # keep the chosen value and ask the user which slot to use.
+            await state.update_data(pending_pef=pef)
+            await respond(callback,
+                f"⚠️ {tod_emoji(tod)} {tod_label(tod)} уже измерено сегодня.\n\n"
+                f"Куда записать значение *{pef}* л/мин?",
+                kb=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="☀️ Утро", callback_data="pick_tod_morning"),
+                        InlineKeyboardButton(text="🌙 Вечер", callback_data="pick_tod_evening"),
+                    ],
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
+                ]),
+            )
+            return
 
+    await _persist_measurement(callback, state, pef, tod)
+
+
+async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, tod: str):
+    """Insert/replace a measurement with a definitive time of day."""
     who = callback.from_user.id
 
     # Auto-carry record for this slot today → replace it with the real value
     replaced = replace_auto_measurement(DB_PATH, CHILD_ID, tod, pef, who)
     if replaced:
-        mid = None  # updated in place, fetch below
-        conn_row = get_last_measurement(DB_PATH, CHILD_ID)
-        mid = conn_row["id"]
+        # Fetch the row we just updated (never a different/newer measurement)
+        row = get_last_of_tod(DB_PATH, CHILD_ID, tod)
+        mid = row["id"] if row else None
     else:
         mid = add_measurement(DB_PATH, pef, tod, CHILD_ID, who)
 
@@ -426,7 +463,7 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
             try:
                 await bot.send_message(
                     pid,
-                    f"📝 {added_by_name} добавил для *{CHILD_NAME}*: "
+                    f"📝 {escape_md(added_by_name)} добавил для *{escape_md(CHILD_NAME)}*: "
                     f"{pef} л/мин {zone_emoji} ({tod_label(tod)})",
                     parse_mode="Markdown",
                 )
@@ -439,7 +476,7 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
             try:
                 await bot.send_message(
                     pid,
-                    f"🚨 *{CHILD_NAME}*: ПСВ *{pef}* л/мин — {zone_name}!\n"
+                    f"🚨 *{escape_md(CHILD_NAME)}*: ПСВ *{pef}* л/мин — {zone_name}!\n"
                     f"Норма: {target} л/мин ({pct_of(pef, target)}%). Свяжитесь с врачом.",
                     parse_mode="Markdown",
                 )
@@ -449,6 +486,19 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
     await state.update_data(note_for_id=mid)
     await state.set_state(Measurement.waiting_note)
     logger.info("Измерение: %d л/мин, %s, добавил %d", pef, tod, who)
+
+
+@router.callback_query(F.data.in_({"pick_tod_morning", "pick_tod_evening"}))
+async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
+    """User explicitly chose the time of day for a pending measurement."""
+    data = await state.get_data()
+    pef = data.get("pending_pef")
+    if pef is None:
+        await callback.answer("❌ Значение потеряно, начните заново.", show_alert=True)
+        return
+    tod = "morning" if callback.data == "pick_tod_morning" else "evening"
+    await state.update_data(forced_tod=tod)
+    await _persist_measurement(callback, state, pef, tod)
 
 
 async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict):
@@ -479,12 +529,7 @@ async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_v
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute("UPDATE measurements SET pef_value = ? WHERE id = ? AND user_id = ?",
-                       (new_val, mid, CHILD_ID))
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
+    ok = edit_measurement(DB_PATH, mid, new_val, CHILD_ID)
 
     if ok:
         target = get_effective_target()
@@ -504,7 +549,10 @@ async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_v
 # ---------------------------------------------------------------------------
 @router.callback_query(Measurement.pef_input_hundreds, F.data.startswith("h_"))
 async def cb_select_hundreds(callback: types.CallbackQuery, state: FSMContext):
-    h = int(callback.data.replace("h_", ""))
+    h = parse_callback_int(callback.data, "h_")
+    if h is None:
+        await callback.answer("❌ Некорректный ввод.", show_alert=True)
+        return
     await state.update_data(hundreds=h)
     await callback.answer()
     await callback.message.edit_text(
@@ -517,7 +565,10 @@ async def cb_select_hundreds(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(Measurement.pef_input_tens, F.data.startswith("t_"))
 async def cb_select_tens(callback: types.CallbackQuery, state: FSMContext):
-    d = int(callback.data.replace("t_", ""))
+    d = parse_callback_int(callback.data, "t_")
+    if d is None:
+        await callback.answer("❌ Некорректный ввод.", show_alert=True)
+        return
     data = await state.get_data()
     h = data.get("hundreds")
     if h is None:
@@ -618,7 +669,10 @@ async def cb_history(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("hist_page_"))
 async def cb_history_page(callback: types.CallbackQuery, state: FSMContext):
-    page = int(callback.data.replace("hist_page_", ""))
+    page = parse_callback_int(callback.data, "hist_page_")
+    if page is None or page < 1:
+        await callback.answer("❌ Некорректная страница.", show_alert=True)
+        return
     await _show_history(callback, page=page)
 
 
@@ -649,7 +703,7 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1):
     kb = kb_pagination(page, total_pages, is_p, measurements)
 
     await respond(callback,
-        f"📋 История *{CHILD_NAME}*:\n\n" + "\n".join(lines),
+        f"📋 История *{escape_md(CHILD_NAME)}*:\n\n" + "\n".join(lines),
         kb=kb,
     )
 
@@ -666,22 +720,20 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
 
-    mid = int(callback.data.replace("edit_", ""))
-    # Fetch the measurement
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM measurements WHERE id = ?", (mid,)).fetchone()
-    conn.close()
-
-    if not row:
+    mid = parse_callback_int(callback.data, "edit_")
+    if mid is None:
+        await callback.answer("❌ Некорректный ID записи.", show_alert=True)
+        return
+    measurement = get_measurement_by_id(DB_PATH, mid)
+    if not measurement:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
         return
 
     await state.update_data(edit_id=mid, input_context="edit_any")
     await respond(callback,
-        f"✏️ Запись #{mid}: *{row['pef_value']}* л/мин "
-        f"({tod_emoji(row['time_of_day'])} {tod_label(row['time_of_day'])}, "
-        f"{row['measured_at'][:10]})\n\n"
+        f"✏️ Запись #{mid}: *{measurement['pef_value']}* л/мин "
+        f"({tod_emoji(measurement['time_of_day'])} {tod_label(measurement['time_of_day'])}, "
+        f"{measurement['measured_at'][:10]})\n\n"
         f"Выбери новое значение:",
         kb=kb_pef_hundreds(),
     )
@@ -699,12 +751,11 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
-    mid = int(callback.data.replace("del_confirm_", ""))
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute("DELETE FROM measurements WHERE id = ? AND user_id = ?", (mid, CHILD_ID))
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
+    mid = parse_callback_int(callback.data, "del_confirm_")
+    if mid is None:
+        await callback.answer("❌ Некорректный ID записи.", show_alert=True)
+        return
+    ok = delete_measurement(DB_PATH, mid, CHILD_ID)
 
     if ok:
         await callback.answer("✅ Запись удалена.", show_alert=True)
@@ -721,11 +772,11 @@ async def cb_delete(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
-    mid = int(callback.data.replace("del_", ""))
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM measurements WHERE id = ? AND user_id = ?", (mid, CHILD_ID)).fetchone()
-    conn.close()
+    mid = parse_callback_int(callback.data, "del_")
+    if mid is None:
+        await callback.answer("❌ Некорректный ID записи.", show_alert=True)
+        return
+    row = get_measurement_by_id(DB_PATH, mid)
 
     if not row:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
@@ -762,7 +813,7 @@ def kb_settings(target: int) -> InlineKeyboardMarkup:
 def build_settings_text(target: int, total: int) -> str:
     return (
         f"⚙️ *Настройки*\n\n"
-        f"👤 Ребёнок: *{CHILD_NAME}*\n"
+        f"👤 Ребёнок: *{escape_md(CHILD_NAME)}*\n"
         f"🎯 Целевая ПСВ: *{target}* л/мин\n"
         f"📊 Всего замеров: {total}\n\n"
         f"Выберите действие:"
@@ -978,11 +1029,7 @@ async def cb_export_month(callback: types.CallbackQuery):
         await callback.answer("❌ Неверный период.", show_alert=True)
         return
     y, m = parsed
-    if m == 12:
-        date_to = f"{y + 1:04d}-01-01"
-    else:
-        date_to = f"{y:04d}-{m + 1:02d}-01"
-    # [first of month, first of next month) — date_to handled as "day before next month"
+    # [first of month, first of next month) — last_day is the day before next month
     last_day = (datetime(y, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     rows = get_measurements_between(DB_PATH, CHILD_ID, f"{y:04d}-{m:02d}-01",
                                     last_day.strftime("%Y-%m-%d"))
@@ -1033,33 +1080,8 @@ async def cb_backup(callback: types.CallbackQuery):
 
 
 # ---------------------------------------------------------------------------
-# Helper: show history from message (after edit)
+# Helper: show history from callback (after edit)
 # ---------------------------------------------------------------------------
-async def _show_history_from_message(message: types.Message):
-    measurements, total, total_pages = get_measurements_paginated(DB_PATH, CHILD_ID, page=1, per_page=10)
-    target = get_effective_target()
-    is_p = is_parent(message.from_user.id)
-
-    if not measurements:
-        await message.answer("📭 Нет измерений.", reply_markup=kb_back())
-        return
-
-    lines = []
-    for m in measurements:
-        zone, _ = pef_zone(m["pef_value"], target)
-        ts = m["measured_at"][5:16].replace("T", " ")
-        who = "👨‍👧" if is_parent(m.get("added_by", 0)) else "👶"
-        lines.append(f"{tod_emoji(m['time_of_day'])} {ts} → *{m['pef_value']}* {zone} {who}")
-
-    kb = kb_pagination(1, total_pages, is_p, measurements)
-
-    await message.answer(
-        f"📋 История *{CHILD_NAME}*:\n\n" + "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
-
-
 async def _show_history_from_callback(callback: types.CallbackQuery):
     measurements, total, total_pages = get_measurements_paginated(DB_PATH, CHILD_ID, page=1, per_page=10)
     target = get_effective_target()
@@ -1079,7 +1101,7 @@ async def _show_history_from_callback(callback: types.CallbackQuery):
     kb = kb_pagination(1, total_pages, is_p, measurements)
 
     await callback.message.answer(
-        f"📋 История *{CHILD_NAME}*:\n\n" + "\n".join(lines),
+        f"📋 История *{escape_md(CHILD_NAME)}*:\n\n" + "\n".join(lines),
         parse_mode="Markdown",
         reply_markup=kb,
     )
@@ -1171,12 +1193,16 @@ def _render_chart_png(rows: list, target: int, title: str) -> bytes:
     return buf.getvalue()
 
 
+async def _render_chart_png_async(rows: list, target: int, title: str) -> bytes:
+    """Run the CPU-bound matplotlib render off the event loop."""
+    return await asyncio.to_thread(_render_chart_png, rows, target, title)
+
+
 async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int):
     target = get_effective_target()
     rows = get_measurements_for_month(DB_PATH, CHILD_ID, year, month)
 
     now = now_tz()
-    is_current = (year, month) == (now.year, now.month)
     can_next = (year, month) < (now.year, now.month)
 
     if len(rows) < 2:
@@ -1186,7 +1212,7 @@ async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int
         )
         return
 
-    png = _render_chart_png(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
+    png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
     values = [r["pef_value"] for r in rows]
 
     await answer_callback(callback)
@@ -1225,7 +1251,7 @@ async def cb_chart_download(callback: types.CallbackQuery):
         await callback.answer("В этом месяце меньше 2 измерений.", show_alert=True)
         return
     target = get_effective_target()
-    png = _render_chart_png(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
+    png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
     await answer_callback(callback)
     await callback.message.answer_document(
         BufferedInputFile(png, filename=f"chart_{CHILD_NAME}_{year:04d}-{month:02d}.png"),
@@ -1268,7 +1294,7 @@ async def cb_summary(callback: types.CallbackQuery):
     e_avg_str = f"{e_avg:.0f}" if e_avg is not None else "—"
 
     await respond(callback,
-        f"📊 *{CHILD_NAME}* — сегодня, {now_tz().strftime('%d %B')}\n\n"
+        f"📊 *{escape_md(CHILD_NAME)}* — сегодня, {now_tz().strftime('%d %B')}\n\n"
         f"{m_str}\n{e_str}\n\n"
         f"📈 Всего: {stats.get('total', 0)} | Среднее: {stats.get('avg', 0):.0f}\n"
         f"🌅 Утро avg: {m_avg_str} | 🌆 Вечер avg: {e_avg_str}",
@@ -1287,7 +1313,6 @@ async def cb_weekly(callback: types.CallbackQuery):
 
 async def _send_weekly_report(message=None):
     this_week, prev_week = get_last_two_weeks(DB_PATH, CHILD_ID)
-    target = get_effective_target()
 
     if not this_week:
         if message:
@@ -1308,7 +1333,7 @@ async def _send_weekly_report(message=None):
     best_m = max(this_week, key=lambda m: m["pef_value"])
     worst_m = min(this_week, key=lambda m: m["pef_value"])
 
-    text = f"📋 *{CHILD_NAME}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
+    text = f"📋 *{escape_md(CHILD_NAME)}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
     text += f"Замеров: {len(this_week)} (🌅 {len(this_morning)} / 🌆 {len(this_evening)})\n"
     text += f"Среднее: {sum(this_vals)/len(this_vals):.0f}\n"
     text += f"🏆 Лучший: {best} ({tod_emoji(best_m['time_of_day'])} {best_m['measured_at'][:10]})\n"
@@ -1320,7 +1345,7 @@ async def _send_weekly_report(message=None):
         this_e_avg = sum(this_evening) / len(this_evening) if this_evening else 0
         prev_e_avg = sum(prev_evening) / len(prev_evening) if prev_evening else 0
 
-        text += f"\n📈 Эта vs прошлая:\n"
+        text += "\n📈 Эта vs прошлая:\n"
         if this_morning and prev_morning:
             d = this_m_avg - prev_m_avg
             sign = "+" if d > 0 else ""
@@ -1363,7 +1388,7 @@ async def cb_stats(callback: types.CallbackQuery):
         tod_info += f"\n🌆 Вечер avg: {stats['evening_avg']:.0f} ({stats['evening_count']} замеров)"
 
     await respond(callback,
-        f"📊 *{CHILD_NAME}*\n\n"
+        f"📊 *{escape_md(CHILD_NAME)}*\n\n"
         f"Всего: {stats['total']} | Сегодня: {stats['today_count']}\n"
         f"Среднее: {stats['avg']:.0f}\n"
         f"Мин: {stats['min']} | Макс: {stats['max']}\n"
@@ -1389,10 +1414,26 @@ async def cb_noop(callback: types.CallbackQuery):
 # ---------------------------------------------------------------------------
 # CATCH-ALL
 # ---------------------------------------------------------------------------
+_FSM_HINTS = {
+    "Measurement:pef_input_hundreds": (
+        "Выберите значение кнопками ниже или отправьте /cancel для отмены."
+    ),
+    "Measurement:pef_input_tens": (
+        "Выберите значение кнопками ниже или отправьте /cancel для отмены."
+    ),
+    "Measurement:editing_target_pef": "Введите целое число 100–800 или /cancel.",
+    "Measurement:editing_reminder_hour": "Введите целое число 0–23 или /cancel.",
+    "Measurement:waiting_note": "Напишите заметку текстом или /cancel.",
+}
+
+
 @router.message(F.text)
 async def catch_all(message: types.Message, state: FSMContext):
     current = await state.get_state()
     if current:
+        hint = _FSM_HINTS.get(current)
+        if hint:
+            await message.answer(hint, reply_markup=kb_back())
         return
     await send_main_menu(message, message.from_user.id)
 
@@ -1444,7 +1485,7 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
     try:
         await bot.send_message(
             CHILD_ID,
-            f"{icon} Привет, *{CHILD_NAME}*! Пора сделать "
+            f"{icon} Привет, *{escape_md(CHILD_NAME)}*! Пора сделать "
             f"{'утренний' if tod == 'morning' else 'вечерний'} замер 💨",
             parse_mode="Markdown",
         )
@@ -1477,13 +1518,13 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
     icon = "☀️" if tod == "morning" else "🌙"
     if last:
         text = (
-            f"⚠️ {icon} *{CHILD_NAME}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
+            f"⚠️ {icon} *{escape_md(CHILD_NAME)}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
             f"🤖 Записали как в последний раз: *{last['pef_value']}* (авто, не измерено).\n"
             f"Скорректируйте, если знаете реальное значение."
         )
     else:
         text = (
-            f"⚠️ {icon} *{CHILD_NAME}* ещё не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер!\n"
+            f"⚠️ {icon} *{escape_md(CHILD_NAME)}* ещё не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер!\n"
             f"Напомните, пожалуйста."
         )
 
