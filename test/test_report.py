@@ -69,7 +69,7 @@ def test_build_csv_content_columns_and_marks():
         display_name=lambda uid: "Родитель", include_summary=False,
     )
     assert content.startswith("Дата,Время,Период,ПСВ (л/мин),% от нормы,Зона,Добавил,Заметка,Источник")
-    assert "болел; сильно" in content   # comma replaced by ';'
+    assert '"болел, сильно"' in content   # comma-containing note is quoted, not mangled
     assert "авто" in content
     assert "ручной" in content
     assert "# Статистика" not in content
@@ -84,3 +84,32 @@ def test_build_csv_content_summary():
                                 display_name=lambda uid: "Родитель")
     assert content.startswith("\n# Статистика")
     assert "Всего замеров: 1" in content
+
+
+def test_escape_md_legacy():
+    """Telegram legacy Markdown: _, *, [, ` must be escaped in user text."""
+    from report import escape_md
+    assert escape_md("Ма_ша") == "Ма\\_ша"
+    assert escape_md("*bold*") == "\\*bold\\*"
+    assert escape_md("a[b]") == "a\\[b\\]"
+    assert escape_md("back`tick") == "back\\`tick"
+    assert escape_md("обычное имя") == "обычное имя"
+    assert escape_md("") == ""
+
+
+def test_build_csv_content_quotes_special_chars():
+    """Names/notes with quotes and commas must produce valid, parseable CSV."""
+    import csv
+    import io
+
+    rows = [{"measured_at": "2026-08-05 08:00:00", "time_of_day": "morning",
+             "pef_value": 240, "added_by": 222, "source": "manual", "note": None}]
+    content = build_csv_content(
+        rows, target=260, child_name='Имя "с кавычкой", и запятой',
+        include_summary=False, display_name=lambda uid: 'Ро,дитель "X"',
+    )
+    # The data line must be parseable and preserve both fields verbatim.
+    data_line = content.splitlines()[1]
+    parsed = next(csv.reader(io.StringIO(data_line)))
+    assert parsed[6] == 'Ро,дитель "X"'
+    assert parsed[7] == "—"

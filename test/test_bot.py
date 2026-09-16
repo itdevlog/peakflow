@@ -236,6 +236,64 @@ class TestDatabase:
         assert was_reminder_sent(TEST_DB, today, "evening_missing")
         assert was_reminder_sent(TEST_DB, today, "weekly")
 
+    def test_schema_version_is_set(self):
+        """init_db must record a schema version via PRAGMA user_version."""
+        from database import init_db, SCHEMA_VERSION
+        init_db(TEST_DB)
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conn.close()
+        assert version == SCHEMA_VERSION
+        assert SCHEMA_VERSION >= 1
+
+    def test_migrate_old_schema_without_version(self):
+        """A legacy DB (user_version=0, old columns) migrates to current."""
+        import sqlite3
+        from database import init_db, SCHEMA_VERSION
+        # legacy schema: no CHECK, has note, no source; no settings/index
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute("DROP TABLE IF EXISTS measurements")
+        conn.execute("DROP TABLE IF EXISTS reminders_sent")
+        conn.execute("DROP TABLE IF EXISTS settings")
+        conn.execute(
+            "CREATE TABLE measurements ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+            "pef_value INTEGER NOT NULL, time_of_day TEXT NOT NULL, "
+            "measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by INTEGER, note TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE reminders_sent (date TEXT PRIMARY KEY, "
+            "morning_reminder INTEGER DEFAULT 0, evening_reminder INTEGER DEFAULT 0, "
+            "weekly_report INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at) "
+            "VALUES (111, 240, 'morning', '2026-01-01 08:00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        init_db(TEST_DB)  # must migrate in place without losing the row
+
+        conn = sqlite3.connect(TEST_DB)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(measurements)")]
+        conn.close()
+        assert version == SCHEMA_VERSION
+        assert count == 1
+        assert "source" in cols
+
+    def test_init_db_idempotent(self):
+        from database import init_db, SCHEMA_VERSION
+        init_db(TEST_DB)
+        init_db(TEST_DB)  # second run must not fail
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        conn.close()
+
     def test_index_created(self):
         """init_db must create index on (user_id, measured_at)."""
         from database import init_db
@@ -874,10 +932,17 @@ class TestConfig:
         assert not is_child(123)
 
     def test_get_effective_target(self):
-        from config import get_effective_target
+        from bot import get_effective_target
         t = get_effective_target()
         assert isinstance(t, int)
         assert t > 0
+
+    def test_get_effective_target_from_db(self):
+        from database import get_effective_target, set_setting
+        set_setting(TEST_DB, "target_pef", "333")
+        assert get_effective_target(TEST_DB, 260) == 333
+        set_setting(TEST_DB, "target_pef", "0")
+        assert get_effective_target(TEST_DB, 260) == 260
 
     def test_auto_time_of_day(self):
         from bot import auto_time_of_day
@@ -1065,6 +1130,266 @@ class TestEditDeleteExport:
         assert val == "260"
 
 
+class TestCallbackParsing:
+    """Phase 1.3: unsafe int(callback.data) must not crash handlers."""
+
+    def test_parse_callback_int_valid(self):
+        from bot import parse_callback_int
+        assert parse_callback_int("edit_42", "edit_") == 42
+        assert parse_callback_int("del_confirm_7", "del_confirm_") == 7
+        assert parse_callback_int("h_6", "h_") == 6
+        assert parse_callback_int("t_00", "t_") == 0
+
+    def test_parse_callback_int_invalid_returns_none(self):
+        from bot import parse_callback_int
+        assert parse_callback_int("edit_abc", "edit_") is None
+        assert parse_callback_int("edit_", "edit_") is None
+        assert parse_callback_int("", "edit_") is None
+        assert parse_callback_int(None, "edit_") is None
+        assert parse_callback_int("edit_1;2", "edit_") is None
+
+
+class TestDatabaseIdHelpers:
+    """Phase 2.1: measurement lookup/update/delete by id via database.py."""
+
+    def test_get_measurement_by_id(self):
+        from database import add_measurement, get_measurement_by_id
+        mid = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        row = get_measurement_by_id(TEST_DB, mid)
+        assert row["id"] == mid
+        assert row["pef_value"] == 250
+        assert get_measurement_by_id(TEST_DB, 999999) is None
+
+
+class TestNoteTargeting:
+    """The note must attach to the exact row written/replaced."""
+
+    def test_note_targets_replaced_auto_record(self):
+        """When an auto record is replaced, the note must attach to that row,
+        not to some other/newer measurement."""
+        import asyncio
+        import bot
+        from database import (add_measurement, get_last_of_tod,
+                              get_measurement_by_id)
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # an auto record in today's morning slot
+        auto_mid = add_measurement(TEST_DB, 230, "morning", bot.CHILD_ID, 0, source="auto")
+        # a newer manual evening record exists too
+        add_measurement(TEST_DB, 270, "evening", bot.CHILD_ID, 222)
+
+        cb = MagicMock()
+        cb.from_user.id = 222
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        state = MagicMock()
+
+        async def get_data():
+            return {}
+
+        state.get_data = get_data
+        state.update_data = AsyncMock()
+        state.set_state = AsyncMock()
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "respond", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._persist_measurement(cb, state, 250, "morning"))
+
+        row = get_measurement_by_id(TEST_DB, auto_mid)
+        assert row["pef_value"] == 250
+        assert row["source"] == "manual"
+        # note_for_id must point at the replaced row
+        kwargs = state.update_data.await_args.kwargs
+        assert kwargs.get("note_for_id") == auto_mid
+
+
+class TestNoSilentInversion:
+    """Phase 1.1: _save_measurement must not silently flip morning↔evening."""
+
+    def _make_callback(self):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.from_user.id = 999
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def _make_state(self):
+        from unittest.mock import AsyncMock, MagicMock
+        st = MagicMock()
+
+        async def get_data():
+            return {}
+
+        async def noop(*a, **kw):
+            return None
+
+        st.get_data = get_data
+        st.update_data = AsyncMock()
+        st.set_state = AsyncMock()
+        st.clear = AsyncMock()
+        st.set_state = noop
+        return st
+
+    def test_occupied_slot_without_forced_asks_instead_of_inverting(self):
+        """When the auto slot is already taken (real entry), do not write the
+        opposite time of day silently — ask the user to choose."""
+        import asyncio
+        import bot
+        from database import add_measurement
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        # real morning entry already exists today
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+
+        cb = self._make_callback()
+        state = self._make_state()
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            callback.sent_text = text
+            return MagicMock()
+
+        with patch.object(bot, "auto_time_of_day", return_value="morning"), \
+             patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._save_measurement(cb, state, 245, {}))
+
+        # No silent evening write: still exactly one measurement today
+        from database import get_today_measurements
+        today = get_today_measurements(TEST_DB, bot.CHILD_ID)
+        assert len(today) == 1
+        # And the user was asked what to do
+        assert hasattr(cb, "sent_text")
+
+    def test_forced_tod_writes_that_slot(self):
+        """Explicit forced_tod (repeat measurement) still writes directly."""
+        import asyncio
+        import bot
+        from database import add_measurement, get_today_measurements
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+
+        cb = self._make_callback()
+        state = self._make_state()
+
+        with patch.object(bot, "respond", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._save_measurement(cb, state, 245, {"forced_tod": "morning"}))
+
+        today = get_today_measurements(TEST_DB, bot.CHILD_ID)
+        assert len(today) == 2
+
+
+class TestFsmRecovery:
+    """Phase 1.4: FSM must not silently swallow input; /cancel must work."""
+
+    def _make_state(self, state_name, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        st = MagicMock()
+        st._data = dict(data or {})
+        st._state = state_name
+
+        async def update_data(**kw):
+            st._data.update(kw)
+
+        async def get_data():
+            return dict(st._data)
+
+        async def get_state():
+            return st._state
+
+        async def set_state(s):
+            st._state = s
+
+        st.update_data = update_data
+        st.get_data = get_data
+        st.get_state = get_state
+        st.set_state = set_state
+        st.clear = AsyncMock()
+        return st
+
+    def test_cancel_command_clears_state(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.from_user.id = 999
+        msg.answer = AsyncMock()
+        state = self._make_state("Measurement:pef_input_tens")
+
+        with patch.object(bot, "send_main_menu", new=AsyncMock()), \
+             patch.object(bot, "is_parent", return_value=True):
+            asyncio.run(bot.cmd_cancel(msg, state))
+
+        state.clear.assert_called()
+        assert any("отмен" in str(c.args[0]).lower() for c in msg.answer.call_args_list)
+
+    def test_invalid_text_during_pef_input_prompts(self):
+        """Non-numeric text mid-input must get a hint, not silence."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock
+
+        msg = MagicMock()
+        msg.from_user.id = 999
+        msg.text = "привет"
+        msg.answer = AsyncMock()
+        state = self._make_state("Measurement:pef_input_tens", {"hundreds": 2})
+
+        asyncio.run(bot.catch_all(msg, state))
+
+        msg.answer.assert_called()
+        assert "кнопк" in str(msg.answer.call_args[0][0]).lower()
+
+    def test_invalid_text_during_target_edit_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock
+
+        msg = MagicMock()
+        msg.from_user.id = 999
+        msg.text = "abc"
+        msg.answer = AsyncMock()
+        state = self._make_state("Measurement:editing_target_pef")
+
+        asyncio.run(bot.catch_all(msg, state))
+
+        msg.answer.assert_called()
+        assert "число" in str(msg.answer.call_args[0][0]).lower() or \
+            "100" in str(msg.answer.call_args[0][0])
+
+
+class TestMarkdownEscaping:
+    """Phase 2.3: underscore/asterisk in CHILD_NAME must not break Markdown."""
+
+    def test_status_block_escapes_name(self, monkeypatch):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        monkeypatch.setattr(bot, "CHILD_NAME", "Ма_ша")
+        with patch.object(bot, "get_today_measurements", return_value=[]), \
+             patch.object(bot, "get_all_measurements", return_value=[]), \
+             patch.object(bot, "get_effective_target", return_value=260):
+            text = asyncio.run(bot.build_status_block())
+
+        assert "Ма\\_ша" in text
+        assert "Ма_ша" not in text.replace("Ма\\_ша", "")
+
+    def test_display_name_stays_raw(self):
+        """_user_display_name feeds CSV/plain contexts — must stay unescaped."""
+        import bot
+        from config import CHILD_ID, CHILD_NAME
+        assert bot._user_display_name(CHILD_ID) == CHILD_NAME
+
+
 class TestMenuButton:
     def test_menu_button_set_when_url(self, monkeypatch):
         import asyncio
@@ -1097,6 +1422,36 @@ class TestMenuButton:
         monkeypatch.setattr(bot.bot, "set_chat_menu_button",
                             AsyncMock(side_effect=RuntimeError("boom")))
         asyncio.run(bot._setup_menu_button())  # must not raise
+
+
+class TestEventLoopOffload:
+    """Phase 1.2: the CPU-bound chart render must run off the event loop."""
+
+    def test_render_chart_async_offloads_to_thread(self):
+        import asyncio
+        import threading
+        import bot
+        from unittest.mock import patch
+
+        main_thread = threading.current_thread().name
+        seen = {}
+
+        def fake_render(rows, target, title):
+            seen["thread"] = threading.current_thread().name
+            seen["args"] = (rows, target, title)
+            return b"PNG"
+
+        rows = [
+            {"measured_at": "2026-08-05 08:00:00", "pef_value": 240, "time_of_day": "morning"},
+            {"measured_at": "2026-08-06 20:00:00", "pef_value": 250, "time_of_day": "evening"},
+        ]
+
+        with patch.object(bot, "_render_chart_png", side_effect=fake_render):
+            result = asyncio.run(bot._render_chart_png_async(rows, 260, "Test"))
+
+        assert result == b"PNG"
+        assert seen["args"] == (rows, 260, "Test")
+        assert seen["thread"] != main_thread, "render must run in a worker thread"
 
 
 if __name__ == "__main__":
