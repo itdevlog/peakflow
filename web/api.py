@@ -249,10 +249,9 @@ def create_app(services: dict) -> FastAPI:
                 "existing_id": row["id"] if row else None,
             }, ensure_ascii=False))
         target = _effective_target(config)
-        replaced = replace_auto_measurement(config.DB_PATH, config.CHILD_ID, tod, body.pef, who)
-        if replaced:
-            row = get_last_of_tod(config.DB_PATH, config.CHILD_ID, tod)
-            mid = row["id"] if row else None
+        replaced_id = replace_auto_measurement(config.DB_PATH, config.CHILD_ID, tod, body.pef, who)
+        if replaced_id:
+            mid = replaced_id
         else:
             mid = add_measurement(config.DB_PATH, body.pef, tod, config.CHILD_ID, who)
         all_m = get_all_measurements(config.DB_PATH, config.CHILD_ID)

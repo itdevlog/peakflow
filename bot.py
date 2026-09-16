@@ -166,7 +166,7 @@ async def answer_callback(callback: types.CallbackQuery):
         pass
     try:
         await callback.message.delete()
-    except (TelegramBadRequest, Exception):
+    except Exception:
         pass
 
 
@@ -425,11 +425,9 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
     who = callback.from_user.id
 
     # Auto-carry record for this slot today → replace it with the real value
-    replaced = replace_auto_measurement(DB_PATH, CHILD_ID, tod, pef, who)
-    if replaced:
-        # Fetch the row we just updated (never a different/newer measurement)
-        row = get_last_of_tod(DB_PATH, CHILD_ID, tod)
-        mid = row["id"] if row else None
+    replaced_id = replace_auto_measurement(DB_PATH, CHILD_ID, tod, pef, who)
+    if replaced_id:
+        mid = replaced_id
     else:
         mid = add_measurement(DB_PATH, pef, tod, CHILD_ID, who)
 
@@ -497,7 +495,6 @@ async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("❌ Значение потеряно, начните заново.", show_alert=True)
         return
     tod = "morning" if callback.data == "pick_tod_morning" else "evening"
-    await state.update_data(forced_tod=tod)
     await _persist_measurement(callback, state, pef, tod)
 
 
@@ -682,7 +679,7 @@ def _history_line(m: dict, target: int) -> str:
     ts = m["measured_at"][5:16].replace("T", " ")
     who = "👨‍👧" if is_parent(m.get("added_by", 0)) else "👶"
     auto = " 🤖" if m.get("source") == "auto" else ""
-    note = f" ℹ️ {m['note']}" if m.get("note") else ""
+    note = f" ℹ️ {escape_md(m['note'])}" if m.get("note") else ""
     return f"{tod_emoji(m['time_of_day'])} {ts} → *{m['pef_value']}* {zone} {who}{auto}{note}"
 
 
@@ -1230,7 +1227,7 @@ async def cb_chart(callback: types.CallbackQuery):
     await _send_month_chart(callback, now.year, now.month)
 
 
-@router.callback_query(F.data.startswith("chart_"))
+@router.callback_query(F.data.regexp(r"^chart_\d{4}-\d{2}$"))
 async def cb_chart_month(callback: types.CallbackQuery):
     parsed = parse_chart_month(callback.data)
     if not parsed:
@@ -1422,20 +1419,24 @@ _FSM_HINTS = {
         "Выберите значение кнопками ниже или отправьте /cancel для отмены."
     ),
     "Measurement:editing_target_pef": "Введите целое число 100–800 или /cancel.",
-    "Measurement:editing_reminder_hour": "Введите целое число 0–23 или /cancel.",
-    "Measurement:waiting_note": "Напишите заметку текстом или /cancel.",
 }
 
 
 @router.message(F.text)
 async def catch_all(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    if not is_parent(uid) and not is_child(uid):
+        await message.answer(
+            "⚠️ Этот бот только для семьи. Обратитесь к администратору."
+        )
+        return
     current = await state.get_state()
     if current:
         hint = _FSM_HINTS.get(current)
         if hint:
             await message.answer(hint, reply_markup=kb_back())
         return
-    await send_main_menu(message, message.from_user.id)
+    await send_main_menu(message, uid)
 
 
 # ---------------------------------------------------------------------------

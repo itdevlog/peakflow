@@ -20,10 +20,6 @@ def _today_str():
     return _now().strftime("%Y-%m-%d")
 
 
-def _db_path(db_path: str) -> str:
-    return db_path
-
-
 def get_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -159,20 +155,23 @@ def get_last_of_tod(db_path: str, user_id: int, time_of_day: str) -> Optional[di
 
 
 def replace_auto_measurement(db_path: str, user_id: int, time_of_day: str,
-                            pef_value: int, added_by: int) -> bool:
-    """Overwrite today's auto-carry record with a real measurement."""
+                            pef_value: int, added_by: int):
+    """Overwrite today's auto-carry record with a real measurement.
+
+    Returns the replaced row's id, or False when there was no auto record.
+    """
     today = _today_str()
     conn = get_connection(db_path)
     now_str = _now().strftime("%Y-%m-%d %H:%M:%S")
-    cur = conn.execute(
+    row = conn.execute(
         "UPDATE measurements SET pef_value = ?, added_by = ?, source = 'manual', "
-        "measured_at = ? WHERE user_id = ? AND time_of_day = ? AND source = 'auto' AND measured_at LIKE ?",
+        "measured_at = ? WHERE user_id = ? AND time_of_day = ? AND source = 'auto' AND measured_at LIKE ? "
+        "RETURNING id",
         (pef_value, added_by, now_str, user_id, time_of_day, f"{today}%")
-    )
+    ).fetchone()
     conn.commit()
-    ok = cur.rowcount > 0
     conn.close()
-    return ok
+    return row["id"] if row else False
 
 
 def edit_measurement(db_path: str, measurement_id: int, new_value: int, user_id: int) -> bool:

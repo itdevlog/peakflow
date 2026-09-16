@@ -665,7 +665,7 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 191 тест
+python -m pytest test/ -v         # 197 тестов
 ```
 
 Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД, а также Mini App (auth initData, чтение, запись, настройки, экспорт, бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).

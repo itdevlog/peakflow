@@ -406,6 +406,18 @@ class TestDatabase:
         from database import replace_auto_measurement
         assert not replace_auto_measurement(TEST_DB, 111, "morning", 245, 333)
 
+    def test_replace_auto_measurement_returns_replaced_id(self):
+        """The replaced row's id is returned so callers need no fragile re-query."""
+        from database import (replace_auto_measurement, get_measurement_by_id,
+                              add_measurement as am)
+        am(TEST_DB, 200, "morning", 111, 222)  # unrelated row, id 1
+        auto_mid = am(TEST_DB, 230, "morning", 111, 0, source="auto")
+        am(TEST_DB, 270, "evening", 111, 222)  # newer unrelated row
+        returned = replace_auto_measurement(TEST_DB, 111, "morning", 245, 333)
+        assert returned is not True and returned is not False
+        assert returned == auto_mid
+        assert get_measurement_by_id(TEST_DB, auto_mid)["pef_value"] == 245
+
     def test_pagination(self):
         from database import add_measurement, get_measurements_paginated
         for i in range(15):
@@ -836,6 +848,31 @@ class TestChartMonths:
         from bot import month_title
         assert "Август" in month_title(2026, 8)
         assert "Сентябрь" in month_title(2026, 9)
+
+    def test_chart_download_routed_not_as_month(self):
+        """Regression: 'chart_dl_YYYY-MM' must route to cb_chart_download,
+        not be swallowed by cb_chart_month (which matches 'chart_' prefix)."""
+        import asyncio
+        from types import SimpleNamespace
+        import bot
+
+        handlers = {getattr(h.callback, "__name__", ""): h
+                    for h in bot.router.callback_query.handlers}
+        month_h = handlers["cb_chart_month"]
+        dl_h = handlers["cb_chart_download"]
+
+        def matches(h, data):
+            ev = SimpleNamespace(data=data, text=None, from_user=None)
+
+            async def run():
+                return await h.filters[0].call(ev)
+            return bool(asyncio.run(run()))
+
+        payload = "chart_dl_2026-08"
+        assert matches(dl_h, payload) is True
+        assert not matches(month_h, payload), \
+            "month handler must not capture the download callback"
+        assert matches(month_h, "chart_2026-08") is True
 
     def test_render_chart_png(self):
         """Renderer produces non-empty PNG bytes."""
@@ -1285,6 +1322,73 @@ class TestNoSilentInversion:
         today = get_today_measurements(TEST_DB, bot.CHILD_ID)
         assert len(today) == 2
 
+    def test_pick_tod_writes_into_chosen_slot(self):
+        """End-to-end for cb_pick_tod: user's explicit choice persists."""
+        import asyncio
+        import bot
+        from database import add_measurement, get_today_measurements
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+
+        cb = self._make_callback()
+        cb.data = "pick_tod_evening"
+
+        state = MagicMock()
+        store = {"pending_pef": 255}
+
+        async def get_data():
+            return dict(store)
+
+        async def update_data(**kw):
+            store.update(kw)
+
+        async def noop(*a, **kw):
+            return None
+
+        state.get_data = get_data
+        state.update_data = update_data
+        state.set_state = noop
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "respond", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.cb_pick_tod(cb, state))
+
+        today = get_today_measurements(TEST_DB, bot.CHILD_ID)
+        assert len(today) == 2
+        evening = [m for m in today if m["time_of_day"] == "evening"]
+        assert len(evening) == 1
+        assert evening[0]["pef_value"] == 255
+
+    def test_pick_tod_without_pending_value_alerts(self):
+        """A pick_tod callback with no pending value must not write anything."""
+        import asyncio
+        import bot
+        from database import add_measurement, get_today_measurements
+        from unittest.mock import AsyncMock, MagicMock
+
+        add_measurement(TEST_DB, 240, "morning", bot.CHILD_ID, 222)
+
+        cb = self._make_callback()
+        cb.data = "pick_tod_morning"
+        cb.answer = AsyncMock()
+
+        state = MagicMock()
+
+        async def get_data():
+            return {}
+
+        state.get_data = get_data
+        state.update_data = AsyncMock()
+        state.clear = AsyncMock()
+
+        asyncio.run(bot.cb_pick_tod(cb, state))
+
+        cb.answer.assert_awaited()
+        assert cb.answer.await_args.kwargs.get("show_alert") is True
+        assert len(get_today_measurements(TEST_DB, bot.CHILD_ID)) == 1
+
 
 class TestFsmRecovery:
     """Phase 1.4: FSM must not silently swallow input; /cancel must work."""
@@ -1335,7 +1439,7 @@ class TestFsmRecovery:
         """Non-numeric text mid-input must get a hint, not silence."""
         import asyncio
         import bot
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         msg = MagicMock()
         msg.from_user.id = 999
@@ -1343,7 +1447,8 @@ class TestFsmRecovery:
         msg.answer = AsyncMock()
         state = self._make_state("Measurement:pef_input_tens", {"hundreds": 2})
 
-        asyncio.run(bot.catch_all(msg, state))
+        with patch.object(bot, "is_parent", return_value=True):
+            asyncio.run(bot.catch_all(msg, state))
 
         msg.answer.assert_called()
         assert "кнопк" in str(msg.answer.call_args[0][0]).lower()
@@ -1351,7 +1456,7 @@ class TestFsmRecovery:
     def test_invalid_text_during_target_edit_prompts(self):
         import asyncio
         import bot
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         msg = MagicMock()
         msg.from_user.id = 999
@@ -1359,11 +1464,30 @@ class TestFsmRecovery:
         msg.answer = AsyncMock()
         state = self._make_state("Measurement:editing_target_pef")
 
-        asyncio.run(bot.catch_all(msg, state))
+        with patch.object(bot, "is_parent", return_value=True):
+            asyncio.run(bot.catch_all(msg, state))
 
         msg.answer.assert_called()
         assert "число" in str(msg.answer.call_args[0][0]).lower() or \
             "100" in str(msg.answer.call_args[0][0])
+
+    def test_stranger_text_gets_no_status(self):
+        """A non-family user must not receive the child's status block."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock
+
+        msg = MagicMock()
+        msg.from_user.id = 424242  # stranger
+        msg.text = "привет"
+        msg.answer = AsyncMock()
+        state = self._make_state(None)
+
+        asyncio.run(bot.catch_all(msg, state))
+
+        # Either an access warning or silence — but never the status block.
+        for call in msg.answer.call_args_list:
+            assert "Целевая" not in str(call.args[0])
 
 
 class TestMarkdownEscaping:
@@ -1388,6 +1512,16 @@ class TestMarkdownEscaping:
         import bot
         from config import CHILD_ID, CHILD_NAME
         assert bot._user_display_name(CHILD_ID) == CHILD_NAME
+
+    def test_history_line_escapes_note(self):
+        """A note with Markdown chars must be escaped in the history line."""
+        from bot import _history_line
+        m = {"pef_value": 240, "time_of_day": "morning",
+             "measured_at": "2026-08-05 08:00:00", "added_by": 222,
+             "note": "болел_сильно *слабость*"}
+        line = _history_line(m, 260)
+        assert "болел\\_сильно" in line
+        assert "\\*слабость\\*" in line
 
 
 class TestMenuButton:
