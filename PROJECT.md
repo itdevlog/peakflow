@@ -43,16 +43,22 @@
 ## Архитектура проекта
 
 ```
-picklo/
-├── bot.py              # Основная логика бота (~790 строк)
-├── database.py         # SQLite CRUD (~275 строк)
-├── config.py           # Настройки, ID семьи, пороги (~70 строк)
-├── test/               # Pytest тесты (test/test_bot.py и др.)
+peakflow/
+├── bot.py              # Логика бота (хендлеры, FSM, планировщик)
+├── database.py         # SQLite CRUD + миграции (PRAGMA user_version)
+├── config.py           # Настройки, ID семьи, пороги
+├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
+├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
+├── test/               # Pytest тесты (191)
+├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
+├── requirements-dev.txt# + pytest, pyflakes
 ├── .env                # Переменные окружения
 ├── .env.example        # Шаблон .env
 ├── README.md           # Краткое описание
 ├── PROJECT.md          # Полная документация
+├── wiki.md             # Документация логики по коду
+├── roadmap.md          # Аудит и план развития
 └── peakflow.db         # SQLite база (создаётся автоматически)
 ```
 
@@ -61,9 +67,10 @@ picklo/
 | Компонент | Версия | Назначение |
 |-----------|--------|------------|
 | Python | 3.11+ | Язык |
-| aiogram | 3.x | Telegram Bot Framework |
+| aiogram | 3.31 | Telegram Bot Framework |
+| FastAPI | 0.141 | Mini App API (в процессе бота) |
 | SQLite | 3 | Хранилище данных (WAL mode) |
-| matplotlib | 3.10 | Генерация графиков |
+| matplotlib | 3.11 | Генерация графиков |
 | pytest | 9.x | Тестирование |
 | python-dotenv | 1.x | Загрузка `.env` |
 
@@ -133,9 +140,8 @@ DB_PATH=peakflow.db
 |-----------|:---:|----------|
 | `ZONE_GREEN` | `80` | Порог зелёной зоны (% от нормы) |
 | `ZONE_YELLOW` | `60` | Порог жёлтой зоны (% от нормы) |
-| `ZONE_RED` | `50` | Порог красной зоны (% от нормы) |
-| `PEF_NORM_BY_AGE` | dict | Справочник норм по возрасту (4–18 лет) |
-| `REMINDER_MORNING_HOUR` | `8` | Час утреннего напоминания |
+| `ZONE_RED` | `50` | Справочный порог «опасно» (фактически красная зона `< 60%`) |
+| `REMINDER_MORNING_HOUR` | `8` | Час утреннего напоминания ребёнку |
 | `REMINDER_MORNING_DEADLINE` | `10` | Дедлайн утреннего замера |
 | `REMINDER_EVENING_HOUR` | `20` | Час вечернего напоминания |
 | `REMINDER_EVENING_DEADLINE` | `22` | Дедлайн вечернего замера |
@@ -150,16 +156,21 @@ DB_PATH=peakflow.db
 
 ```python
 class Measurement(StatesGroup):
-    waiting_for_pef = State()   # Ожидание ввода числа ПСВ
-    editing_last = State()      # Ожидание нового значения для последнего замера
+    editing_target_pef = State()      # Родитель вводит новую целевую ПСВ
+    editing_reminder_hour = State()   # Родитель вводит час напоминания
+    waiting_note = State()            # Ожидание текста заметки
+    pef_input_hundreds = State()      # Выбор сотен ПСВ
+    pef_input_tens = State()          # Выбор десятков ПСВ
 ```
+
+Выход из любого состояния — команда `/cancel`.
 
 ### Хелперы
 
 | Функция | Параметры | Возвращает | Описание |
 |---------|-----------|-----------|----------|
 | `auto_time_of_day()` | — | `str` | `"morning"` если текущий час < 12, иначе `"evening"` |
-| `tod_emoji(tod)` | `tod: str` | `str` | `"🌅"` или `"🌆"` |
+| `tod_emoji(tod)` | `tod: str` | `str` | `"☀️"` или `"🌙"` |
 | `tod_label(tod)` | `tod: str` | `str` | `"Утро"` или `"Вечер"` |
 | `pef_zone(value, target)` | `value: int, target: int` | `tuple[str, str]` | `(эмодзи, название_зоны)` |
 | `pct_of(value, target)` | `value: int, target: int` | `int` | Процент от нормы |
@@ -311,13 +322,9 @@ def main():
 |---------|-----------|-----------|----------|
 | `is_parent(uid)` | `int` | `bool` | ID в списке родителей |
 | `is_child(uid)` | `int` | `bool` | ID == CHILD_ID |
-| `get_effective_target()` | — | `int` | TARGET_PEF или fallback 300 |
 
-### Справочник `PEF_NORM_BY_AGE`
-
-| Возраст | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
-|---------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Норма | 140 | 170 | 200 | 230 | 260 | 290 | 320 | 350 | 380 | 410 | 440 | 470 | 500 | 530 | 560 |
+Целевая ПСВ читается единой функцией `database.get_effective_target(db_path, fallback)`
+(`settings.target_pef` → `TARGET_PEF` из `.env` → 300); используется и ботом, и Mini App.
 
 ---
 
@@ -434,8 +441,12 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 19 passed
+# 191 passed
 ```
+
+Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
+и dummy-токен. В CI (GitHub Actions) дополнительно прогоняются `pyflakes` и
+`compileall`.
 
 ---
 

@@ -34,7 +34,6 @@ ID узнать через [@userinfobot](https://t.me/userinfobot).
 ## Запуск
 
 ```bash
-cd /root/bot/picklo
 source venv/bin/activate
 python bot.py
 ```
@@ -94,13 +93,16 @@ python -m pytest test/ -v
 ## Структура
 
 ```
-picklo/
-├── bot.py          # Логика бота
-├── database.py     # SQLite CRUD
-├── config.py       # Настройки + ID семьи
-├── test/           # pytest-тесты
-├── .env            # Ваш файл с ID
-└── requirements.txt
+peakflow/
+├── bot.py           # Логика бота
+├── database.py      # SQLite CRUD + миграции
+├── config.py        # Настройки + ID семьи
+├── report.py        # Общие хелперы и CSV
+├── web/             # Mini App (FastAPI + static)
+├── test/            # pytest-тесты (191)
+├── manage.sh        # Установка и эксплуатация
+├── .env             # Ваш файл с ID
+└── requirements.txt # Зависимости
 ```
 
 ## ⚠️ Важно

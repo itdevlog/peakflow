@@ -100,8 +100,7 @@ peakflow/
 |-----------|:--------:|-------|
 | `ZONE_GREEN` | `80` | ≥ 80% от цели → 🟢 зелёная зона |
 | `ZONE_YELLOW` | `60` | 60–79% → 🟡 жёлтая; **< 60% → 🔴 красная** |
-| `ZONE_RED` | `50` | Задекларирован, но в логике зон не используется |
-| `PEF_NORM_BY_AGE` | dict | Справочник норм по возрасту 4–18 лет (кодом не используется) |
+| `ZONE_RED` | `50` | Справочный порог «опасно»; фактическая красная зона — `< ZONE_YELLOW` (60%) |
 | `REMINDER_MORNING_DEADLINE` | `10` | 10:00 — дедлайн утреннего замера |
 | `REMINDER_EVENING_DEADLINE` | `22` | 22:00 — дедлайн вечернего замера |
 | `WEEKLY_REPORT_DAY` | `6` | Воскресенье (0=Пн … 6=Вс) |
@@ -185,7 +184,7 @@ peakflow/
 | `get_all_measurements(db, uid)` | Все записи, новые сверху |
 | `get_today_measurements(db, uid)` | Записи за сегодня (`LIKE 'ГГГГ-ММ-ДД%'`), по возрастанию времени |
 | `has_today_measurement(db, uid, tod)` | Есть ли запись «сегодня + время суток» |
-| `get_week_measurements(...)` | ⚠️ нигде не используется (мёртвый код) |
+| `get_week_measurements(...)` | ⚠️ удалена (мёртвый код) |
 | `get_last_two_weeks(db, uid)` | `(эта_неделя, прошлая)` от понедельника 00:00 |
 | `get_measurements_paginated(db, uid, page, per_page)` | `(страница, всего, всего_страниц)`; по 10 записей |
 | `get_measurements_for_chart(db, uid, days=30)` | Данные за N дней, по возрастанию |
@@ -225,7 +224,6 @@ peakflow/
 | `pef_input_hundreds` | Пользователь выбирает сотни ПСВ (клавиатура 1–6) | Выбор `h_N` → `pef_input_tens`; `back` → главное меню (state.clear) |
 | `pef_input_tens` | Пользователь выбирает десятки (00–90) | Выбор `t_NN` → сохранение по контексту → state.clear |
 | `editing_target_pef` | Родитель вводит текстом новую целевую ПСВ | Ввод цифры 100–800 → сохранение; state.clear |
-| `waiting_delete_confirm` | ⚠️ объявлено, но не используется (мёртвый код) | — |
 
 Данные FSM (`state.update_data`):
 
@@ -647,14 +645,16 @@ loop каждые 60 секунд:
 **Осталось открытым:**
 6. Молчаливая инверсия утро↔вечер осталась для случая «оба слота заняты вручную» (auto-carry перезаписывается корректно; принудительный выбор времени суток — кандидат в Фазу 1).
 
-**Архитектурные:**
-- Блокирующие вызовы SQLite и matplotlib в event loop (нет `asyncio.to_thread`).
-- Прямой SQL в `bot.py` в обход `database.py` (`_save_edit_any`, `cb_edit_any`, `cb_delete*`).
-- Часовой пояс — ручное смещение из двух мест (без DST).
-- Небезопасный `int(callback.data...)`; нет `/cancel`.
-- Markdown без экранирования; CSV вручную (запятая в заметке заменяется на `;` — компромисс).
-- Мёртвый код: `safe_delete`, `_show_history_from_message`, `Measurement.waiting_delete_confirm`, `PEF_NORM_BY_AGE`, `ZONE_RED`, `get_week_measurements`, `get_measurements_for_chart` (заменён месячными выборками).
-- Подпроект B (streak/геймификация) и C (PDF-отчёт врачу) — в очереди.
+**Архитектурные (обновлено 2026-09-16, Фазы 1–3):**
+- ✅ График (`matplotlib`) вынесен в поток (`asyncio.to_thread`) — event loop не блокируется.
+- ✅ Прямой SQL в `bot.py` убран: `get_measurement_by_id`/`edit_measurement`/`delete_measurement` через `database.py`.
+- ✅ Часовой пояс — единый источник (`database.py` импортирует `TZ_OFFSET` из `config`).
+- ✅ Безопасный парсинг `callback_data` (`parse_callback_int`); добавлена `/cancel` и подсказки на нецифровой ввод.
+- ✅ Markdown экранируется (`report.escape_md`); CSV через модуль `csv` (запятые/кавычки экранируются корректно).
+- ✅ Мёртвый код удалён: `safe_delete`, `_show_history_from_message`, `Measurement.waiting_delete_confirm`, `PEF_NORM_BY_AGE`, `get_week_measurements`.
+- ✅ Версионирование схемы БД (`PRAGMA user_version`, `SCHEMA_VERSION`).
+- ✅ CI (GitHub Actions: pyflakes + compileall + pytest); тесты запускаются без `.env` (dummy-токен в `test/conftest.py`).
+- Подпроект B (streak/геймификация) и C (PDF-отчёт врачу) — в очереди; план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
 
@@ -665,10 +665,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 171 тест
+python -m pytest test/ -v         # 191 тест
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, а также Mini App (auth initData, чтение, запись, настройки, экспорт, бэкап). Хендлеры через mock-объекты aiogram; `bot.py` импортируется целиком — нужны установленный aiogram и `.env`.
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД, а также Mini App (auth initData, чтение, запись, настройки, экспорт, бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
