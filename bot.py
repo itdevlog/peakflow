@@ -446,6 +446,21 @@ async def build_status_block() -> str:
 # Send main menu
 # ---------------------------------------------------------------------------
 async def send_main_menu(message_or_callback, user_id: int, member=None):
+    # Single choke point: a non-family-#1 member must never render the
+    # family-#1 menu. The member row is read fresh here so newly created or
+    # just-joined families are caught even when callers pass member=None.
+    db_member = await _db(get_member, DB_PATH, user_id)
+    effective = db_member if db_member is not None else member
+    if effective and effective["family_id"] != DEFAULT_FAMILY_ID:
+        if isinstance(message_or_callback, types.CallbackQuery):
+            await answer_callback(message_or_callback)
+            target = getattr(message_or_callback, "message", None)
+            if target is not None:
+                await target.answer(MemberMiddleware.REG_SOON_MESSAGE)
+        else:
+            await message_or_callback.answer(MemberMiddleware.REG_SOON_MESSAGE)
+        return
+
     is_p = _role(member, user_id) == "parent"
     status = await build_status_block()
 

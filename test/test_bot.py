@@ -2783,6 +2783,49 @@ class TestMemberGateNonFamilyOne:
         with patch.object(bot, "get_member", return_value=None):
             assert self._run(self._message(111, "status")) == [True]
 
+    def test_send_main_menu_family_two_skips_status_builder(self):
+        """The choke point must not render family #1's status for family #2."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, None)
+        with patch.object(bot, "get_member",
+                          return_value={"role": "parent", "family_id": 2}), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status:
+            asyncio.run(bot.send_main_menu(
+                msg, 999, member={"role": "parent", "family_id": 2}))
+        status.assert_not_awaited()
+        assert "следующем обновлении" in msg.answer.await_args.args[0]
+
+    def test_send_main_menu_family_one_still_builds_status(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, None)
+        with patch.object(bot, "get_member",
+                          return_value={"role": "parent", "family_id": 1}), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status:
+            asyncio.run(bot.send_main_menu(
+                msg, 999, member={"role": "parent", "family_id": 1}))
+        status.assert_awaited()
+        assert msg.answer.await_args.args[0] == "STATUS"
+
+    def test_send_main_menu_member_none_unchanged(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(111, None)
+        with patch.object(bot, "get_member", return_value=None), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status:
+            asyncio.run(bot.send_main_menu(msg, 111, member=None))
+        status.assert_awaited()
+
 
 class TestHandlerRolesFromDb:
     """Task 4 (SP3B): runtime role checks must use the member row from the DB.
@@ -2868,9 +2911,9 @@ class TestHandlerRolesFromDb:
 
         with patch.object(bot, "build_status_block", new=AsyncMock(return_value="status")):
             asyncio.run(bot.send_main_menu(parent_msg, 999,
-                                           member={"role": "parent", "family_id": 2}))
+                                           member={"role": "parent", "family_id": 1}))
             asyncio.run(bot.send_main_menu(child_msg, 999,
-                                           member={"role": "child", "family_id": 2}))
+                                           member={"role": "child", "family_id": 1}))
 
         parent_labels = labels(parent_msg.answer.call_args.kwargs["reply_markup"])
         child_labels = labels(child_msg.answer.call_args.kwargs["reply_markup"])
@@ -3129,6 +3172,51 @@ class TestRegistrationFlow:
         m.assert_called_once_with(bot.DB_PATH, 700, "Ивановы")
         state.clear.assert_awaited()
         assert "PARENTTOK" in self._sent(msg)
+
+    def test_input_family_name_new_family_does_not_render_family_one_menu(self):
+        """Centralized gate: a freshly created family #2 must not see family #1."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "Ивановы")
+        state = self._make_state("Registration:entering_family_name")
+
+        with patch.object(bot, "create_family_with_owner", return_value=2), \
+             patch.object(bot, "get_family_invite",
+                          return_value={"token": "PARENTTOK"}), \
+             patch.object(bot, "get_member",
+                          return_value={"role": "parent", "family_id": 2}), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status:
+            asyncio.run(bot.input_family_name(msg, state, member=None))
+
+        status.assert_not_awaited()
+        assert "STATUS" not in self._sent(msg)
+        assert "следующем обновлении" in self._sent(msg)
+
+    def test_input_invite_code_new_family_does_not_render_family_one_menu(self):
+        """Centralized gate: a freshly joined family #2 must not see family #1."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "TOKEN123")
+        state = self._make_state("Registration:entering_invite_code")
+
+        with patch.object(bot, "is_parent", return_value=False), \
+             patch.object(bot, "is_child", return_value=False), \
+             patch.object(bot, "join_by_invite",
+                          return_value={"family_id": 2, "role": "child", "name": "Маша"}), \
+             patch.object(bot, "get_member",
+                          return_value={"role": "child", "family_id": 2}), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status:
+            asyncio.run(bot.input_invite_code(msg, state, member=None))
+
+        status.assert_not_awaited()
+        assert "STATUS" not in self._sent(msg)
+        assert "следующем обновлении" in self._sent(msg)
 
     def test_input_family_name_blank_prompts(self):
         import asyncio
