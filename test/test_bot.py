@@ -2191,7 +2191,7 @@ class TestFamiliesAndMembers:
     def test_default_family_constants(self):
         import database
         assert database.DEFAULT_FAMILY_ID == 1
-        assert database.SCHEMA_VERSION == 2
+        assert database.SCHEMA_VERSION == 3
 
 
 class TestMeasurementV2:
@@ -2284,7 +2284,7 @@ class TestMigrationV2:
         row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
         setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
         conn.close()
-        assert version == SCHEMA_VERSION == 2
+        assert version == SCHEMA_VERSION == 3
         assert row == (1, 111, 240)
         assert setting[0] == "300"
 
@@ -2463,6 +2463,56 @@ class TestFamilyIsolation:
         assert delete_measurement(TEST_DB, mid2, 111, family_id=f1) is False
         assert len(get_all_measurements(TEST_DB, 111, family_id=f2)) == 1
         assert delete_measurement(TEST_DB, mid1, 111, family_id=f1) is True
+
+
+class TestInvites:
+    def test_schema_version_is_3(self):
+        import database
+        assert database.SCHEMA_VERSION == 3
+
+    def test_create_and_get_invite(self):
+        from database import create_family, create_invite, get_invite
+        fid = create_family(TEST_DB, "Семья")
+        token = create_invite(TEST_DB, fid, "parent")
+        inv = get_invite(TEST_DB, token)
+        assert inv["family_id"] == fid and inv["role"] == "parent"
+        assert get_invite(TEST_DB, "nope") is None
+
+    def test_child_card_has_name(self):
+        from database import create_family, create_invite, list_child_cards
+        fid = create_family(TEST_DB, "Семья")
+        create_invite(TEST_DB, fid, "child", "Маша")
+        cards = list_child_cards(TEST_DB, fid)
+        assert len(cards) == 1 and cards[0]["name"] == "Маша"
+
+    def test_tokens_are_unique(self):
+        from database import create_family, create_invite
+        fid = create_family(TEST_DB, "Семья")
+        tokens = {create_invite(TEST_DB, fid, "child", f"c{i}") for i in range(20)}
+        assert len(tokens) == 20
+
+    def test_delete_invite_invalidates(self):
+        from database import create_family, create_invite, get_invite, delete_invite
+        fid = create_family(TEST_DB, "Семья")
+        token = create_invite(TEST_DB, fid, "parent")
+        assert delete_invite(TEST_DB, token) is True
+        assert get_invite(TEST_DB, token) is None
+        assert delete_invite(TEST_DB, token) is False
+
+    def test_regenerate_family_invite_replaces(self):
+        from database import (create_family, create_invite, get_family_invite,
+                              regenerate_family_invite, get_invite)
+        fid = create_family(TEST_DB, "Семья")
+        old = create_invite(TEST_DB, fid, "parent")
+        new = regenerate_family_invite(TEST_DB, fid)
+        assert new != old
+        assert get_invite(TEST_DB, old) is None
+        assert get_family_invite(TEST_DB, fid)["token"] == new
+
+    def test_get_family_invite_none_when_absent(self):
+        from database import create_family, get_family_invite
+        fid = create_family(TEST_DB, "Семья")
+        assert get_family_invite(TEST_DB, fid) is None
 
 
 if __name__ == "__main__":
