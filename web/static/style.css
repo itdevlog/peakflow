@@ -16,6 +16,8 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 #topbar { display: flex; justify-content: space-between; align-items: center;
   font-weight: 600; margin-bottom: 8px; }
 #target-badge { font-weight: 400; color: var(--muted); font-size: 14px; }
+#child-select { border: none; border-radius: 8px; background: var(--card);
+  color: var(--fg); font-size: 14px; padding: 4px 8px; max-width: 45%; }
 #tabs { display: flex; gap: 4px; margin-bottom: 12px; }
 .tab { flex: 1; padding: 10px 4px; border: none; border-radius: 8px;
   background: var(--card); color: var(--fg); font-size: 14px; }

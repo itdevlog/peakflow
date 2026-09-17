@@ -118,6 +118,16 @@ def test_api_me_exposes_zone_thresholds():
     assert body["zones"] == {"green": 80, "yellow": 60}
 
 
+def test_api_me_exposes_children_and_active_child():
+    """SP3C: the Mini App needs the child list to render its selector."""
+    _setup_db()
+    body = _client().get("/api/me", headers=_auth(CHILD_ID)).json()
+    assert isinstance(body["children"], list)
+    assert body["children"], "env-configured child must be listed"
+    assert body["active_child_id"] == CHILD_ID
+    assert body["children"][0]["telegram_id"] == CHILD_ID
+
+
 def test_api_parent_role():
     _setup_db()
     body = _client().get("/api/me", headers=_auth(PARENT_IDS[0])).json()
@@ -213,6 +223,16 @@ def test_static_index_has_settings_screen():
     assert 'id="screen-settings"' in r.text
     assert 'data-screen="settings"' in r.text
     assert 'id="tab-settings" hidden' in r.text
+
+
+def test_static_app_js_wires_child_selector():
+    """SP3C: app.js stores the child list and calls the active-child API."""
+    path = os.path.join(os.path.dirname(__file__), "..", "web", "static", "app.js")
+    with open(path, encoding="utf-8") as f:
+        js = f.read()
+    assert "state.activeChildId" in js
+    assert "/api/active-child" in js
+    assert "Добавьте ребёнка в боте" in js
 
 
 class TestWebRolesFromDb:
