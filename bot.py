@@ -157,6 +157,19 @@ def _family_deny_text(member) -> str:
     return "⚠️ Сначала войдите в семью." if member is None else "⚠️ Только для родителей."
 
 
+def _is_reg_command(text) -> bool:
+    """True only for an exact /start or /cancel command.
+
+    The optional ``@botname`` suffix is stripped. A bare ``startswith`` would
+    treat ``/startxyz`` as registration, letting it through the middleware to
+    ``catch_all`` and then to family #1's ``send_main_menu``.
+    """
+    parts = (text or "").split()
+    if not parts:
+        return False
+    return parts[0].split("@")[0] in {"/start", "/cancel"}
+
+
 class MemberMiddleware(BaseMiddleware):
     """Inject the caller's member row (role, family_id) from the DB.
 
@@ -176,8 +189,7 @@ class MemberMiddleware(BaseMiddleware):
     def _is_registration(cls, event) -> bool:
         if isinstance(event, types.CallbackQuery):
             return event.data in cls._REG_CALLBACKS
-        text = getattr(event, "text", None) or ""
-        return text.startswith("/start") or text.startswith("/cancel")
+        return _is_reg_command(getattr(event, "text", None))
 
     @classmethod
     async def _deny(cls, event) -> None:
@@ -462,6 +474,13 @@ async def _show_registration(message_or_callback, extra_text: str = ""):
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
+    # Interim gate: /start is allowed through the middleware so registration can
+    # still run, but a non-family-#1 member must never reach send_main_menu
+    # (it reads family #1's global CHILD_ID).
+    if member and member["family_id"] != DEFAULT_FAMILY_ID:
+        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
+        await state.clear()
+        return
     role = _role(member, uid)
 
     # Deep-link: /start <token>
@@ -477,6 +496,11 @@ async def cmd_start(message: types.Message, state: FSMContext, member=None):
         token = parts[1].strip()
         result = await _db(join_by_invite, DB_PATH, token, uid)
         if result:
+            if result["family_id"] != DEFAULT_FAMILY_ID:
+                # Joined a new family: data access is gated until SP2C.
+                await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
+                await state.clear()
+                return
             who = "👨‍👧 Родитель" if result["role"] == "parent" else f"👶 {escape_md(result['name'])}"
             await message.answer(f"✅ Вы вошли в семью как *{who}*", parse_mode="Markdown")
             await state.clear()
@@ -533,6 +557,12 @@ async def cb_reg_join(callback: types.CallbackQuery, state: FSMContext, member=N
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
+    # Interim gate: /cancel is allowed through so mid-registration users can
+    # escape a state, but a non-family-#1 member must not reach send_main_menu.
+    if member and member["family_id"] != DEFAULT_FAMILY_ID:
+        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
+        await state.clear()
+        return
     current = await state.get_state()
     # Always clear the FSM state first: an unknown user (mid-registration) must
     # be able to escape a text state with /cancel.
