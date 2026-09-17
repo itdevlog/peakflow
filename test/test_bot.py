@@ -2564,5 +2564,54 @@ class TestRegistrationAccessors:
         assert n == 1
 
 
+class TestMemberMiddleware:
+    def test_role_from_member(self):
+        import bot
+        assert bot._role({"role": "parent"}, 999) == "parent"
+        assert bot._role({"role": "child"}, 999) == "child"
+
+    def test_role_fallback_to_env_for_family_one(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: uid == 222)
+        monkeypatch.setattr(bot, "is_child", lambda uid: uid == 111)
+        assert bot._role(None, 222) == "parent"
+        assert bot._role(None, 111) == "child"
+        assert bot._role(None, 555) == "unknown"
+
+    def test_middleware_injects_member(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        captured = {}
+
+        async def handler(event, data):
+            captured.update(data)
+            return "ok"
+
+        event = MagicMock()
+        event.from_user.id = 111
+        with patch.object(bot, "get_member", return_value={"role": "child", "family_id": 1}):
+            result = asyncio.run(bot.MemberMiddleware()(handler, event, {}))
+
+        assert result == "ok"
+        assert captured["member"] == {"role": "child", "family_id": 1}
+
+    def test_middleware_none_when_no_user(self):
+        import asyncio
+        import bot
+        from unittest.mock import MagicMock
+
+        captured = {}
+
+        async def handler(event, data):
+            captured.update(data)
+
+        event = MagicMock()
+        event.from_user = None
+        asyncio.run(bot.MemberMiddleware()(handler, event, {}))
+        assert captured["member"] is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

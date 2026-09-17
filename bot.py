@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
 
-from aiogram import Bot, Dispatcher, types, F, Router
+from aiogram import Bot, Dispatcher, types, F, Router, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -47,6 +47,7 @@ from database import (
     get_last_of_tod, replace_auto_measurement,
     get_previous_of_tod,
     get_measurement_by_id,
+    get_member,
 )
 
 import config as app_config
@@ -115,6 +116,34 @@ def release_lock(handle):
 
 
 # ---------------------------------------------------------------------------
+# Role resolution + member injection
+# ---------------------------------------------------------------------------
+def _role(member, uid: int) -> str:
+    """Роль участника: из БД (member), иначе fallback на .env (семья №1)."""
+    if member:
+        return member["role"]
+    if is_parent(uid):
+        return "parent"
+    if is_child(uid):
+        return "child"
+    return "unknown"
+
+
+def _is_parent_member(member, uid: int) -> bool:
+    return _role(member, uid) == "parent"
+
+
+class MemberMiddleware(BaseMiddleware):
+    """Inject the caller's member row (role, family_id) from the DB."""
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        uid = getattr(user, "id", None)
+        data["member"] = await _db(get_member, DB_PATH, uid) if uid else None
+        return await handler(event, data)
+
+
+# ---------------------------------------------------------------------------
 # Bot setup
 # ---------------------------------------------------------------------------
 bot = Bot(token=BOT_TOKEN)
@@ -122,6 +151,10 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
+
+member_middleware = MemberMiddleware()
+router.message.middleware(member_middleware)
+router.callback_query.middleware(member_middleware)
 
 # ---------------------------------------------------------------------------
 # FSM States
