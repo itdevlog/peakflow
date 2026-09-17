@@ -55,10 +55,15 @@ CREATE INDEX idx_members_family ON members(family_id);
 
 ```sql
 -- measurements: user_id → child_id, + family_id
-ALTER TABLE measurements RENAME COLUMN user_id TO child_id;
-ALTER TABLE measurements ADD COLUMN family_id INTEGER DEFAULT 1;
-ALTER TABLE measurements ADD COLUMN note TEXT;          -- уже есть, идемпотентно
-ALTER TABLE measurements ADD COLUMN source TEXT DEFAULT 'manual';
+-- SQLite не переименовывает/не меняет столбцы в CHECK через ALTER, поэтому
+-- таблица перестраивается паттерном new → copy → drop → rename:
+--   1. ALTER TABLE measurements RENAME TO measurements_v1;
+--   2. CREATE TABLE measurements (... child_id ..., family_id ..., CHECK(time_of_day
+--      IN ('morning','evening','unknown')));
+--   3. INSERT INTO measurements (...) SELECT ... FROM measurements_v1
+--      (child_id из user_id/child_id, family_id = COALESCE(family_id, 1));
+--   4. DROP TABLE measurements_v1.
+-- Свежая БД создаёт v2-таблицу сразу (rebuild — no-op).
 CREATE INDEX idx_meas_family_child_time ON measurements(family_id, child_id, measured_at);
 
 -- settings: ключ теперь в разрезе семьи

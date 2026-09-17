@@ -59,7 +59,15 @@ def _rebuild_measurements_v2(conn):
         return                        # already v2
     conn.execute("ALTER TABLE measurements RENAME TO measurements_v1")
     conn.execute(_MEASUREMENTS_V2_DDL)
-    has_old = "child_id" if "child_id" in cols else "user_id"
+    if "child_id" in cols:
+        child_expr = "child_id"
+    elif "user_id" in cols:
+        child_expr = "user_id"
+    else:
+        raise ValueError(
+            "cannot rebuild measurements: neither child_id nor user_id present"
+        )
+    family_expr = "COALESCE(family_id, ?)" if "family_id" in cols else "?"
     tod = "time_of_day" if "time_of_day" in cols else "'unknown'"
     added_by = "added_by" if "added_by" in cols else "NULL"
     note = "note" if "note" in cols else "NULL"
@@ -67,8 +75,8 @@ def _rebuild_measurements_v2(conn):
     conn.execute(
         f"INSERT INTO measurements (id, family_id, child_id, pef_value, time_of_day, "
         f"measured_at, added_by, note, source) "
-        f"SELECT id, ?, {has_old}, pef_value, {tod}, measured_at, {added_by}, "
-        f"{note}, {source} FROM measurements_v1",
+        f"SELECT id, {family_expr}, {child_expr}, pef_value, {tod}, measured_at, "
+        f"{added_by}, {note}, {source} FROM measurements_v1",
         (DEFAULT_FAMILY_ID,)
     )
     conn.execute("DROP TABLE measurements_v1")
@@ -199,6 +207,10 @@ def _needs_migration(probe) -> bool:
     """
     try:
         version = probe.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.OperationalError:
+        # Locked/busy DB: be conservative and back up rather than risk a
+        # migration without one.
+        return True
     except sqlite3.DatabaseError:
         return False  # not a valid SQLite file — nothing safe to back up
     if version < SCHEMA_VERSION:
@@ -324,7 +336,7 @@ def get_last_of_tod(db_path: str, child_id: int, time_of_day: str,
 
 def replace_auto_measurement(db_path: str, child_id: int, time_of_day: str,
                             pef_value: int, added_by: int,
-                            family_id: int = DEFAULT_FAMILY_ID):
+                            family_id: int = DEFAULT_FAMILY_ID) -> "int | bool":
     """Overwrite today's auto-carry record with a real measurement.
 
     Returns the replaced row's id, or False when there was no auto record.
@@ -751,15 +763,19 @@ def get_family(db_path: str, family_id: int) -> Optional[dict]:
 
 
 def add_member(db_path: str, telegram_id: int, family_id: int, role: str, name: str) -> None:
+    if role not in ("parent", "child"):
+        raise ValueError(f"invalid role: {role!r}")
     conn = get_connection(db_path)
-    conn.execute(
-        "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
-        "role = excluded.role, name = excluded.name",
-        (telegram_id, family_id, role, name)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
+            "role = excluded.role, name = excluded.name",
+            (telegram_id, family_id, role, name)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_member(db_path: str, telegram_id: int) -> Optional[dict]:

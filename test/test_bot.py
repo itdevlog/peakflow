@@ -2379,13 +2379,64 @@ class TestMigrationV2:
             database.init_db(TEST_DB)
             m.assert_called_once()
 
+    def test_needs_migration_true_on_locked_db(self):
+        """A busy/locked DB must trigger a backup rather than be skipped (F1)."""
+        from database import _needs_migration
+
+        class LockedProbe:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("database is locked")
+
+        assert _needs_migration(LockedProbe()) is True
+
+    def test_needs_migration_false_on_malformed_file(self):
+        """A non-SQLite file is not migration-worthy (F1, no crash)."""
+        import os
+        from database import _needs_migration
+        for ext in ["", "-wal", "-shm", "-journal"]:
+            if os.path.exists(TEST_DB + ext):
+                os.remove(TEST_DB + ext)
+        with open(TEST_DB, "wb") as f:
+            f.write(b"this is not a sqlite database")
+        probe = sqlite3.connect(TEST_DB)
+        try:
+            assert _needs_migration(probe) is False
+        finally:
+            probe.close()
+
+    def test_rebuild_preserves_existing_family_id(self):
+        """v1 measurements that already carry family_id keep it (F3)."""
+        import os
+        import sqlite3
+        from database import init_db
+        for ext in ["", "-wal", "-shm", "-journal"]:
+            if os.path.exists(TEST_DB + ext):
+                os.remove(TEST_DB + ext)
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "family_id INTEGER, user_id INTEGER NOT NULL, pef_value INTEGER NOT NULL, "
+            "time_of_day TEXT NOT NULL, measured_at TIMESTAMP, added_by INTEGER, note TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO measurements (family_id, user_id, pef_value, time_of_day, measured_at) "
+            "VALUES (7, 111, 240, 'morning', '2026-01-01 08:00:00')"
+        )
+        conn.commit()
+        conn.close()
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        row = conn.execute("SELECT family_id, child_id FROM measurements").fetchone()
+        conn.close()
+        assert row == (7, 111)
+
 
 class TestFamilyIsolation:
     def test_two_families_do_not_see_each_other(self):
-        from database import (create_family, add_member, add_measurement,
+        from database import (create_family, add_measurement,
                               set_setting, mark_reminder_sent,
                               get_all_measurements, get_stats, get_setting,
-                              get_today_measurements, has_today_measurement,
+                              get_today_measurements,
                               was_reminder_sent)
         f1 = create_family(TEST_DB, "A")
         f2 = create_family(TEST_DB, "B")

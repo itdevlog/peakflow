@@ -132,7 +132,7 @@ peakflow/
 Проверки прав в хендлерах:
 
 - `cb_edit_any`, `cb_delete`, `cb_delete_confirm`*(частично)*, `cb_settings`, `cb_change_target` — только для родителей (`is_parent`), иначе alert «Только родители…».
-- **Все измерения пишутся от имени ребёнка**: в БД `user_id` = `CHILD_ID` всегда, а ID того, кто нажал кнопки, хранится в `added_by`.
+- **Все измерения пишутся от имени ребёнка**: в БД `child_id` = `CHILD_ID` всегда, а ID того, кто нажал кнопки, хранится в `added_by`.
 
 ---
 
@@ -349,7 +349,7 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
    forced_tod есть?  → берём его (повторный замер)
    иначе             → auto_time_of_day();
                        если этот слот занят → МОЛЧА инвертируем утро↔вечер (⚠️ см. §24, п.6)
-2. add_measurement() → INSERT (user_id=CHILD_ID, added_by=кто нажал)
+2. add_measurement() → INSERT (child_id=CHILD_ID, added_by=кто нажал)
 3. Ответ: «✅ ☀️ Утро: *240* л/мин 🟢 / Зона: Зелёная (92% от нормы) / 📈 Изменение: +5»
    (изменение = разница с ПРЕДПОСЛЕДНИМ замером)
 4. Уведомление «📝 <кто> добавил для *Motya*: 240 л/мин 🟢 (Утро)»
@@ -368,14 +368,14 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 - Берётся `get_last_measurement()` (последняя запись ребёнка).
 - Если записей нет → «📭 Нет измерений для исправления».
 - FSM: `edit_id`, `input_context="edit_last"`, показ старого значения, клавиатура сотен → десятков.
-- `_save_edit_last()`: `edit_measurement(DB_PATH, mid, new_val, CHILD_ID)` — запись принадлежит ребёнку, поэтому `user_id` передаётся всегда `CHILD_ID` (работает и для родителей, и для ребёнка).
+- `_save_edit_last()`: `edit_measurement(DB_PATH, mid, new_val, CHILD_ID)` — запись принадлежит ребёнку, поэтому `child_id` передаётся всегда `CHILD_ID` (работает и для родителей, и для ребёнка).
 
 ### Редактирование любой записи (`edit_<id>`) — только родитель
 
 - Хендлер `cb_edit_any` перехватывает все `edit_*` кроме `edit_last` (проверка равенства — хак, т.к. `startswith("edit_")`).
 - Проверка `is_parent` → иначе alert.
 - Чтение записи прямым SQL (в обход `database.py`), показ «✏️ Запись #id: …», FSM: `edit_id`, `input_context="edit_any"` → ввод сотен/десятков.
-- `_save_edit_any()`: прямой `UPDATE ... WHERE id=? AND user_id=CHILD_ID` — здесь `user_id` передаётся верно (CHILD_ID), поэтому для родителей работает.
+- `_save_edit_any()`: прямой `UPDATE ... WHERE id=? AND child_id=CHILD_ID` — здесь `child_id` передаётся верно (CHILD_ID), поэтому для родителей работает.
 - После сохранения — возврат в историю (`_show_history_from_callback`, страница 1).
 
 ---
@@ -397,7 +397,7 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 ### Шаг 2: `cb_delete_confirm` (callback `del_confirm_<id>`)
 
 - Проверка `is_parent` → иначе alert «Только родители могут удалять» (защита и на этапе подтверждения).
-- Прямой `DELETE FROM measurements WHERE id=? AND user_id=CHILD_ID`.
+- Прямой `DELETE FROM measurements WHERE id=? AND child_id=CHILD_ID`.
 - Результат — alert «✅ Запись удалена» / «❌ Не удалось», затем `state.clear()` и возврат в историю (стр. 1).
 
 ---
