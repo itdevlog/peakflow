@@ -74,9 +74,26 @@ def _rebuild_measurements_v2(conn):
 
 
 def _rebuild_settings_v2(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS settings (
-        family_id INTEGER NOT NULL DEFAULT 1, key TEXT NOT NULL, value TEXT NOT NULL,
-        PRIMARY KEY (family_id, key))""")
+    """v1->v2: settings(key PK) -> settings(family_id, key) PK."""
+    cols = _table_columns(conn, "settings")
+    if "family_id" in cols:
+        return
+    if cols:
+        conn.execute("ALTER TABLE settings RENAME TO settings_v1")
+    conn.execute("""
+        CREATE TABLE settings (
+            family_id INTEGER NOT NULL DEFAULT 1,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (family_id, key)
+        )
+    """)
+    if cols:
+        conn.execute(
+            "INSERT INTO settings (family_id, key, value) SELECT ?, key, value FROM settings_v1",
+            (DEFAULT_FAMILY_ID,)
+        )
+        conn.execute("DROP TABLE settings_v1")
 
 
 _REMINDER_FLAGS = ("morning_reminder", "evening_reminder", "weekly_report",
@@ -140,7 +157,10 @@ def init_db(db_path: str):
     _migrate_to_v2(c)
 
     # Default target PEF if not set
-    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_pef', '260')")
+    c.execute(
+        "INSERT OR IGNORE INTO settings (family_id, key, value) VALUES (?, 'target_pef', '260')",
+        (DEFAULT_FAMILY_ID,)
+    )
 
     c.execute("""
         CREATE INDEX IF NOT EXISTS idx_meas_family_child_time
@@ -576,32 +596,38 @@ def _reminder_column(reminder_type: str) -> Optional[str]:
 # ============================================================================
 # Settings
 # ============================================================================
-def get_setting(db_path: str, key: str, default: str = "") -> str:
-    """Get a setting value by key."""
+def get_setting(db_path: str, key: str, default: str = "",
+                family_id: int = DEFAULT_FAMILY_ID) -> str:
+    """Get a setting value by key within a family."""
     conn = get_connection(db_path)
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    row = conn.execute(
+        "SELECT value FROM settings WHERE family_id = ? AND key = ?", (family_id, key)
+    ).fetchone()
     conn.close()
     return row["value"] if row else default
 
 
-def set_setting(db_path: str, key: str, value: str):
-    """Set a setting value."""
+def set_setting(db_path: str, key: str, value: str,
+                family_id: int = DEFAULT_FAMILY_ID):
+    """Set a setting value within a family."""
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-        (key, value)
+        "INSERT INTO settings (family_id, key, value) VALUES (?, ?, ?) "
+        "ON CONFLICT(family_id, key) DO UPDATE SET value = excluded.value",
+        (family_id, key, value)
     )
     conn.commit()
     conn.close()
 
 
-def get_effective_target(db_path: str, fallback: int) -> int:
+def get_effective_target(db_path: str, fallback: int,
+                         family_id: int = DEFAULT_FAMILY_ID) -> int:
     """Target PEF from DB settings, falling back to the env-configured value.
 
     Single source of truth shared by bot and web layer.
     """
     try:
-        val = int(get_setting(db_path, "target_pef", str(fallback)))
+        val = int(get_setting(db_path, "target_pef", str(fallback), family_id=family_id))
         return val if val > 0 else (fallback or 300)
     except (TypeError, ValueError):
         return fallback or 300
@@ -668,12 +694,12 @@ REMINDER_HOURS_DEFAULT = {
 }
 
 
-def get_reminder_hours(db_path: str) -> dict:
+def get_reminder_hours(db_path: str, family_id: int = DEFAULT_FAMILY_ID) -> dict:
     """Reminder hours from settings; defaults when missing/invalid."""
     result = dict(REMINDER_HOURS_DEFAULT)
     for key in result:
         try:
-            val = int(get_setting(db_path, f"reminder_{key}", ""))
+            val = int(get_setting(db_path, f"reminder_{key}", "", family_id=family_id))
             if 0 <= val <= 23:
                 result[key] = val
         except ValueError:

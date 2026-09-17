@@ -20,7 +20,9 @@ def setup_db():
     from database import init_db
     init_db(TEST_DB)  # single source of schema truth (incl. migrations, index)
     conn = sqlite3.connect(TEST_DB)
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_pef', '260')")
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (family_id, key, value) VALUES (1, 'target_pef', '260')"
+    )
     conn.commit()
     conn.close()
 
@@ -1308,6 +1310,28 @@ class TestEditDeleteExport:
         from database import get_setting
         val = get_setting(TEST_DB, "target_pef")
         assert val == "260"
+
+
+class TestSettingsFamilyScope:
+    def test_settings_isolated_by_family(self):
+        from database import set_setting, get_setting
+        set_setting(TEST_DB, "target_pef", "300", family_id=1)
+        set_setting(TEST_DB, "target_pef", "400", family_id=2)
+        assert get_setting(TEST_DB, "target_pef", family_id=1) == "300"
+        assert get_setting(TEST_DB, "target_pef", family_id=2) == "400"
+
+    def test_effective_target_per_family(self):
+        from database import set_setting, get_effective_target
+        set_setting(TEST_DB, "target_pef", "333", family_id=1)
+        assert get_effective_target(TEST_DB, 260, family_id=1) == 333
+        assert get_effective_target(TEST_DB, 260, family_id=2) == 260
+
+    def test_reminder_hours_per_family(self):
+        from database import set_setting, get_reminder_hours
+        set_setting(TEST_DB, "reminder_child_morning", "6", family_id=1)
+        set_setting(TEST_DB, "reminder_child_morning", "9", family_id=2)
+        assert get_reminder_hours(TEST_DB, family_id=1)["child_morning"] == 6
+        assert get_reminder_hours(TEST_DB, family_id=2)["child_morning"] == 9
 
 
 class TestCallbackParsing:
