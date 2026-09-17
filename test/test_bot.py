@@ -2380,5 +2380,39 @@ class TestMigrationV2:
             m.assert_called_once()
 
 
+class TestFamilyIsolation:
+    def test_two_families_do_not_see_each_other(self):
+        from database import (create_family, add_member, add_measurement,
+                              set_setting, mark_reminder_sent,
+                              get_all_measurements, get_stats, get_setting,
+                              get_today_measurements, has_today_measurement,
+                              was_reminder_sent)
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        add_measurement(TEST_DB, 240, "morning", 111, 111, family_id=f1)
+        add_measurement(TEST_DB, 300, "morning", 111, 111, family_id=f2)
+        set_setting(TEST_DB, "target_pef", "240", family_id=f1)
+        set_setting(TEST_DB, "target_pef", "400", family_id=f2)
+        mark_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=f1)] == [240]
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=f2)] == [300]
+        assert get_stats(TEST_DB, 111, family_id=f1)["total"] == 1
+        assert get_setting(TEST_DB, "target_pef", family_id=f1) == "240"
+        assert get_setting(TEST_DB, "target_pef", family_id=f2) == "400"
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+        assert get_today_measurements(TEST_DB, 111, family_id=f2)[0]["pef_value"] == 300
+
+    def test_delete_only_touches_own_family(self):
+        from database import create_family, add_measurement, delete_measurement, get_all_measurements
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        mid1 = add_measurement(TEST_DB, 240, "morning", 111, 111, family_id=f1)
+        mid2 = add_measurement(TEST_DB, 300, "morning", 111, 111, family_id=f2)
+        assert delete_measurement(TEST_DB, mid2, 111, family_id=f1) is False
+        assert len(get_all_measurements(TEST_DB, 111, family_id=f2)) == 1
+        assert delete_measurement(TEST_DB, mid1, 111, family_id=f1) is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
