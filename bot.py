@@ -55,6 +55,7 @@ from database import (
     list_family_children,
     list_family_parents,
     resolve_active_child,
+    set_active_child,
     count_family_children,
     list_child_cards,
     create_invite,
@@ -160,64 +161,18 @@ def _family_deny_text(member) -> str:
     return "⚠️ Сначала войдите в семью." if member is None else "⚠️ Только для родителей."
 
 
-def _is_reg_command(text) -> bool:
-    """True only for a bare /start or /cancel addressed to *this* bot.
-
-    The optional ``@mention`` suffix is accepted only when it matches the bot's
-    own username; anything else (``/start@otherbot``, ``/start@``, ``/startxyz``)
-    is rejected. A bare prefix match would let those fall through to
-    ``catch_all`` and leak family #1's menu.
-    """
-    parts = (text or "").split()
-    if not parts:
-        return False
-    token = parts[0]
-    if "@" in token:
-        command, _, mention = token.partition("@")
-        username = getattr(bot, "username", None)
-        if not mention or not username or mention.lower() != username.lower():
-            return False
-        token = command
-    return token in {"/start", "/cancel"}
-
-
 class MemberMiddleware(BaseMiddleware):
-    """Inject the caller's member row (role, family_id) from the DB.
+    """Inject the caller's member row (role, family_id, active_child_id).
 
-    Interim gate until SP2C threads the active child/family through every
-    handler: all data access still targets family #1's global ``CHILD_ID``, so
-    members of any other family are denied everything except registration.
+    All data access resolves the tenant from ``member`` (see ``_ctx``), so the
+    middleware only needs to load the row once per update.
     """
-
-    REG_SOON_MESSAGE = (
-        "🚧 Дневник для нескольких семей появится в следующем обновлении. "
-        "Регистрация уже сохранена."
-    )
-    REG_SOON_CALLBACK = "🚧 Дневник для новых семей появится позже"
-    _REG_CALLBACKS = {"reg_create", "reg_join"}
-
-    @classmethod
-    def _is_registration(cls, event) -> bool:
-        if isinstance(event, types.CallbackQuery):
-            return event.data in cls._REG_CALLBACKS
-        return _is_reg_command(getattr(event, "text", None))
-
-    @classmethod
-    async def _deny(cls, event) -> None:
-        if isinstance(event, types.CallbackQuery):
-            await event.answer(cls.REG_SOON_CALLBACK, show_alert=True)
-        else:
-            await event.answer(cls.REG_SOON_MESSAGE)
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         uid = getattr(user, "id", None)
         member = await _db(get_member, DB_PATH, uid) if uid else None
         data["member"] = member
-        if member and member["family_id"] != DEFAULT_FAMILY_ID:
-            if not self._is_registration(event):
-                await self._deny(event)
-                return
         return await handler(event, data)
 
 
@@ -503,24 +458,9 @@ async def build_status_block(member=None) -> str:
 # Send main menu
 # ---------------------------------------------------------------------------
 async def send_main_menu(message_or_callback, user_id: int, member=None):
-    # Single choke point: a non-family-#1 member must never render the
-    # family-#1 menu. The member row is read fresh here so newly created or
-    # just-joined families are caught even when callers pass member=None.
-    db_member = await _db(get_member, DB_PATH, user_id)
-    effective = db_member if db_member is not None else member
-    if effective and effective["family_id"] != DEFAULT_FAMILY_ID:
-        if isinstance(message_or_callback, types.CallbackQuery):
-            await answer_callback(message_or_callback)
-            target = getattr(message_or_callback, "message", None)
-            if target is not None:
-                await target.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        else:
-            await message_or_callback.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        return
-
     is_p = _role(member, user_id) == "parent"
     status = await build_status_block(member)
-    family_id = effective["family_id"] if effective else DEFAULT_FAMILY_ID
+    family_id = member["family_id"] if member else DEFAULT_FAMILY_ID
     show_child_button = await _db(count_family_children, DB_PATH, family_id) > 1
 
     if isinstance(message_or_callback, types.CallbackQuery):
@@ -558,13 +498,6 @@ async def _show_registration(message_or_callback, extra_text: str = ""):
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    # Interim gate: /start is allowed through the middleware so registration can
-    # still run, but a non-family-#1 member must never reach send_main_menu
-    # (it reads family #1's global CHILD_ID).
-    if member and member["family_id"] != DEFAULT_FAMILY_ID:
-        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        await state.clear()
-        return
     role = _role(member, uid)
 
     # Deep-link: /start <token>
@@ -580,11 +513,6 @@ async def cmd_start(message: types.Message, state: FSMContext, member=None):
         token = parts[1].strip()
         result = await _db(join_by_invite, DB_PATH, token, uid)
         if result:
-            if result["family_id"] != DEFAULT_FAMILY_ID:
-                # Joined a new family: data access is gated until SP2C.
-                await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-                await state.clear()
-                return
             who = "👨‍👧 Родитель" if result["role"] == "parent" else f"👶 {escape_md(result['name'])}"
             await message.answer(f"✅ Вы вошли в семью как *{who}*", parse_mode="Markdown")
             await state.clear()
@@ -599,7 +527,8 @@ async def cmd_start(message: types.Message, state: FSMContext, member=None):
         await _show_registration(message)
         return
 
-    who = "👨‍👧 Родитель" if role == "parent" else f"👶 {escape_md(CHILD_NAME)}"
+    who = ("👨‍👧 Родитель" if role == "parent"
+           else f"👶 {escape_md(await _child_name(member, uid))}")
     await message.answer(f"✅ Привет! Вы вошли как *{who}*", parse_mode="Markdown")
     await send_main_menu(message, uid, member=member)
     await state.clear()
@@ -641,12 +570,6 @@ async def cb_reg_join(callback: types.CallbackQuery, state: FSMContext, member=N
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    # Interim gate: /cancel is allowed through so mid-registration users can
-    # escape a state, but a non-family-#1 member must not reach send_main_menu.
-    if member and member["family_id"] != DEFAULT_FAMILY_ID:
-        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        await state.clear()
-        return
     current = await state.get_state()
     # Always clear the FSM state first: an unknown user (mid-registration) must
     # be able to escape a text state with /cancel.
@@ -1031,7 +954,6 @@ async def input_note(message: types.Message, state: FSMContext, member=None):
     if child_id is None:
         await _no_child_reply(message, member)
         await state.clear()
-        await send_main_menu(message, message.from_user.id, member=member)
         return
 
     note = message.text.strip()[:200]
@@ -1654,13 +1576,24 @@ async def cb_regen_invite(callback: types.CallbackQuery, member=None):
     await respond(callback, _members_text(children, invite), kb=kb_members())
 
 
-def _children_text(cards: list) -> str:
+def _children_text(cards: list, children: list = None, active_id: int = None) -> str:
+    lines = ["🧒 *Дети*"]
+    if children:
+        lines.append("")
+        lines.append("В семье:")
+        for c in children:
+            name = escape_md(c["name"]) if c.get("name") else "без имени"
+            mark = " ✅ активный" if c["telegram_id"] == active_id else ""
+            lines.append(f"  • {name}{mark}")
     if not cards:
-        return "🧒 *Дети*\n\nПока нет карточек для добавления детей."
-    lines = ["🧒 *Дети*", "", "Карточки для входа ребёнка:"]
-    for c in cards:
-        name = escape_md(c["name"]) if c.get("name") else "без имени"
-        lines.append(f"  • {name}")
+        lines.append("")
+        lines.append("Пока нет карточек для добавления детей.")
+    else:
+        lines.append("")
+        lines.append("Карточки для входа ребёнка:")
+        for c in cards:
+            name = escape_md(c["name"]) if c.get("name") else "без имени"
+            lines.append(f"  • {name}")
     return "\n".join(lines)
 
 
@@ -1674,9 +1607,12 @@ def kb_children(cards: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _show_children(callback: types.CallbackQuery, family_id: int):
+async def _show_children(callback: types.CallbackQuery, family_id: int,
+                         active_id: int = None):
     cards = await _db(list_child_cards, DB_PATH, family_id)
-    await respond(callback, _children_text(cards), kb=kb_children(cards))
+    children = await _db(list_family_children, DB_PATH, family_id)
+    await respond(callback, _children_text(cards, children, active_id),
+                  kb=kb_children(cards))
 
 
 @router.callback_query(F.data == "children")
@@ -1684,7 +1620,8 @@ async def cb_children(callback: types.CallbackQuery, member=None):
     if not _can_manage_family(member, callback.from_user.id):
         await callback.answer(_family_deny_text(member), show_alert=True)
         return
-    await _show_children(callback, member["family_id"])
+    _, child_id = await _ctx(member)
+    await _show_children(callback, member["family_id"], child_id)
 
 
 @router.callback_query(F.data == "add_child")
@@ -1717,8 +1654,11 @@ async def input_child_name(message: types.Message, state: FSMContext, member=Non
         parse_mode="Markdown",
     )
     await state.clear()
+    _, active_child_id = await _ctx(member)
     cards = await _db(list_child_cards, DB_PATH, family_id)
-    await message.answer(_children_text(cards), parse_mode="Markdown",
+    children = await _db(list_family_children, DB_PATH, family_id)
+    await message.answer(_children_text(cards, children, active_child_id),
+                         parse_mode="Markdown",
                          reply_markup=kb_children(cards))
 
 
@@ -1736,7 +1676,47 @@ async def cb_del_child(callback: types.CallbackQuery, member=None):
         await callback.answer("✅ Карточка удалена.", show_alert=True)
     else:
         await callback.answer("❌ Карточка не найдена.", show_alert=True)
-    await _show_children(callback, member["family_id"])
+    _, child_id = await _ctx(member)
+    await _show_children(callback, member["family_id"], child_id)
+
+
+# ---------------------------------------------------------------------------
+# CHILD SELECTOR — active child for a parent with >1 child
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "pick_child")
+async def cb_pick_child(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id, child_id = await _ctx(member)
+    children = await _db(list_family_children, DB_PATH, family_id)
+    rows = []
+    for c in children:
+        name = c["name"] if c.get("name") else "Ребёнок"
+        mark = "✅ " if c["telegram_id"] == child_id else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{name}", callback_data=f"set_child_{c['telegram_id']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    await respond(callback, "🧒 *Выберите ребёнка*",
+                  kb=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith("set_child_"))
+async def cb_set_child(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    child_id = parse_callback_int(callback.data, "set_child_")
+    if child_id is None:
+        await callback.answer("❌ Некорректный ребёнок.", show_alert=True)
+        return
+    ok = await _db(set_active_child, DB_PATH, callback.from_user.id, child_id)
+    if not ok:
+        await callback.answer("❌ Ребёнок недоступен.", show_alert=True)
+        return
+    new_member = await _db(get_member, DB_PATH, callback.from_user.id)
+    await send_main_menu(callback, callback.from_user.id,
+                         member=new_member or member)
 
 
 # ---------------------------------------------------------------------------
@@ -2106,11 +2086,6 @@ _FSM_HINTS = {
 @router.message(F.text)
 async def catch_all(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    # Defense in depth: no text path (including unknown command variants) may
-    # render family #1's menu for a non-family-#1 member.
-    if member and member["family_id"] != DEFAULT_FAMILY_ID:
-        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        return
     current = await state.get_state()
     if current:
         hint = _FSM_HINTS.get(current)

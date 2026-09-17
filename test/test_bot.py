@@ -2624,12 +2624,12 @@ class TestMemberMiddleware:
         assert captured["member"] is None
 
 
-class TestMemberGateNonFamilyOne:
-    """F1 interim gate: non-family-#1 members have no data access.
+class TestFamilyTwoAccessNoGate:
+    """SP3C Task 6: the interim family-#1 gate is removed.
 
-    Only registration survives; every other message/callback must be answered
-    by the middleware and never reach its handler. Family #1 and the
-    .env-fallback (member=None) must be untouched.
+    The middleware only injects the caller's member row; all data paths are
+    tenant-scoped, so family #2 members reach their own menu/data. Family #1
+    and the .env fallback (member=None) stay unchanged.
     """
 
     @staticmethod
@@ -2673,105 +2673,20 @@ class TestMemberGateNonFamilyOne:
         return patch.object(bot, "get_member",
                             return_value={"role": "parent", "family_id": family_id})
 
-    def test_new_family_message_denied_and_handler_skipped(self):
+    def test_new_family_message_reaches_handler(self):
         msg = self._message(999, "status")
         with self._patch_member(2):
-            assert self._run(msg) == []
-        msg.answer.assert_awaited_once()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
-
-    def test_new_family_callback_denied_and_handler_skipped(self):
-        cb = self._callback(999, "settings")
-        with self._patch_member(2):
-            assert self._run(cb) == []
-        cb.answer.assert_awaited_once()
-        assert cb.answer.await_args.kwargs.get("show_alert") is True
-
-    def test_new_family_bare_start_and_cancel_pass_through(self):
-        for text in ("/start", "/start TOK", "/cancel"):
-            with self._patch_member(2):
-                assert self._run(self._message(999, text)) == [True], text
-
-    def test_new_family_own_mention_passes_through(self):
-        from unittest.mock import patch
-        import bot
-        msg = self._message(999, "/start@peakflow_bot")
-        with patch.object(bot.bot, "username", "peakflow_bot", create=True), \
-             self._patch_member(2):
             assert self._run(msg) == [True]
 
-    def test_start_like_commands_are_not_registration(self):
-        """Prefixes and foreign mentions must not slip through to catch_all."""
-        for text in ("/startxyz", "/cancelled", "/starter",
-                     "/start@otherbot", "/cancel@otherbot",
-                     "/start@", "/cancel@", "/start@otherbot extra"):
-            msg = self._message(999, text)
-            with self._patch_member(2):
-                assert self._run(msg) == [], text
-            msg.answer.assert_awaited_once()
-
-    def test_is_reg_command_strict(self):
-        from unittest.mock import patch
-        import bot
-        assert bot._is_reg_command("/start")
-        assert bot._is_reg_command("/cancel")
-        assert bot._is_reg_command("/start payload")
-        for bad in ("/startxyz", "/cancelled", "", "   ",
-                    "/start@otherbot", "/start@", None):
-            assert not bot._is_reg_command(bad), bad
-        with patch.object(bot.bot, "username", "peakflow_bot", create=True):
-            assert bot._is_reg_command("/start@peakflow_bot")
-            assert bot._is_reg_command("/cancel@PEAKFLOW_BOT")
-            assert not bot._is_reg_command("/start@otherbot")
+    def test_new_family_callback_reaches_handler(self):
+        cb = self._callback(999, "settings")
+        with self._patch_member(2):
+            assert self._run(cb) == [True]
 
     def test_new_family_registration_callbacks_pass_through(self):
         for data in ("reg_create", "reg_join"):
             with self._patch_member(2):
                 assert self._run(self._callback(999, data)) == [True], data
-
-    def test_cmd_start_family_two_does_not_show_menu(self):
-        import asyncio
-        import bot
-        from unittest.mock import AsyncMock, patch
-
-        msg = self._message(999, "/start")
-        state = AsyncMock()
-        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-            asyncio.run(bot.cmd_start(
-                msg, state, member={"role": "parent", "family_id": 2}))
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
-        state.clear.assert_awaited()
-
-    def test_cmd_cancel_family_two_does_not_show_menu(self):
-        import asyncio
-        import bot
-        from unittest.mock import AsyncMock, patch
-
-        msg = self._message(999, "/cancel")
-        state = AsyncMock()
-        state.get_state = AsyncMock(return_value=None)
-        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-            asyncio.run(bot.cmd_cancel(
-                msg, state, member={"role": "parent", "family_id": 2}))
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
-        state.clear.assert_awaited()
-
-    def test_catch_all_family_two_does_not_show_menu(self):
-        """Defense in depth: catch_all itself must gate non-family-#1 members."""
-        import asyncio
-        import bot
-        from unittest.mock import AsyncMock, patch
-
-        msg = self._message(999, "/start@otherbot")
-        state = AsyncMock()
-        state.get_state = AsyncMock(return_value=None)
-        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-            asyncio.run(bot.catch_all(
-                msg, state, member={"role": "parent", "family_id": 2}))
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
 
     def test_family_one_member_still_reaches_handler(self):
         with self._patch_member(1):
@@ -2783,21 +2698,75 @@ class TestMemberGateNonFamilyOne:
         with patch.object(bot, "get_member", return_value=None):
             assert self._run(self._message(111, "status")) == [True]
 
-    def test_send_main_menu_family_two_skips_status_builder(self):
-        """The choke point must not render family #1's status for family #2."""
+    def test_cmd_start_family_two_shows_tenant_menu(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "/start")
+        state = AsyncMock()
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cmd_start(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_awaited()
+        state.clear.assert_awaited()
+
+    def test_cmd_cancel_family_two_shows_tenant_menu(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "/cancel")
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cmd_cancel(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_awaited()
+
+    def test_catch_all_family_two_shows_tenant_menu(self):
+        """catch_all must again render the menu for family != 1."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "привет")
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.catch_all(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_awaited()
+
+    def test_lookalike_commands_reach_family_two_menu(self):
+        """Lookalike commands fall through to catch_all's tenant menu."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        for text in ("/startxyz", "/start@otherbot", "/cancel@otherbot"):
+            msg = self._message(999, text)
+            with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+                asyncio.run(bot.catch_all(
+                    msg, state, member={"role": "parent", "family_id": 2}))
+            assert menu.await_count == 1, text
+
+    def test_send_main_menu_family_two_builds_status(self):
+        """The menu now renders the *tenant-scoped* status for family #2."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
 
         msg = self._message(999, None)
-        with patch.object(bot, "get_member",
-                          return_value={"role": "parent", "family_id": 2}), \
-             patch.object(bot, "build_status_block",
-                          new=AsyncMock(return_value="STATUS")) as status:
+        with patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status, \
+             patch.object(bot, "count_family_children", return_value=0):
             asyncio.run(bot.send_main_menu(
                 msg, 999, member={"role": "parent", "family_id": 2}))
-        status.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
+        status.assert_awaited()
+        assert msg.answer.await_args.args[0] == "STATUS"
 
     def test_send_main_menu_family_one_still_builds_status(self):
         import asyncio
@@ -2945,12 +2914,41 @@ class TestHandlerRolesFromDb:
             calls.append(member)
 
         with patch.object(bot, "send_main_menu", side_effect=fake_menu), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
              patch.object(bot, "set_note", return_value=True):
             asyncio.run(bot.input_note(
                 msg, state, member={"role": "parent", "family_id": 2}))
 
         assert calls == [{"role": "parent", "family_id": 2}], \
             "input_note must forward member to send_main_menu"
+
+    def test_input_note_no_child_sends_single_hint(self):
+        """SP3C Task 6: the no-child branch must not double-prompt.
+
+        ``_no_child_reply`` already carries the hint and the «Дети» button, so
+        the handler returns without an extra main-menu (status) message.
+        """
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.from_user.id = 999
+        msg.text = "спорт"
+        msg.answer = AsyncMock()
+
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"note_for_id": 1})
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "_no_child_reply", new=AsyncMock()) as hint, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.input_note(
+                msg, state, member={"role": "parent", "family_id": 2}))
+
+        hint.assert_awaited()
+        menu.assert_not_awaited()
+        state.clear.assert_awaited()
 
 
 class TestRegistrationFlow:
@@ -3063,8 +3061,8 @@ class TestRegistrationFlow:
         assert "не найден" in sent or "найд" in sent
         assert "семью" in sent or "код" in sent
 
-    def test_deep_link_join_new_family_does_not_show_menu(self):
-        """Joining a non-family-#1 family must not leak family #1's menu."""
+    def test_deep_link_join_new_family_shows_menu(self):
+        """A family-#2 invitee now reaches the tenant-scoped main menu."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3079,8 +3077,7 @@ class TestRegistrationFlow:
              patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
             asyncio.run(bot.cmd_start(msg, state, member=None))
 
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in self._sent(msg)
+        menu.assert_awaited()
 
     def test_deep_link_join_family_one_still_shows_menu(self):
         """Joining family #1 keeps the existing menu behaviour."""
@@ -3173,8 +3170,8 @@ class TestRegistrationFlow:
         state.clear.assert_awaited()
         assert "PARENTTOK" in self._sent(msg)
 
-    def test_input_family_name_new_family_does_not_render_family_one_menu(self):
-        """Centralized gate: a freshly created family #2 must not see family #1."""
+    def test_input_family_name_new_family_renders_tenant_menu(self):
+        """A freshly created family #2 now renders its own menu/status."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3187,16 +3184,16 @@ class TestRegistrationFlow:
                           return_value={"token": "PARENTTOK"}), \
              patch.object(bot, "get_member",
                           return_value={"role": "parent", "family_id": 2}), \
+             patch.object(bot, "count_family_children", return_value=0), \
              patch.object(bot, "build_status_block",
                           new=AsyncMock(return_value="STATUS")) as status:
             asyncio.run(bot.input_family_name(msg, state, member=None))
 
-        status.assert_not_awaited()
-        assert "STATUS" not in self._sent(msg)
-        assert "следующем обновлении" in self._sent(msg)
+        status.assert_awaited()
+        assert "STATUS" in self._sent(msg)
 
-    def test_input_invite_code_new_family_does_not_render_family_one_menu(self):
-        """Centralized gate: a freshly joined family #2 must not see family #1."""
+    def test_input_invite_code_new_family_renders_tenant_menu(self):
+        """A freshly joined family #2 now renders its own menu/status."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3204,19 +3201,17 @@ class TestRegistrationFlow:
         msg = self._msg(700, "TOKEN123")
         state = self._make_state("Registration:entering_invite_code")
 
-        with patch.object(bot, "is_parent", return_value=False), \
-             patch.object(bot, "is_child", return_value=False), \
-             patch.object(bot, "join_by_invite",
+        with patch.object(bot, "join_by_invite",
                           return_value={"family_id": 2, "role": "child", "name": "Маша"}), \
              patch.object(bot, "get_member",
                           return_value={"role": "child", "family_id": 2}), \
+             patch.object(bot, "count_family_children", return_value=0), \
              patch.object(bot, "build_status_block",
                           new=AsyncMock(return_value="STATUS")) as status:
             asyncio.run(bot.input_invite_code(msg, state, member=None))
 
-        status.assert_not_awaited()
-        assert "STATUS" not in self._sent(msg)
-        assert "следующем обновлении" in self._sent(msg)
+        status.assert_awaited()
+        assert "STATUS" in self._sent(msg)
 
     def test_input_family_name_blank_prompts(self):
         import asyncio
@@ -3315,42 +3310,36 @@ class TestRegistrationCancelRouting:
         join.assert_not_called()
         assert state is None
 
-    def test_lookalike_commands_denied_for_family_two_via_dispatcher(self):
-        """/start@otherbot, /cancel@otherbot and /startxyz must all be gated.
+    def test_lookalike_commands_reach_family_two_menu_via_dispatcher(self):
+        """/start@otherbot, /cancel@otherbot and /startxyz now reach the menu.
 
         Through the real dispatcher, so aiogram's own Command filter is in play:
-        these updates would otherwise fall through to catch_all and render
-        family #1's menu.
+        these updates fall through to catch_all, which renders the tenant menu.
         """
         import asyncio
         import bot
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch
-        from aiogram import Bot, types
+        from aiogram import Bot
+        from aiogram.fsm.storage.base import StorageKey
 
         async def run(text):
             b = Bot(token="123456:TESTTOKEN", session=AsyncMock())
             b.session = AsyncMock(return_value=None)
             # aiogram's Command filter calls bot.me() to validate @mentions.
             b._me = SimpleNamespace(username="someother_bot")
-            captured = []
-
-            async def fake_answer(self, text=None, **kw):
-                captured.append(text)
-                return None
+            key = StorageKey(bot_id=b.id, chat_id=700, user_id=700)
+            await bot.dp.storage.set_state(key, None)
 
             with patch.object(bot, "DB_PATH", TEST_DB), \
                  patch.object(bot, "get_member",
                               return_value={"role": "parent", "family_id": 2}), \
-                 patch.object(bot, "send_main_menu", new=AsyncMock()) as menu, \
-                 patch.object(types.Message, "answer", fake_answer):
+                 patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
                 await bot.dp.feed_update(b, self._update(700, text))
-            return menu, captured
+            return menu
 
         for text in ("/start@otherbot", "/cancel@otherbot", "/startxyz"):
-            menu, captured = asyncio.run(run(text))
-            menu.assert_not_awaited()
-            assert any("следующем обновлении" in (c or "") for c in captured), text
+            asyncio.run(run(text)).assert_awaited()
 
     def test_family_one_bare_start_shows_menu_via_dispatcher(self):
         import asyncio
@@ -4394,6 +4383,137 @@ class TestChildNameLookup:
         name = asyncio.run(bot._child_name(
             {"role": "parent", "telegram_id": 500, "family_id": 2}, 999999))
         assert name == "Ребёнок"
+
+
+class TestChildSelector:
+    """SP3C Task 6: parents pick the active child when the family has >1."""
+
+    def _cb(self, uid, data):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_main_menu_has_child_button_when_multi(self):
+        import bot
+        kb = bot.kb_main(is_parent_user=True, show_child_button=True)
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "pick_child" in cbs
+
+    def test_main_menu_no_child_button_otherwise(self):
+        import bot
+        for is_parent, show in ((True, False), (False, True)):
+            kb = bot.kb_main(is_parent_user=is_parent, show_child_button=show)
+            cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+            assert "pick_child" not in cbs
+
+    def test_set_child_sets_active(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "set_child_700"; cb.from_user.id = 500
+        cb.answer = AsyncMock(); cb.message = MagicMock()
+        cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        with patch.object(bot, "set_active_child", return_value=True) as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cb_set_child(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        m.assert_called_once_with(bot.DB_PATH, 500, 700)
+        menu.assert_awaited()
+
+    def test_set_child_rejected_for_child_member(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "set_child_700"; cb.from_user.id = 700
+        cb.answer = AsyncMock()
+        with patch.object(bot, "set_active_child") as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cb_set_child(
+                cb, member={"role": "child", "telegram_id": 700, "family_id": 2}))
+        m.assert_not_called()
+        menu.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_set_child_malformed_payload_alerts(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "set_child_abc"; cb.from_user.id = 500
+        cb.answer = AsyncMock()
+        with patch.object(bot, "set_active_child") as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cb_set_child(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        m.assert_not_called()
+        menu.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_pick_child_lists_children_with_set_callbacks(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(500, "pick_child")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["kb"] = kb
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "list_family_children",
+                          return_value=[{"telegram_id": 700, "name": "Маша"},
+                                        {"telegram_id": 701, "name": "Петя"}]), \
+             patch.object(bot, "_ctx", new=AsyncMock(return_value=(2, 700))):
+            asyncio.run(bot.cb_pick_child(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+
+        cbs = [b.callback_data for row in sent["kb"].inline_keyboard for b in row]
+        assert "set_child_700" in cbs and "set_child_701" in cbs
+
+    def test_pick_child_rejected_for_child_member(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(700, "pick_child")
+        with patch.object(bot, "respond", new=AsyncMock()) as respond:
+            asyncio.run(bot.cb_pick_child(
+                cb, member={"role": "child", "telegram_id": 700, "family_id": 2}))
+        respond.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_children_screen_marks_active_child(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        cb = self._cb(500, "children")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children",
+                          return_value=[{"telegram_id": 700, "name": "Маша"},
+                                        {"telegram_id": 701, "name": "Петя"}]), \
+             patch.object(bot, "resolve_active_child", return_value=701):
+            asyncio.run(bot.cb_children(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+
+        assert "✅" in sent.get("text", "")
+        assert "Петя" in sent.get("text", "")
+
+
+class TestGateRemoved:
+    """SP3C Task 6: the 2B interim gate must be fully removed from bot.py."""
+
+    def test_no_reg_soon_in_source(self):
+        import pathlib
+        assert "REG_SOON_MESSAGE" not in pathlib.Path("bot.py").read_text()
+
+    def test_no_reg_soon_symbol(self):
+        import bot
+        assert not hasattr(bot.MemberMiddleware, "REG_SOON_MESSAGE")
+        assert not hasattr(bot, "_is_reg_command")
 
 
 if __name__ == "__main__":
