@@ -2687,19 +2687,42 @@ class TestMemberGateNonFamilyOne:
         cb.answer.assert_awaited_once()
         assert cb.answer.await_args.kwargs.get("show_alert") is True
 
-    def test_new_family_start_and_cancel_pass_through(self):
-        for text in ("/start", "/start TOK", "/cancel",
-                     "/start@peakflow_bot", "/cancel@peakflow_bot"):
+    def test_new_family_bare_start_and_cancel_pass_through(self):
+        for text in ("/start", "/start TOK", "/cancel"):
             with self._patch_member(2):
                 assert self._run(self._message(999, text)) == [True], text
 
+    def test_new_family_own_mention_passes_through(self):
+        from unittest.mock import patch
+        import bot
+        msg = self._message(999, "/start@peakflow_bot")
+        with patch.object(bot.bot, "username", "peakflow_bot", create=True), \
+             self._patch_member(2):
+            assert self._run(msg) == [True]
+
     def test_start_like_commands_are_not_registration(self):
-        """A prefix such as /startxyz must not slip through to catch_all."""
-        for text in ("/startxyz", "/cancelled", "/starter"):
+        """Prefixes and foreign mentions must not slip through to catch_all."""
+        for text in ("/startxyz", "/cancelled", "/starter",
+                     "/start@otherbot", "/cancel@otherbot",
+                     "/start@", "/cancel@", "/start@otherbot extra"):
             msg = self._message(999, text)
             with self._patch_member(2):
                 assert self._run(msg) == [], text
             msg.answer.assert_awaited_once()
+
+    def test_is_reg_command_strict(self):
+        from unittest.mock import patch
+        import bot
+        assert bot._is_reg_command("/start")
+        assert bot._is_reg_command("/cancel")
+        assert bot._is_reg_command("/start payload")
+        for bad in ("/startxyz", "/cancelled", "", "   ",
+                    "/start@otherbot", "/start@", None):
+            assert not bot._is_reg_command(bad), bad
+        with patch.object(bot.bot, "username", "peakflow_bot", create=True):
+            assert bot._is_reg_command("/start@peakflow_bot")
+            assert bot._is_reg_command("/cancel@PEAKFLOW_BOT")
+            assert not bot._is_reg_command("/start@otherbot")
 
     def test_new_family_registration_callbacks_pass_through(self):
         for data in ("reg_create", "reg_join"):
@@ -2734,6 +2757,21 @@ class TestMemberGateNonFamilyOne:
         menu.assert_not_awaited()
         assert "следующем обновлении" in msg.answer.await_args.args[0]
         state.clear.assert_awaited()
+
+    def test_catch_all_family_two_does_not_show_menu(self):
+        """Defense in depth: catch_all itself must gate non-family-#1 members."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "/start@otherbot")
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.catch_all(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_not_awaited()
+        assert "следующем обновлении" in msg.answer.await_args.args[0]
 
     def test_family_one_member_still_reaches_handler(self):
         with self._patch_member(1):
@@ -3189,8 +3227,44 @@ class TestRegistrationCancelRouting:
         join.assert_not_called()
         assert state is None
 
-    def test_startxyz_denied_for_family_two_via_dispatcher(self):
-        """A /start-prefixed non-command must be gated, not routed to catch_all."""
+    def test_lookalike_commands_denied_for_family_two_via_dispatcher(self):
+        """/start@otherbot, /cancel@otherbot and /startxyz must all be gated.
+
+        Through the real dispatcher, so aiogram's own Command filter is in play:
+        these updates would otherwise fall through to catch_all and render
+        family #1's menu.
+        """
+        import asyncio
+        import bot
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+        from aiogram import Bot, types
+
+        async def run(text):
+            b = Bot(token="123456:TESTTOKEN", session=AsyncMock())
+            b.session = AsyncMock(return_value=None)
+            # aiogram's Command filter calls bot.me() to validate @mentions.
+            b._me = SimpleNamespace(username="someother_bot")
+            captured = []
+
+            async def fake_answer(self, text=None, **kw):
+                captured.append(text)
+                return None
+
+            with patch.object(bot, "DB_PATH", TEST_DB), \
+                 patch.object(bot, "get_member",
+                              return_value={"role": "parent", "family_id": 2}), \
+                 patch.object(bot, "send_main_menu", new=AsyncMock()) as menu, \
+                 patch.object(types.Message, "answer", fake_answer):
+                await bot.dp.feed_update(b, self._update(700, text))
+            return menu, captured
+
+        for text in ("/start@otherbot", "/cancel@otherbot", "/startxyz"):
+            menu, captured = asyncio.run(run(text))
+            menu.assert_not_awaited()
+            assert any("следующем обновлении" in (c or "") for c in captured), text
+
+    def test_family_one_bare_start_shows_menu_via_dispatcher(self):
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3201,13 +3275,12 @@ class TestRegistrationCancelRouting:
             b.session = AsyncMock(return_value=None)
             with patch.object(bot, "DB_PATH", TEST_DB), \
                  patch.object(bot, "get_member",
-                              return_value={"role": "parent", "family_id": 2}), \
+                              return_value={"role": "child", "family_id": 1}), \
                  patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-                await bot.dp.feed_update(b, self._update(700, "/startxyz"))
+                await bot.dp.feed_update(b, self._update(700, "/start"))
             return menu
 
-        menu = asyncio.run(run())
-        menu.assert_not_awaited()
+        asyncio.run(run()).assert_awaited()
 
 
 class TestFamilyManagement:

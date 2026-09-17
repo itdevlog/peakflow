@@ -158,16 +158,24 @@ def _family_deny_text(member) -> str:
 
 
 def _is_reg_command(text) -> bool:
-    """True only for an exact /start or /cancel command.
+    """True only for a bare /start or /cancel addressed to *this* bot.
 
-    The optional ``@botname`` suffix is stripped. A bare ``startswith`` would
-    treat ``/startxyz`` as registration, letting it through the middleware to
-    ``catch_all`` and then to family #1's ``send_main_menu``.
+    The optional ``@mention`` suffix is accepted only when it matches the bot's
+    own username; anything else (``/start@otherbot``, ``/start@``, ``/startxyz``)
+    is rejected. A bare prefix match would let those fall through to
+    ``catch_all`` and leak family #1's menu.
     """
     parts = (text or "").split()
     if not parts:
         return False
-    return parts[0].split("@")[0] in {"/start", "/cancel"}
+    token = parts[0]
+    if "@" in token:
+        command, _, mention = token.partition("@")
+        username = getattr(bot, "username", None)
+        if not mention or not username or mention.lower() != username.lower():
+            return False
+        token = command
+    return token in {"/start", "/cancel"}
 
 
 class MemberMiddleware(BaseMiddleware):
@@ -1882,6 +1890,11 @@ _FSM_HINTS = {
 @router.message(F.text)
 async def catch_all(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
+    # Defense in depth: no text path (including unknown command variants) may
+    # render family #1's menu for a non-family-#1 member.
+    if member and member["family_id"] != DEFAULT_FAMILY_ID:
+        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
+        return
     current = await state.get_state()
     if current:
         hint = _FSM_HINTS.get(current)
