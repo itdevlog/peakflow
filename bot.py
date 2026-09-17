@@ -53,6 +53,8 @@ from database import (
     get_family_invite,
     regenerate_family_invite,
     list_family_children,
+    list_family_parents,
+    resolve_active_child,
     list_child_cards,
     create_invite,
     delete_invite,
@@ -262,6 +264,27 @@ async def _db(func, *args, **kwargs):
     database functions directly.
     """
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _ctx(member):
+    """(family_id, active_child_id). member=None → семья №1 из .env."""
+    if not member:
+        return DEFAULT_FAMILY_ID, CHILD_ID
+    if member["role"] == "child":
+        return member["family_id"], member["telegram_id"]
+    return member["family_id"], await _db(resolve_active_child, DB_PATH, member)
+
+
+def _child_name(member, child_id, child_name=None) -> str:
+    if not member or child_id is None:
+        return CHILD_NAME
+    return child_name or CHILD_NAME
+
+
+async def _family_parents(member, family_id) -> list:
+    if not member:
+        return list(PARENT_IDS)
+    return [p["telegram_id"] for p in await _db(list_family_parents, DB_PATH, family_id)]
 
 
 def auto_time_of_day() -> str:

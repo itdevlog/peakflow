@@ -3919,5 +3919,32 @@ class TestActiveChild:
         assert count_family_children(TEST_DB, f1) == 1
 
 
+class TestTenantContext:
+    def test_ctx_fallback_env(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_ID", 111)
+        assert asyncio.run(bot._ctx(None)) == (bot.DEFAULT_FAMILY_ID, 111)
+
+    def test_ctx_child_self(self):
+        import asyncio, bot
+        assert asyncio.run(bot._ctx({"role": "child", "telegram_id": 700, "family_id": 2})) == (2, 700)
+
+    def test_ctx_parent_uses_resolve(self, monkeypatch):
+        import asyncio, bot
+        from unittest.mock import patch
+        with patch.object(bot, "resolve_active_child", return_value=700):
+            assert asyncio.run(bot._ctx({"role": "parent", "telegram_id": 500, "family_id": 2})) == (2, 700)
+
+    def test_child_name_fallback(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert bot._child_name(None, None) == "Motya"
+
+    def test_family_parents_env_fallback(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "PARENT_IDS", [222, 333])
+        assert asyncio.run(bot._family_parents(None, 1)) == [222, 333]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

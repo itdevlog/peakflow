@@ -820,6 +820,16 @@ def list_family_children(db_path: str, family_id: int) -> list:
     return [dict(r) for r in rows]
 
 
+def list_family_parents(db_path: str, family_id: int) -> list:
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM members WHERE family_id = ? AND role = 'parent' ORDER BY telegram_id",
+        (family_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def count_family_children(db_path: str, family_id: int) -> int:
     conn = get_connection(db_path)
     row = conn.execute(
