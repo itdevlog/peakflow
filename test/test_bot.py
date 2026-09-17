@@ -4012,5 +4012,280 @@ class TestTenantAwareCore:
         assert "children" in cbs
 
 
+class TestTenantAwareViews:
+    """SP3C Task 4: history/chart/summary/stats/week use the active child."""
+
+    PARENT = {"role": "parent", "telegram_id": 500, "family_id": 2}
+
+    @staticmethod
+    def _cb(uid=500, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user = MagicMock()
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_photo = AsyncMock()
+        cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_history_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb()
+        seen = {}
+
+        def fake_pag(db, child_id, page=1, per_page=10, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return [], 0, 1
+
+        with patch.object(bot, "get_measurements_paginated", side_effect=fake_pag), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot._show_history(cb, 1, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_summary_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb()
+        seen = {}
+
+        def fake_today(db, child_id, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+
+        with patch.object(bot, "get_today_measurements", side_effect=fake_today), \
+             patch.object(bot, "get_stats", return_value={"total": 0}), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_summary(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_stats_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb()
+        seen = {}
+
+        def fake_stats(db, child_id, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return {"total": 0}
+
+        with patch.object(bot, "get_stats", side_effect=fake_stats), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_stats(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_chart_download_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="chart_dl_2026-08")
+        seen = {}
+        rows = [
+            {"pef_value": 240, "time_of_day": "morning", "measured_at": "2026-08-05 08:00:00"},
+            {"pef_value": 250, "time_of_day": "evening", "measured_at": "2026-08-06 20:00:00"},
+        ]
+
+        def fake_month(db, child_id, year, month, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return rows
+
+        with patch.object(bot, "get_measurements_for_month", side_effect=fake_month), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_render_chart_png_async", new=AsyncMock(return_value=b"png")), \
+             patch.object(bot, "answer_callback", new=AsyncMock()):
+            asyncio.run(bot.cb_chart_download(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_weekly_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        msg = MagicMock()
+        msg.answer = AsyncMock()
+        seen = {}
+
+        def fake_weeks(db, child_id, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return [], []
+
+        with patch.object(bot, "get_last_two_weeks", side_effect=fake_weeks), \
+             patch.object(bot, "resolve_active_child", return_value=700):
+            asyncio.run(bot._send_weekly_report(msg, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+
+class TestTenantAwareOps:
+    """SP3C Task 5: settings/export/scheduler use the family context."""
+
+    PARENT = {"role": "parent", "telegram_id": 500, "family_id": 2}
+
+    @staticmethod
+    def _cb(uid=500, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user = MagicMock()
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_measurement_notifies_family_parents(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 700; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock(); state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock()
+        sent = []
+
+        async def fake_parents(member, family_id):
+            return [222]
+
+        async def fake_send(pid, text, **kw):
+            sent.append(pid)
+
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "replace_auto_measurement", return_value=False), \
+             patch.object(bot, "add_measurement", return_value=1), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "_family_parents", side_effect=fake_parents), \
+             patch.object(bot, "_ctx", new=AsyncMock(return_value=(2, 700))), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._persist_measurement(
+                cb, state, 240, "morning",
+                member={"role": "child", "telegram_id": 700, "family_id": 2}))
+        assert 222 in sent
+
+    def test_settings_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="settings")
+        seen = {}
+
+        def fake_all(db, child_id, include_auto=False, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+
+        with patch.object(bot, "get_all_measurements", side_effect=fake_all), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_settings(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_reminders_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="reminders")
+        seen = {}
+
+        def fake_hours(db, family_id=1):
+            seen["family_id"] = family_id
+            return {"child_morning": 8, "child_evening": 20,
+                    "parent_morning": 10, "parent_evening": 22}
+
+        with patch.object(bot, "get_reminder_hours", side_effect=fake_hours), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_reminders(cb, member=dict(self.PARENT)))
+        assert seen.get("family_id") == 2
+
+    def test_export_all_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="export_all")
+        seen = {}
+
+        def fake_between(db, child_id, start, end, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+
+        with patch.object(bot, "get_measurements_between", side_effect=fake_between), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "answer_callback", new=AsyncMock()):
+            asyncio.run(bot.cb_export_all(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_change_target_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = self._cb(data="change_target")
+        state = MagicMock(); state.set_state = AsyncMock()
+        seen = {}
+
+        def fake_target(family_id=1):
+            seen["family_id"] = family_id
+            return 260
+
+        with patch.object(bot, "get_effective_target", side_effect=fake_target), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_change_target(cb, state, member=dict(self.PARENT)))
+        assert seen.get("family_id") == 2
+
+    def test_input_target_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        msg = MagicMock(); msg.text = "300"; msg.answer = AsyncMock()
+        state = MagicMock(); state.clear = AsyncMock()
+        calls = []
+
+        def fake_set(db, key, value, family_id=1):
+            calls.append({"key": key, "family_id": family_id})
+
+        with patch.object(bot, "set_setting", side_effect=fake_set), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_send_settings_from_message", new=AsyncMock()):
+            asyncio.run(bot.input_target(msg, state, member=dict(self.PARENT)))
+        assert calls and calls[0]["family_id"] == 2
+
+    def test_escalation_uses_family_parents(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        sent = []
+
+        async def fake_parents(member, family_id):
+            return [222]
+
+        async def fake_send(pid, text, **kw):
+            sent.append(pid)
+
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "get_last_of_tod", return_value=None), \
+             patch.object(bot, "mark_reminder_sent", return_value=None), \
+             patch.object(bot, "_family_parents", side_effect=fake_parents), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._escalate_parents(
+                "morning",
+                {"child_morning": 8, "child_evening": 20,
+                 "parent_morning": 10, "parent_evening": 22},
+                10, 0, "2026-09-12"))
+        assert 222 in sent
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

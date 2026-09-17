@@ -1094,17 +1094,22 @@ def _format_history_lines(measurements: list, target: int) -> list:
 
 
 async def _show_history(callback: types.CallbackQuery, page: int = 1, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     if page < 1:
         page = 1
+    scope = {"family_id": family_id} if family_id != DEFAULT_FAMILY_ID else {}
     measurements, total, total_pages = await _db(
-        get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
+        get_measurements_paginated, DB_PATH, child_id, page=page, per_page=10, **scope)
     # A stale keyboard (page since deleted) may point past the last page —
     # clamp instead of rendering an empty screen.
     if page > total_pages:
         page = total_pages
         measurements, total, total_pages = await _db(
-            get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
-    target = await _db(get_effective_target)
+            get_measurements_paginated, DB_PATH, child_id, page=page, per_page=10, **scope)
+    target = await _db(get_effective_target, family_id=family_id)
     is_p = _role(member, callback.from_user.id) == "parent"
 
     if not measurements:
@@ -1113,9 +1118,10 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1, member=Non
 
     lines = _format_history_lines(measurements, target)
     kb = kb_pagination(page, total_pages, is_p, measurements)
+    name = _child_name(member, child_id)
 
     await respond(callback,
-        f"📋 История *{escape_md(CHILD_NAME)}*:\n\n" + "\n".join(lines),
+        f"📋 История *{escape_md(name)}*:\n\n" + "\n".join(lines),
         kb=kb,
     )
 
@@ -1236,10 +1242,10 @@ def kb_settings(target: int) -> InlineKeyboardMarkup:
     ])
 
 
-def build_settings_text(target: int, total: int) -> str:
+def build_settings_text(target: int, total: int, child_name: str = None) -> str:
     return (
         f"⚙️ *Настройки*\n\n"
-        f"👤 Ребёнок: *{escape_md(CHILD_NAME)}*\n"
+        f"👤 Ребёнок: *{escape_md(child_name or CHILD_NAME)}*\n"
         f"🎯 Целевая ПСВ: *{target}* л/мин\n"
         f"📊 Всего замеров: {total}\n\n"
         f"Выберите действие:"
@@ -1252,11 +1258,16 @@ async def cb_settings(callback: types.CallbackQuery, member=None):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    target = await _db(get_effective_target)
-    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
+    family_id, child_id = await _ctx(member)
+    target = await _db(get_effective_target, family_id=family_id)
+    if child_id is None:
+        measurements = []
+    else:
+        measurements = await _db(get_all_measurements, DB_PATH, child_id,
+                                 include_auto=True, family_id=family_id)
 
     await respond(callback,
-        build_settings_text(target, len(measurements)),
+        build_settings_text(target, len(measurements), _child_name(member, child_id)),
         kb=kb_settings(target),
     )
 
@@ -1290,7 +1301,8 @@ async def cb_reminders(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    hours = await _db(get_reminder_hours, DB_PATH)
+    family_id, _ = await _ctx(member)
+    hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
     await respond(callback, build_reminders_text(hours), kb=kb_reminders())
 
 
@@ -1316,7 +1328,7 @@ async def cb_rem_set(callback: types.CallbackQuery, state: FSMContext, member=No
 
 
 @router.message(Measurement.editing_reminder_hour, F.text)
-async def input_reminder_hour(message: types.Message, state: FSMContext):
+async def input_reminder_hour(message: types.Message, state: FSMContext, member=None):
     data = await state.get_data()
     key = data.get("reminder_key")
     if not key or not message.text.strip().isdigit():
@@ -1327,22 +1339,24 @@ async def input_reminder_hour(message: types.Message, state: FSMContext):
         await message.answer("Введите число 0–23:")
         return
 
-    hours = await _db(get_reminder_hours, DB_PATH)
+    family_id, _ = await _ctx(member)
+    hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
     hours[key] = hour
     error = validate_reminder_hours(hours)
     if error:
         await message.answer(f"⚠️ {error}")
         return
 
-    await _db(set_setting, DB_PATH, f"reminder_{key}", str(hour))
+    await _db(set_setting, DB_PATH, f"reminder_{key}", str(hour), family_id=family_id)
     await message.answer(f"✅ Час изменён: {hour:02d}:00")
 
     await state.clear()
-    await _send_reminders_from_message(message)
+    await _send_reminders_from_message(message, member=member)
 
 
-async def _send_reminders_from_message(message: types.Message):
-    hours = await _db(get_reminder_hours, DB_PATH)
+async def _send_reminders_from_message(message: types.Message, member=None):
+    family_id, _ = await _ctx(member)
+    hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
     await message.answer(
         build_reminders_text(hours),
         parse_mode="Markdown",
@@ -1359,7 +1373,8 @@ async def cb_change_target(callback: types.CallbackQuery, state: FSMContext, mem
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    current = await _db(get_effective_target)
+    family_id, _ = await _ctx(member)
+    current = await _db(get_effective_target, family_id=family_id)
     await respond(callback,
         f"🎯 Текущая цель: *{current}* л/мин\n\n"
         f"Введите новое значение (100–800):",
@@ -1369,13 +1384,14 @@ async def cb_change_target(callback: types.CallbackQuery, state: FSMContext, mem
 
 
 @router.message(Measurement.editing_target_pef, F.text.isdigit())
-async def input_target(message: types.Message, state: FSMContext):
+async def input_target(message: types.Message, state: FSMContext, member=None):
     new_val = int(message.text.strip())
     if not (100 <= new_val <= 800):
         await message.answer("Диапазон: 100–800 л/мин.", reply_markup=kb_back())
         return
 
-    await _db(set_setting, DB_PATH, "target_pef", str(new_val))
+    family_id, _ = await _ctx(member)
+    await _db(set_setting, DB_PATH, "target_pef", str(new_val), family_id=family_id)
     zone, _ = pef_zone(new_val, new_val)  # target is 100% of itself
 
     await message.answer(
@@ -1385,15 +1401,20 @@ async def input_target(message: types.Message, state: FSMContext):
 
     await state.clear()
     # Send settings screen again
-    await _send_settings_from_message(message)
+    await _send_settings_from_message(message, member=member)
 
 
-async def _send_settings_from_message(message: types.Message):
-    target = await _db(get_effective_target)
-    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
+async def _send_settings_from_message(message: types.Message, member=None):
+    family_id, child_id = await _ctx(member)
+    target = await _db(get_effective_target, family_id=family_id)
+    if child_id is None:
+        measurements = []
+    else:
+        measurements = await _db(get_all_measurements, DB_PATH, child_id,
+                                 include_auto=True, family_id=family_id)
 
     await message.answer(
-        build_settings_text(target, len(measurements)),
+        build_settings_text(target, len(measurements), _child_name(member, child_id)),
         parse_mode="Markdown",
         reply_markup=kb_settings(target),
     )
@@ -1402,9 +1423,11 @@ async def _send_settings_from_message(message: types.Message):
 # ---------------------------------------------------------------------------
 # EXPORT CSV — period selection screen
 # ---------------------------------------------------------------------------
-def build_csv_content(rows, target, include_summary=True):
-    stats = get_stats(DB_PATH, CHILD_ID) if include_summary else None
-    return _report_build_csv(rows, target, CHILD_NAME, stats=stats,
+def build_csv_content(rows, target, include_summary=True, child_id=None,
+                      child_name=None, family_id=DEFAULT_FAMILY_ID):
+    cid = CHILD_ID if child_id is None else child_id
+    stats = get_stats(DB_PATH, cid, family_id=family_id) if include_summary else None
+    return _report_build_csv(rows, target, child_name or CHILD_NAME, stats=stats,
                              include_summary=include_summary,
                              display_name=_user_display_name,
                              zone_green=ZONE_GREEN, zone_yellow=ZONE_YELLOW)
@@ -1426,19 +1449,27 @@ async def cb_export(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    months = await _db(get_available_months, DB_PATH, CHILD_ID)
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    months = await _db(get_available_months, DB_PATH, child_id, family_id=family_id)
     if not months:
         await respond(callback, "📭 Нет данных для экспорта.", kb=kb_back())
         return
     await respond(callback, "📥 Экспорт CSV — выберите период:", kb=kb_export_periods(months))
 
 
-async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, caption: str):
-    target = await _db(get_effective_target)
+async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, caption: str,
+                    member=None):
+    family_id, child_id = await _ctx(member)
+    target = await _db(get_effective_target, family_id=family_id)
     if not rows:
         await callback.answer("📭 В выбранном периоде нет записей.", show_alert=True)
         return
-    content = await _db(build_csv_content, rows, target, True)
+    name = _child_name(member, child_id)
+    content = await _db(build_csv_content, rows, target, True,
+                        child_id=child_id, child_name=name, family_id=family_id)
     await answer_callback(callback)
     await callback.message.answer_document(
         BufferedInputFile(content.encode("utf-8-sig"), filename=filename),
@@ -1454,18 +1485,29 @@ async def cb_export_all(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     rows = await _db(
         get_measurements_between,
-        DB_PATH, CHILD_ID, "2000-01-01", now_tz().strftime("%Y-%m-%d")
+        DB_PATH, child_id, "2000-01-01", now_tz().strftime("%Y-%m-%d"),
+        family_id=family_id,
     )
-    filename = f"peakflow_{CHILD_NAME}_{now_tz().strftime('%Y%m%d_%H%M')}.csv"
-    await _send_csv(callback, rows, filename, f"📥 Экспорт (всё): {len(rows)} записей")
+    name = _child_name(member, child_id)
+    filename = f"peakflow_{name}_{now_tz().strftime('%Y%m%d_%H%M')}.csv"
+    await _send_csv(callback, rows, filename, f"📥 Экспорт (всё): {len(rows)} записей",
+                    member=member)
 
 
 @router.callback_query(F.data.startswith("csv_"))
 async def cb_export_month(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
         return
     parsed = parse_csv_month(callback.data)
     if not parsed:
@@ -1474,12 +1516,15 @@ async def cb_export_month(callback: types.CallbackQuery, member=None):
     y, m = parsed
     # [first of month, first of next month) — last_day is the day before next month
     last_day = (datetime(y, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    rows = await _db(get_measurements_between, DB_PATH, CHILD_ID,
-                     f"{y:04d}-{m:02d}-01", last_day.strftime("%Y-%m-%d"))
+    rows = await _db(get_measurements_between, DB_PATH, child_id,
+                     f"{y:04d}-{m:02d}-01", last_day.strftime("%Y-%m-%d"),
+                     family_id=family_id)
     # get_measurements_between includes auto (CSV shows them with 'auto' source column)
-    filename = f"peakflow_{CHILD_NAME}_{y:04d}-{m:02d}.csv"
+    name = _child_name(member, child_id)
+    filename = f"peakflow_{name}_{y:04d}-{m:02d}.csv"
     await _send_csv(callback, rows, filename,
-                    f"📥 Экспорт за {month_title(y, m)}: {len(rows)} записей")
+                    f"📥 Экспорт за {month_title(y, m)}: {len(rows)} записей",
+                    member=member)
 
 
 # ---------------------------------------------------------------------------
@@ -1492,7 +1537,8 @@ async def cb_backup(callback: types.CallbackQuery, member=None):
         return
 
     stamp = now_tz().strftime("%Y%m%d_%H%M")
-    dest = f"backup_{CHILD_NAME}_{stamp}.db"
+    family_id, child_id = await _ctx(member)
+    dest = f"backup_{_child_name(member, child_id)}_{stamp}.db"
     try:
         await _db(backup_db, DB_PATH, dest)
     except Exception as e:
@@ -1500,7 +1546,11 @@ async def cb_backup(callback: types.CallbackQuery, member=None):
         await callback.answer("❌ Не удалось создать бэкап.", show_alert=True)
         return
 
-    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
+    if child_id is None:
+        measurements = []
+    else:
+        measurements = await _db(get_all_measurements, DB_PATH, child_id,
+                                 include_auto=True, family_id=family_id)
     try:
         def _read_backup():
             with open(dest, "rb") as f:
@@ -1772,9 +1822,14 @@ async def _render_chart_png_async(rows: list, target: int, title: str) -> bytes:
     return await asyncio.to_thread(_render_chart_png, rows, target, title)
 
 
-async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int):
-    target = await _db(get_effective_target)
-    rows = await _db(get_measurements_for_month, DB_PATH, CHILD_ID, year, month)
+async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    target = await _db(get_effective_target, family_id=family_id)
+    rows = await _db(get_measurements_for_month, DB_PATH, child_id, year, month,
+                     family_id=family_id)
 
     now = now_tz()
     can_next = (year, month) < (now.year, now.month)
@@ -1786,49 +1841,56 @@ async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int
         )
         return
 
-    png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
+    name = _child_name(member, child_id)
+    png = await _render_chart_png_async(rows, target, f"{name} — {month_title(year, month)}")
     values = [r["pef_value"] for r in rows]
 
     await answer_callback(callback)
     await callback.message.answer_photo(
         BufferedInputFile(png, filename="chart.png"),
-        caption=f"📊 {CHILD_NAME} — {month_title(year, month)}. Норма: {target} л/мин\n"
+        caption=f"📊 {name} — {month_title(year, month)}. Норма: {target} л/мин\n"
                 f"🏆 Лучший: {max(values)} | ⚠️ Худший: {min(values)}",
         reply_markup=kb_chart_nav(year, month, can_next),
     )
 
 
 @router.callback_query(F.data == "chart")
-async def cb_chart(callback: types.CallbackQuery):
+async def cb_chart(callback: types.CallbackQuery, member=None):
     now = now_tz()
-    await _send_month_chart(callback, now.year, now.month)
+    await _send_month_chart(callback, now.year, now.month, member=member)
 
 
 @router.callback_query(F.data.regexp(r"^chart_\d{4}-\d{2}$"))
-async def cb_chart_month(callback: types.CallbackQuery):
+async def cb_chart_month(callback: types.CallbackQuery, member=None):
     parsed = parse_chart_month(callback.data)
     if not parsed:
         await callback.answer("❌ Неверный месяц.", show_alert=True)
         return
-    await _send_month_chart(callback, parsed[0], parsed[1])
+    await _send_month_chart(callback, parsed[0], parsed[1], member=member)
 
 
 @router.callback_query(F.data.startswith("chart_dl_"))
-async def cb_chart_download(callback: types.CallbackQuery):
+async def cb_chart_download(callback: types.CallbackQuery, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     parsed = parse_chart_month(callback.data.replace("chart_dl_", "chart_"))
     if not parsed:
         await callback.answer("❌ Неверный месяц.", show_alert=True)
         return
     year, month = parsed
-    rows = await _db(get_measurements_for_month, DB_PATH, CHILD_ID, year, month)
+    rows = await _db(get_measurements_for_month, DB_PATH, child_id, year, month,
+                     family_id=family_id)
     if len(rows) < 2:
         await callback.answer("В этом месяце меньше 2 измерений.", show_alert=True)
         return
-    target = await _db(get_effective_target)
-    png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
+    target = await _db(get_effective_target, family_id=family_id)
+    name = _child_name(member, child_id)
+    png = await _render_chart_png_async(rows, target, f"{name} — {month_title(year, month)}")
     await answer_callback(callback)
     await callback.message.answer_document(
-        BufferedInputFile(png, filename=f"chart_{CHILD_NAME}_{year:04d}-{month:02d}.png"),
+        BufferedInputFile(png, filename=f"chart_{name}_{year:04d}-{month:02d}.png"),
         caption=f"📥 График за {month_title(year, month)}",
         reply_markup=kb_back(),
     )
@@ -1842,8 +1904,12 @@ async def cb_summary(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    target = await _db(get_effective_target)
-    today = await _db(get_today_measurements, DB_PATH, CHILD_ID)
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    target = await _db(get_effective_target, family_id=family_id)
+    today = await _db(get_today_measurements, DB_PATH, child_id, family_id=family_id)
 
     morning = [m for m in today if m["time_of_day"] == "morning"]
     evening = [m for m in today if m["time_of_day"] == "evening"]
@@ -1863,15 +1929,16 @@ async def cb_summary(callback: types.CallbackQuery, member=None):
         e_str = "🌆 Вечер: ещё нет"
 
     # Stats
-    stats = await _db(get_stats, DB_PATH, CHILD_ID)
+    stats = await _db(get_stats, DB_PATH, child_id, family_id=family_id)
 
     m_avg = stats.get('morning_avg')
     e_avg = stats.get('evening_avg')
     m_avg_str = f"{m_avg:.0f}" if m_avg is not None else "—"
     e_avg_str = f"{e_avg:.0f}" if e_avg is not None else "—"
 
+    name = _child_name(member, child_id)
     await respond(callback,
-        f"📊 *{escape_md(CHILD_NAME)}* — сегодня, {now_tz().strftime('%d %B')}\n\n"
+        f"📊 *{escape_md(name)}* — сегодня, {now_tz().strftime('%d %B')}\n\n"
         f"{m_str}\n{e_str}\n\n"
         f"📈 Всего: {stats.get('total', 0)} | Среднее: {stats.get('avg', 0):.0f}\n"
         f"🌅 Утро avg: {m_avg_str} | 🌆 Вечер avg: {e_avg_str}",
@@ -1888,11 +1955,18 @@ async def cb_weekly(callback: types.CallbackQuery, member=None):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     await callback.answer()
-    await _send_weekly_report(callback.message)
+    await _send_weekly_report(callback.message, member=member)
 
 
-async def _send_weekly_report(message=None):
-    this_week, prev_week = await _db(get_last_two_weeks, DB_PATH, CHILD_ID)
+async def _send_weekly_report(message=None, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        if message:
+            await _no_child_reply(message, member)
+        return None
+
+    this_week, prev_week = await _db(get_last_two_weeks, DB_PATH, child_id,
+                                     family_id=family_id)
 
     if not this_week:
         if message:
@@ -1913,7 +1987,7 @@ async def _send_weekly_report(message=None):
     best_m = max(this_week, key=lambda m: m["pef_value"])
     worst_m = min(this_week, key=lambda m: m["pef_value"])
 
-    text = f"📋 *{escape_md(CHILD_NAME)}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
+    text = f"📋 *{escape_md(_child_name(member, child_id))}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
     text += f"Замеров: {len(this_week)} (🌅 {len(this_morning)} / 🌆 {len(this_evening)})\n"
     text += f"Среднее: {sum(this_vals)/len(this_vals):.0f}\n"
     text += f"🏆 Лучший: {best} ({tod_emoji(best_m['time_of_day'])} {best_m['measured_at'][:10]})\n"
@@ -1946,9 +2020,13 @@ async def _send_weekly_report(message=None):
 # STATS (for child)
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "stats")
-async def cb_stats(callback: types.CallbackQuery):
-    stats = await _db(get_stats, DB_PATH, CHILD_ID)
-    target = await _db(get_effective_target)
+async def cb_stats(callback: types.CallbackQuery, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    stats = await _db(get_stats, DB_PATH, child_id, family_id=family_id)
+    target = await _db(get_effective_target, family_id=family_id)
 
     if stats.get("total", 0) == 0:
         await respond(callback, "📭 Нет измерений.", kb=kb_back())
@@ -1968,7 +2046,7 @@ async def cb_stats(callback: types.CallbackQuery):
         tod_info += f"\n🌆 Вечер avg: {stats['evening_avg']:.0f} ({stats['evening_count']} замеров)"
 
     await respond(callback,
-        f"📊 *{escape_md(CHILD_NAME)}*\n\n"
+        f"📊 *{escape_md(_child_name(member, child_id))}*\n\n"
         f"Всего: {stats['total']} | Сегодня: {stats['today_count']}\n"
         f"Среднее: {stats['avg']:.0f}\n"
         f"Мин: {stats['min']} | Макс: {stats['max']}\n"
@@ -2086,20 +2164,22 @@ async def _setup_menu_button():
 
 async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today: str):
     """Ping the child to do a measurement (child_morning / child_evening)."""
+    family_id, child_id = await _ctx(None)
     key = "child_morning" if tod == "morning" else "child_evening"
     flag = f"child_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, child_id):
         return
-    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
-        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    if await _db(has_today_measurement, DB_PATH, child_id, tod, skip_auto=True,
+                 family_id=family_id):
+        await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
         return
     icon = "☀️" if tod == "morning" else "🌙"
     try:
         await bot.send_message(
-            CHILD_ID,
-            f"{icon} Привет, *{escape_md(CHILD_NAME)}*! Пора сделать "
+            child_id,
+            f"{icon} Привет, *{escape_md(_child_name(None, child_id))}*! Пора сделать "
             f"{'утренний' if tod == 'morning' else 'вечерний'} замер 💨",
             parse_mode="Markdown",
         )
@@ -2107,45 +2187,49 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
         # Do not set the flag: retry on the next tick (the 2-minute window).
         logger.error("Не удалось напомнить ребёнку (%s): %s", tod, e)
         return
-    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
     logger.info("Напоминание ребёнку: %s", tod)
 
 
 async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today: str):
     """No measurement at deadline → auto-carry record + inform parents."""
+    family_id, child_id = await _ctx(None)
     flag = f"{tod}_missing"
     auto_flag = f"auto_{tod}"
     key = f"parent_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, child_id):
         return
-    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
-        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    if await _db(has_today_measurement, DB_PATH, child_id, tod, skip_auto=True,
+                 family_id=family_id):
+        await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
         return
 
     # Auto-carry: reuse last real value of this time of day
-    last = await _db(get_last_of_tod, DB_PATH, CHILD_ID, tod)
-    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID):
-        await _db(add_measurement, DB_PATH, last["pef_value"], tod, CHILD_ID, 0, source="auto")
-        await _db(mark_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID)
+    last = await _db(get_last_of_tod, DB_PATH, child_id, tod, family_id=family_id)
+    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag, child_id):
+        await _db(add_measurement, DB_PATH, last["pef_value"], tod, child_id, 0,
+                  source="auto", family_id=family_id)
+        await _db(mark_reminder_sent, DB_PATH, today, auto_flag, child_id)
         logger.info("Авто-запись: %s = %d (%s)", tod, last["pef_value"], today)
 
     icon = "☀️" if tod == "morning" else "🌙"
+    child_name = _child_name(None, child_id)
     if last:
         text = (
-            f"⚠️ {icon} *{escape_md(CHILD_NAME)}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
+            f"⚠️ {icon} *{escape_md(child_name)}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
             f"🤖 Записали как в последний раз: *{last['pef_value']}* (авто, не измерено).\n"
             f"Скорректируйте, если знаете реальное значение."
         )
     else:
         text = (
-            f"⚠️ {icon} *{escape_md(CHILD_NAME)}* ещё не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер!\n"
+            f"⚠️ {icon} *{escape_md(child_name)}* ещё не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер!\n"
             f"Напомните, пожалуйста."
         )
 
     delivered = False
-    for pid in PARENT_IDS:
+    for pid in await _family_parents(None, family_id):
         try:
             await bot.send_message(pid, text, parse_mode="Markdown")
             delivered = True
@@ -2155,7 +2239,7 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
         # No parent received it — allow a retry on the next tick.
         logger.error("Эскалация родителям (%s) не доставлена, повтор", tod)
         return
-    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
     logger.info("Эскалация родителям: %s", tod)
 
 
@@ -2169,7 +2253,8 @@ async def scheduler_loop():
             hour = now.hour
             minute = now.minute
 
-            hours = await _db(get_reminder_hours, DB_PATH)
+            family_id, child_id = await _ctx(None)
+            hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
 
             # Child pings (08:00 / 20:00 by default)
             await _maybe_ping_child("morning", hours, hour, minute, today)
@@ -2181,18 +2266,18 @@ async def scheduler_loop():
 
             # Weekly report
             if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
-                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", CHILD_ID):
+                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", child_id):
                     text = await _send_weekly_report()
                     if text:
                         delivered = False
-                        for pid in PARENT_IDS:
+                        for pid in await _family_parents(None, family_id):
                             try:
                                 await bot.send_message(pid, text, parse_mode="Markdown")
                                 delivered = True
                             except Exception:
                                 pass
                         if delivered:
-                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", CHILD_ID)
+                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", child_id)
                             logger.info("Недельный отчёт отправлен")
                         else:
                             logger.error("Недельный отчёт не доставлен, повтор")
