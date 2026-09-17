@@ -136,9 +136,9 @@ class TestDatabase:
     def test_reminder_tracking(self):
         from database import mark_reminder_sent, was_reminder_sent
         today = "2026-04-13"
-        assert not was_reminder_sent(TEST_DB, today, "morning_missing")
-        mark_reminder_sent(TEST_DB, today, "morning_missing")
-        assert was_reminder_sent(TEST_DB, today, "morning_missing")
+        assert not was_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        mark_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, today, "morning_missing", 111)
 
     def test_get_reminder_hours_defaults(self):
         from database import get_reminder_hours
@@ -231,12 +231,12 @@ class TestDatabase:
         """Bug regression: marking evening/weekly must not reset morning flag."""
         from database import mark_reminder_sent, was_reminder_sent
         today = "2026-04-13"
-        mark_reminder_sent(TEST_DB, today, "morning_missing")
-        mark_reminder_sent(TEST_DB, today, "evening_missing")
-        mark_reminder_sent(TEST_DB, today, "weekly")
-        assert was_reminder_sent(TEST_DB, today, "morning_missing")
-        assert was_reminder_sent(TEST_DB, today, "evening_missing")
-        assert was_reminder_sent(TEST_DB, today, "weekly")
+        mark_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        mark_reminder_sent(TEST_DB, today, "evening_missing", 111)
+        mark_reminder_sent(TEST_DB, today, "weekly", 111)
+        assert was_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, today, "evening_missing", 111)
+        assert was_reminder_sent(TEST_DB, today, "weekly", 111)
 
     def test_schema_version_is_set(self):
         """init_db must record a schema version via PRAGMA user_version."""
@@ -1332,6 +1332,59 @@ class TestSettingsFamilyScope:
         set_setting(TEST_DB, "reminder_child_morning", "9", family_id=2)
         assert get_reminder_hours(TEST_DB, family_id=1)["child_morning"] == 6
         assert get_reminder_hours(TEST_DB, family_id=2)["child_morning"] == 9
+
+
+class TestRemindersFamilyScope:
+    def test_reminders_isolated_by_child(self):
+        from database import mark_reminder_sent, was_reminder_sent
+        mark_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        assert not was_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 222)
+
+    def test_flags_not_reset_by_other_type_same_child(self):
+        from database import mark_reminder_sent, was_reminder_sent
+        mark_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        mark_reminder_sent(TEST_DB, "2026-09-17", "evening_missing", 111)
+        mark_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+
+    def test_child_id_is_required(self):
+        import inspect
+        from database import mark_reminder_sent, was_reminder_sent
+        for fn in (mark_reminder_sent, was_reminder_sent):
+            p = inspect.signature(fn).parameters["child_id"]
+            assert p.default is inspect.Parameter.empty, \
+                f"{fn.__name__}: child_id must be required (no default)"
+
+    def test_migration_preserves_v1_flags(self):
+        """v1 reminders_sent(date PK) migrates to (child_id, date) keeping flags."""
+        import sqlite3
+        from database import init_db
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute("DROP TABLE IF EXISTS reminders_sent")
+        conn.execute(
+            "CREATE TABLE reminders_sent (date TEXT PRIMARY KEY, "
+            "morning_reminder INTEGER DEFAULT 0, weekly_report INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO reminders_sent (date, morning_reminder, weekly_report) "
+            "VALUES ('2026-01-01', 1, 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        init_db(TEST_DB)
+
+        conn = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(reminders_sent)")]
+        row = conn.execute(
+            "SELECT child_id, morning_reminder, weekly_report FROM reminders_sent "
+            "WHERE date = '2026-01-01'"
+        ).fetchone()
+        conn.close()
+        assert "child_id" in cols
+        assert row == (0, 1, 1)
 
 
 class TestCallbackParsing:

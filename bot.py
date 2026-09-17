@@ -1541,10 +1541,10 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
     flag = f"child_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if await _db(was_reminder_sent, DB_PATH, today, flag):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
         return
     if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
-        await _db(mark_reminder_sent, DB_PATH, today, flag)
+        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
         return
     icon = "☀️" if tod == "morning" else "🌙"
     try:
@@ -1558,7 +1558,7 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
         # Do not set the flag: retry on the next tick (the 2-minute window).
         logger.error("Не удалось напомнить ребёнку (%s): %s", tod, e)
         return
-    await _db(mark_reminder_sent, DB_PATH, today, flag)
+    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
     logger.info("Напоминание ребёнку: %s", tod)
 
 
@@ -1569,17 +1569,17 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
     key = f"parent_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if await _db(was_reminder_sent, DB_PATH, today, flag):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
         return
     if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
-        await _db(mark_reminder_sent, DB_PATH, today, flag)
+        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
         return
 
     # Auto-carry: reuse last real value of this time of day
     last = await _db(get_last_of_tod, DB_PATH, CHILD_ID, tod)
-    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag):
+    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID):
         await _db(add_measurement, DB_PATH, last["pef_value"], tod, CHILD_ID, 0, source="auto")
-        await _db(mark_reminder_sent, DB_PATH, today, auto_flag)
+        await _db(mark_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID)
         logger.info("Авто-запись: %s = %d (%s)", tod, last["pef_value"], today)
 
     icon = "☀️" if tod == "morning" else "🌙"
@@ -1606,7 +1606,7 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
         # No parent received it — allow a retry on the next tick.
         logger.error("Эскалация родителям (%s) не доставлена, повтор", tod)
         return
-    await _db(mark_reminder_sent, DB_PATH, today, flag)
+    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
     logger.info("Эскалация родителям: %s", tod)
 
 
@@ -1632,7 +1632,7 @@ async def scheduler_loop():
 
             # Weekly report
             if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
-                if not await _db(was_reminder_sent, DB_PATH, today, "weekly"):
+                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", CHILD_ID):
                     text = await _send_weekly_report()
                     if text:
                         delivered = False
@@ -1643,7 +1643,7 @@ async def scheduler_loop():
                             except Exception:
                                 pass
                         if delivered:
-                            await _db(mark_reminder_sent, DB_PATH, today, "weekly")
+                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", CHILD_ID)
                             logger.info("Недельный отчёт отправлен")
                         else:
                             logger.error("Недельный отчёт не доставлен, повтор")

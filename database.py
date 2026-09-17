@@ -547,7 +547,7 @@ def get_stats(db_path: str, child_id: int, family_id: int = DEFAULT_FAMILY_ID) -
 # ============================================================================
 # Reminder tracking
 # ============================================================================
-def mark_reminder_sent(db_path: str, date_str: str, reminder_type: str, child_id: int = 0):
+def mark_reminder_sent(db_path: str, date_str: str, reminder_type: str, child_id: int) -> None:
     """Mark that a reminder was sent today. Other flags stay intact."""
     conn = get_connection(db_path)
     conn.execute(
@@ -565,7 +565,7 @@ def mark_reminder_sent(db_path: str, date_str: str, reminder_type: str, child_id
     conn.close()
 
 
-def was_reminder_sent(db_path: str, date_str: str, reminder_type: str, child_id: int = 0) -> bool:
+def was_reminder_sent(db_path: str, date_str: str, reminder_type: str, child_id: int) -> bool:
     conn = get_connection(db_path)
     row = conn.execute(
         "SELECT * FROM reminders_sent WHERE child_id = ? AND date = ?", (child_id, date_str)
