@@ -686,13 +686,13 @@ async def cb_note_skip(callback: types.CallbackQuery, state: FSMContext, member=
 
 
 @router.message(Measurement.waiting_note, F.text)
-async def input_note(message: types.Message, state: FSMContext):
+async def input_note(message: types.Message, state: FSMContext, member=None):
     """Save the note text to the last measurement."""
     data = await state.get_data()
     mid = data.get("note_for_id")
     if mid is None:
         await state.clear()
-        await send_main_menu(message, message.from_user.id)
+        await send_main_menu(message, message.from_user.id, member=member)
         return
 
     note = message.text.strip()[:200]
@@ -704,7 +704,7 @@ async def input_note(message: types.Message, state: FSMContext):
     )
 
     await state.clear()
-    await send_main_menu(message, message.from_user.id)
+    await send_main_menu(message, message.from_user.id, member=member)
 
 
 # ---------------------------------------------------------------------------

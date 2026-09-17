@@ -2706,6 +2706,38 @@ class TestHandlerRolesFromDb:
         assert "⚙️ Настройки" in parent_labels
         assert "📈 Моя статистика" in child_labels
 
+    def test_input_note_forwards_member_to_main_menu(self):
+        """The text-note path must hand the DB member to the main menu.
+
+        Otherwise a parent of a new family (not in .env) falls back to the
+        child keyboard after saving a note.
+        """
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.from_user.id = 999
+        msg.text = "спорт"
+        msg.answer = AsyncMock()
+
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"note_for_id": 1})
+        state.clear = AsyncMock()
+
+        calls = []
+
+        async def fake_menu(message_or_callback, user_id, member=None):
+            calls.append(member)
+
+        with patch.object(bot, "send_main_menu", side_effect=fake_menu), \
+             patch.object(bot, "set_note", return_value=True):
+            asyncio.run(bot.input_note(
+                msg, state, member={"role": "parent", "family_id": 2}))
+
+        assert calls == [{"role": "parent", "family_id": 2}], \
+            "input_note must forward member to send_main_menu"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
