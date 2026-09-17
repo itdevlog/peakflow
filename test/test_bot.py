@@ -3288,6 +3288,186 @@ class TestFamilyManagement:
         d.assert_not_called()
         cb.answer.assert_awaited()
 
+    def test_members_no_member_env_parent_prompts(self):
+        """An env-parent with no members row must not crash on member['family_id']."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        cb = self._cb(500, "members")
+        respond = AsyncMock()
+        with patch.object(bot, "respond", new=respond), \
+             patch.object(bot, "is_parent", return_value=True), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_members(cb, member=None))
+
+        respond.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_children_no_member_env_parent_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        cb = self._cb(500, "children")
+        respond = AsyncMock()
+        with patch.object(bot, "respond", new=respond), \
+             patch.object(bot, "is_parent", return_value=True), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_children(cb, member=None))
+
+        respond.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_add_child_no_member_env_parent_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "add_child")
+        state = self._state()
+        with patch.object(bot, "is_parent", return_value=True), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_add_child(cb, state, member=None))
+
+        state.set_state.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_del_child_no_member_env_parent_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "del_child_TOK")
+        with patch.object(bot, "delete_invite") as d, \
+             patch.object(bot, "is_parent", return_value=True), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_del_child(cb, member=None))
+
+        d.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_regen_invite_no_member_env_parent_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "regen_invite")
+        with patch.object(bot, "regenerate_family_invite") as r, \
+             patch.object(bot, "is_parent", return_value=True), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_regen_invite(cb, member=None))
+
+        r.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_input_child_name_no_member_env_parent_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        msg = self._msg(500, "Маша")
+        state = self._state({"family_id": 2})
+        with patch.object(bot, "create_invite") as c, \
+             patch.object(bot, "is_parent", return_value=True), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.input_child_name(msg, state, member=None))
+
+        c.assert_not_called()
+        state.clear.assert_awaited()
+        assert self._sent(msg)
+
+    def test_guard_keeps_unknown_user_rejected(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        cb = self._cb(500, "members")
+        respond = AsyncMock()
+        with patch.object(bot, "respond", new=respond), \
+             patch.object(bot, "is_parent", return_value=False), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_members(cb, member=None))
+
+        respond.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_members_screen_raw_token_in_code_span(self):
+        """The token inside backticks must be raw (no Markdown backslashes)."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "members")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "get_family_invite",
+                          return_value={"token": "AB_CD"}), \
+             patch.object(bot, "list_family_children", return_value=[]):
+            asyncio.run(bot.cb_members(cb, member={"role": "parent", "family_id": 2}))
+
+        assert "`AB_CD`" in sent.get("text", "")
+        assert "AB\\_CD" not in sent.get("text", "")
+
+    def test_regen_invite_raw_token_in_code_span(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "regen_invite")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "regenerate_family_invite", return_value="NEW_EN"), \
+             patch.object(bot, "get_family_invite", return_value=None), \
+             patch.object(bot, "list_family_children", return_value=[]):
+            asyncio.run(bot.cb_regen_invite(cb, member={"role": "parent", "family_id": 2}))
+
+        assert "`NEW_EN`" in sent.get("text", "")
+        assert "NEW\\_EN" not in sent.get("text", "")
+
+    def test_add_child_raw_token_in_code_span(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        msg = self._msg(500, "Маша")
+        state = self._state({"family_id": 2})
+        with patch.object(bot, "create_invite", return_value="TOK_EN"), \
+             patch.object(bot, "list_child_cards", return_value=[]):
+            asyncio.run(bot.input_child_name(
+                msg, state, member={"role": "parent", "family_id": 2}))
+
+        sent = self._sent(msg)
+        assert "`TOK_EN`" in sent
+        assert "TOK\\_EN" not in sent
+
+    def test_input_family_name_raw_token_in_code_span(self):
+        """Task 5's parent invite display must also keep the token raw."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "Ивановы")
+        state = self._state()
+
+        with patch.object(bot, "create_family_with_owner", return_value=5), \
+             patch.object(bot, "get_family_invite",
+                          return_value={"token": "PA_RE"}), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.input_family_name(msg, state, member=None))
+
+        sent = self._sent(msg)
+        assert "`PA_RE`" in sent
+        assert "PA\\_RE" not in sent
+
     def test_del_child_routes_to_family_handler(self):
         """Regression: `del_child_<token>` must reach cb_del_child.
 

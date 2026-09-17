@@ -141,6 +141,21 @@ def _is_parent_member(member, uid: int) -> bool:
     return _role(member, uid) == "parent"
 
 
+def _can_manage_family(member, uid: int) -> bool:
+    """Strict parent gate for family-management screens.
+
+    Unlike ``_is_parent_member``, the .env fallback is intentionally NOT
+    accepted: these screens dereference ``member['family_id']`` to resolve the
+    family, so an env parent with no ``members`` row (possible when added to
+    .env after the first init) must register first instead of crashing.
+    """
+    return member is not None and member.get("role") == "parent"
+
+
+def _family_deny_text(member) -> str:
+    return "⚠️ Сначала войдите в семью." if member is None else "⚠️ Только для родителей."
+
+
 class MemberMiddleware(BaseMiddleware):
     """Inject the caller's member row (role, family_id) from the DB."""
 
@@ -515,7 +530,7 @@ async def input_family_name(message: types.Message, state: FSMContext, member=No
 
     await message.answer(
         f"✅ Семья «{escape_md(name)}» создана.\n\n"
-        f"🔑 Код для приглашения родителя:\n`{escape_md(token)}`",
+        f"🔑 Код для приглашения родителя:\n`{token}`",
         parse_mode="Markdown",
     )
     await state.clear()
@@ -1341,7 +1356,7 @@ def _members_text(children: list, invite) -> str:
     lines.append("")
     token = invite["token"] if invite else None
     if token:
-        lines.append(f"🔑 Код для приглашения родителя:\n`{escape_md(token)}`")
+        lines.append(f"🔑 Код для приглашения родителя:\n`{token}`")
     else:
         lines.append("🔑 Код приглашения родителя отсутствует.")
     return "\n".join(lines)
@@ -1356,8 +1371,8 @@ def kb_members() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "members")
 async def cb_members(callback: types.CallbackQuery, member=None):
-    if not _is_parent_member(member, callback.from_user.id):
-        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
         return
     family_id = member["family_id"]
     invite = await _db(get_family_invite, DB_PATH, family_id)
@@ -1367,8 +1382,8 @@ async def cb_members(callback: types.CallbackQuery, member=None):
 
 @router.callback_query(F.data == "regen_invite")
 async def cb_regen_invite(callback: types.CallbackQuery, member=None):
-    if not _is_parent_member(member, callback.from_user.id):
-        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
         return
     family_id = member["family_id"]
     token = await _db(regenerate_family_invite, DB_PATH, family_id)
@@ -1408,16 +1423,16 @@ async def _show_children(callback: types.CallbackQuery, family_id: int):
 
 @router.callback_query(F.data == "children")
 async def cb_children(callback: types.CallbackQuery, member=None):
-    if not _is_parent_member(member, callback.from_user.id):
-        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
         return
     await _show_children(callback, member["family_id"])
 
 
 @router.callback_query(F.data == "add_child")
 async def cb_add_child(callback: types.CallbackQuery, state: FSMContext, member=None):
-    if not _is_parent_member(member, callback.from_user.id):
-        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
         return
     await state.update_data(family_id=member["family_id"])
     await state.set_state(Registration.adding_child_name)
@@ -1427,8 +1442,8 @@ async def cb_add_child(callback: types.CallbackQuery, state: FSMContext, member=
 
 @router.message(Registration.adding_child_name, F.text, ~F.text.startswith("/"))
 async def input_child_name(message: types.Message, state: FSMContext, member=None):
-    if not _is_parent_member(member, message.from_user.id):
-        await message.answer("⚠️ Только для родителей.")
+    if not _can_manage_family(member, message.from_user.id):
+        await message.answer(_family_deny_text(member))
         await state.clear()
         return
     name = (message.text or "").strip()[:100]
@@ -1440,7 +1455,7 @@ async def input_child_name(message: types.Message, state: FSMContext, member=Non
     token = await _db(create_invite, DB_PATH, family_id, "child", name)
     await message.answer(
         f"✅ Карточка для *{escape_md(name)}* создана.\n\n"
-        f"🔑 Код для входа ребёнка:\n`{escape_md(token)}`",
+        f"🔑 Код для входа ребёнка:\n`{token}`",
         parse_mode="Markdown",
     )
     await state.clear()
@@ -1451,8 +1466,8 @@ async def input_child_name(message: types.Message, state: FSMContext, member=Non
 
 @router.callback_query(F.data.startswith("del_child_"))
 async def cb_del_child(callback: types.CallbackQuery, member=None):
-    if not _is_parent_member(member, callback.from_user.id):
-        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
         return
     token = _parse_child_token(callback.data, "del_child_")
     if not token:
