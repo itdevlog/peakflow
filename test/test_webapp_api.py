@@ -3,10 +3,12 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import time
 from types import SimpleNamespace
 from urllib.parse import quote
 
+import pytest
 from fastapi.testclient import TestClient
 
 from database import add_measurement, init_db
@@ -51,6 +53,22 @@ def _setup_db():
         if os.path.exists(TEST_DB + ext):
             os.remove(TEST_DB + ext)
     init_db(TEST_DB)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_schema():
+    """Every test in this module gets a schema-initialized DB, independent of
+    execution order (a standalone run must not fail on a missing members table)."""
+    init_db(TEST_DB)
+    yield
+
+
+def test_api_stranger_forbidden_when_db_uninitialized(tmp_path):
+    """An uninitialized DB must yield 403, not a 500 from a failed lookup."""
+    cfg = _config()
+    cfg.DB_PATH = str(tmp_path / "empty.db")
+    sqlite3.connect(cfg.DB_PATH).close()  # valid file, no members table
+    assert _client(cfg).get("/api/me", headers=_auth(999)).status_code == 403
 
 
 def test_healthz_ok():

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -151,7 +152,12 @@ def create_app(services: dict) -> FastAPI:
         if not user:
             raise HTTPException(403, "Нет доступа")
         uid = user.get("id")
-        member = get_member(config.DB_PATH, uid)
+        try:
+            member = get_member(config.DB_PATH, uid)
+        except sqlite3.DatabaseError:
+            # Uninitialized/edge DB: behave as "not a member" (403 via fallback)
+            # instead of leaking a 500.
+            member = None
         if member:
             role = member["role"]
             family_id = member["family_id"]
