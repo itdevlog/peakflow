@@ -63,13 +63,13 @@ def _db():
     init_db(TEST_DB)
     conn = sqlite3.connect(TEST_DB)
     conn.execute(
-        "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source, note) "
+        "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source, note) "
         "VALUES (111, 240, 'morning', '2026-08-05 08:00:00', 222, 'manual', 'болел')")
     conn.execute(
-        "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+        "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
         "VALUES (111, 250, 'evening', '2026-08-06 20:00:00', 222, 'auto')")
     conn.execute(
-        "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+        "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
         "VALUES (111, 260, 'morning', '2026-09-01 08:00:00', 222, 'manual')")
     conn.commit()
     conn.close()

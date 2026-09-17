@@ -170,7 +170,7 @@ class TestDatabase:
         dest = "/tmp/opencode/backup_test.db"
         backup_db(TEST_DB, dest)
         conn = sqlite3.connect(dest)
-        n = conn.execute("SELECT COUNT(*) FROM measurements WHERE user_id=111").fetchone()[0]
+        n = conn.execute("SELECT COUNT(*) FROM measurements WHERE child_id=111").fetchone()[0]
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")]
         conn.close()
@@ -185,7 +185,7 @@ class TestDatabase:
         for d, v in [("2026-08-05 08:00:00", 240), ("2026-08-20 20:00:00", 250),
                      ("2026-09-01 08:00:00", 260)]:
             conn.execute(
-                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
                 "VALUES (111, ?, ?, ?, 222, 'manual')",
                 (v, "morning" if "08:00" in d else "evening", d))
         conn.commit()
@@ -203,7 +203,7 @@ class TestDatabase:
         for d in ["2026-07-15 08:00:00", "2026-08-01 08:00:00",
                   "2026-08-31 20:00:00", "2026-09-10 08:00:00"]:
             conn.execute(
-                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
                 "VALUES (111, 240, 'morning', ?, 222, 'manual')", (d,))
         conn.commit()
         conn.close()
@@ -217,7 +217,7 @@ class TestDatabase:
         for d in ["2026-08-01 08:00:00", "2026-08-15 08:00:00",
                   "2026-08-31 23:00:00", "2026-09-05 08:00:00"]:
             conn.execute(
-                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
                 "VALUES (111, 240, 'morning', ?, 222, 'manual')", (d,))
         conn.commit()
         conn.close()
@@ -295,16 +295,16 @@ class TestDatabase:
         conn.close()
 
     def test_index_created(self):
-        """init_db must create index on (user_id, measured_at)."""
+        """init_db must create index on (family_id, child_id, measured_at)."""
         from database import init_db
         init_db(TEST_DB)
         import sqlite3
         conn = sqlite3.connect(TEST_DB)
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_user_time'"
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_family_child_time'"
         ).fetchall()
         conn.close()
-        assert rows, "index idx_meas_user_time missing"
+        assert rows, "index idx_meas_family_child_time missing"
 
     def test_migration_new_columns(self):
         """init_db must add child-reminder, auto-fill flags and measurements.source."""
@@ -1050,13 +1050,13 @@ class TestExportAndBackup:
 
         conn = sqlite3.connect(TEST_DB)
         conn.execute(
-            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source, note) "
+            "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source, note) "
             "VALUES (111, 240, 'morning', '2026-08-05 08:00:00', 222, 'manual', 'болел')")
         conn.execute(
-            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+            "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
             "VALUES (111, 250, 'evening', '2026-08-06 20:00:00', 222, 'auto')")
         conn.execute(
-            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+            "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
             "VALUES (111, 260, 'morning', '2026-09-01 08:00:00', 222, 'manual')")
         conn.commit()
         conn.close()
@@ -1210,7 +1210,7 @@ class TestEditDeleteExport:
         # Simulate parent edit: update by ID and user_id
         conn = sqlite3.connect(TEST_DB)
         cur = conn.execute(
-            "UPDATE measurements SET pef_value = ? WHERE id = ? AND user_id = ?",
+            "UPDATE measurements SET pef_value = ? WHERE id = ? AND child_id = ?",
             (300, mid, 111)
         )
         conn.commit()
@@ -1263,7 +1263,7 @@ class TestEditDeleteExport:
         assert len(get_all_measurements(TEST_DB, 111)) == 1
         conn = sqlite3.connect(TEST_DB)
         cur = conn.execute(
-            "DELETE FROM measurements WHERE id = ? AND user_id = ?",
+            "DELETE FROM measurements WHERE id = ? AND child_id = ?",
             (mid, 111)
         )
         conn.commit()
@@ -2109,6 +2109,55 @@ class TestFamiliesAndMembers:
         import database
         assert database.DEFAULT_FAMILY_ID == 1
         assert database.SCHEMA_VERSION == 2
+
+
+class TestMeasurementV2:
+    def test_child_id_column_and_family_scope(self):
+        import sqlite3
+        from database import init_db, add_measurement
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(measurements)")]
+        conn.close()
+        assert "child_id" in cols and "user_id" not in cols
+        assert "family_id" in cols
+
+    def test_measurements_are_isolated_by_family(self):
+        from database import add_measurement, get_all_measurements
+        add_measurement(TEST_DB, 240, "morning", 111, 222, family_id=1)
+        add_measurement(TEST_DB, 300, "morning", 111, 222, family_id=2)
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=1)] == [240]
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=2)] == [300]
+
+    def test_add_and_get_last_default_family(self):
+        from database import add_measurement, get_last_measurement
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        m = get_last_measurement(TEST_DB, 111)
+        assert m["pef_value"] == 250 and m["family_id"] == 1 and m["child_id"] == 111
+
+    def test_has_today_isolated_by_family(self):
+        from database import add_measurement, has_today_measurement
+        add_measurement(TEST_DB, 250, "morning", 111, 222, family_id=1)
+        assert has_today_measurement(TEST_DB, 111, "morning", family_id=1)
+        assert not has_today_measurement(TEST_DB, 111, "morning", family_id=2)
+
+    def test_paginated_isolated_by_family(self):
+        from database import add_measurement, get_measurements_paginated
+        add_measurement(TEST_DB, 250, "morning", 111, 222, family_id=1)
+        add_measurement(TEST_DB, 300, "morning", 111, 222, family_id=2)
+        items, total, pages = get_measurements_paginated(TEST_DB, 111, 1, 10, family_id=1)
+        assert total == 1 and items[0]["pef_value"] == 250
+
+    def test_measurements_index_created(self):
+        import sqlite3
+        from database import init_db
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_family_child_time'"
+        ).fetchall()
+        conn.close()
+        assert rows, "index idx_meas_family_child_time missing"
 
 
 if __name__ == "__main__":
