@@ -238,8 +238,10 @@ async def _child_name(member, child_id, child_name=None) -> str:
     member the child's stored name is looked up from ``members``; callers that
     already have it pass ``child_name`` to skip the query.
     """
-    if not member or child_id is None:
+    if member is None:
         return CHILD_NAME
+    if child_id is None:
+        return "Ребёнок"
     if child_name:
         return child_name
     row = await _db(get_member, DB_PATH, child_id)
@@ -769,7 +771,7 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
     parents = await _family_parents(member, family_id)
 
     # Notify other parents
-    added_by_name = _user_display_name(who, member)
+    added_by_name = _user_display_name(who, member, child_name)
     for pid in parents:
         if pid != who and pid != child_id:
             try:
@@ -1178,7 +1180,7 @@ def kb_settings(target: int) -> InlineKeyboardMarkup:
 def build_settings_text(target: int, total: int, child_name: str = None) -> str:
     return (
         f"⚙️ *Настройки*\n\n"
-        f"👤 Ребёнок: *{escape_md(child_name or CHILD_NAME)}*\n"
+        f"👤 Ребёнок: *{escape_md(child_name or 'Ребёнок')}*\n"
         f"🎯 Целевая ПСВ: *{target}* л/мин\n"
         f"📊 Всего замеров: {total}\n\n"
         f"Выберите действие:"
@@ -1359,10 +1361,17 @@ async def _send_settings_from_message(message: types.Message, member=None):
 def build_csv_content(rows, target, include_summary=True, child_id=None,
                       child_name=None, family_id=DEFAULT_FAMILY_ID):
     cid = CHILD_ID if child_id is None else child_id
+    label = child_name or (CHILD_NAME if child_id is None else "Ребёнок")
     stats = get_stats(DB_PATH, cid, family_id=family_id) if include_summary else None
-    return _report_build_csv(rows, target, child_name or CHILD_NAME, stats=stats,
+
+    def _display_name(uid):
+        if uid == cid:
+            return label
+        return _user_display_name(uid, None)
+
+    return _report_build_csv(rows, target, label, stats=stats,
                              include_summary=include_summary,
-                             display_name=_user_display_name,
+                             display_name=_display_name,
                              zone_green=ZONE_GREEN, zone_yellow=ZONE_YELLOW)
 
 
@@ -2106,10 +2115,18 @@ async def catch_all(message: types.Message, state: FSMContext, member=None):
 _scheduler_task = None
 
 
-def _user_display_name(user_id: int, member=None) -> str:
-    if _role(member, user_id) == "child":
-        return CHILD_NAME
-    if _role(member, user_id) == "parent":
+def _user_display_name(user_id: int, member=None, child_name=None) -> str:
+    """Display label for an author (CSV/plain contexts — stays unescaped).
+
+    A known member without an explicit child name falls back to a generic
+    label instead of leaking family #1's env ``CHILD_NAME``.
+    """
+    role = _role(member, user_id)
+    if role == "child":
+        if child_name:
+            return child_name
+        return CHILD_NAME if member is None else "Ребёнок"
+    if role == "parent":
         return "Родитель"
     return "Кто-то"
 

@@ -3900,6 +3900,18 @@ class TestActiveChild:
         set_active_child(TEST_DB, 500, 701)
         assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) == 701
 
+    def test_resolve_active_child_uses_preloaded_children(self, monkeypatch):
+        """F2: callers may pass the family's children to avoid a duplicate query."""
+        from database import create_family_with_owner, add_member, resolve_active_child, get_member
+        import database
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f1, "child", "Петя")
+        monkeypatch.setattr(database, "list_family_children",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("extra query")))
+        children = [{"telegram_id": 701, "family_id": f1, "role": "child", "name": "Петя"}]
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500), children) == 701
+
     def test_count_family_children(self):
         from database import create_family_with_owner, add_member, count_family_children
         f1 = create_family_with_owner(TEST_DB, 500, "A")
@@ -4383,6 +4395,31 @@ class TestChildNameLookup:
         name = asyncio.run(bot._child_name(
             {"role": "parent", "telegram_id": 500, "family_id": 2}, 999999))
         assert name == "Ребёнок"
+
+    def test_child_name_known_member_without_child_does_not_leak_env(self, monkeypatch):
+        """F1: a family-2 parent with no active child must not see family #1's name."""
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        name = asyncio.run(bot._child_name(
+            {"role": "parent", "telegram_id": 500, "family_id": 2}, None))
+        assert name == "Ребёнок"
+
+    def test_settings_text_without_child_name_does_not_leak_env(self, monkeypatch):
+        """F1: no secondary env fallback in the settings screen."""
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert "Motya" not in bot.build_settings_text(260, 0, None)
+        member = {"role": "parent", "telegram_id": 500, "family_id": 2}
+        name = asyncio.run(bot._child_name(member, None))
+        assert "Motya" not in bot.build_settings_text(260, 0, name)
+
+    def test_display_name_known_child_does_not_leak_env(self, monkeypatch):
+        """Trivial: a known child author must not be labelled with env CHILD_NAME."""
+        import bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        member = {"role": "child", "telegram_id": 700, "family_id": 2}
+        assert bot._user_display_name(700, member) == "Ребёнок"
+        assert bot._user_display_name(700, member, "Маша") == "Маша"
 
 
 class TestChildSelector:

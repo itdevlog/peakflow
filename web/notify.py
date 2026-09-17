@@ -51,15 +51,18 @@ async def _send(bot, recipients, text: str) -> None:
             logger.error("Не удалось отправить уведомление %s: %s", pid, e)
 
 
-async def notify_added(bot, config, who: int, pef: int, tod: str, target: int,
-                       recipients=None, child_name=None, child_id=None) -> None:
+async def notify_added(bot, config, who: int, pef: int, tod: str, target: int, *,
+                       recipients, child_name=None, child_id=None) -> None:
     """Сообщить родителям семьи (кроме автора), что добавлен замер.
 
-    ``recipients`` — Telegram-id родителей семьи из ``members``; ``child_name``
-    и ``child_id`` — активный ребёнок. Без них используется семья №1 из .env.
+    ``recipients`` обязателен — Telegram-id родителей вызывающей семьи. Его
+    отсутствие (``None``) не означает семью №1: уведомление пропускается, чтобы
+    действие одной семьи не уходило родителям другой. Для семьи №1 вызывающий
+    передаёт env-список явно.
     """
     if recipients is None:
-        recipients = list(getattr(config, "PARENT_IDS", []) or [])
+        logger.error("notify_added: recipients не задан — уведомление пропущено")
+        return
     if child_name is None:
         child_name = getattr(config, "CHILD_NAME", "Ребёнок")
     if child_id is None:
@@ -73,15 +76,17 @@ async def notify_added(bot, config, who: int, pef: int, tod: str, target: int,
     await _send(bot, targets, text)
 
 
-async def notify_red_zone(bot, config, pef: int, tod: str, target: int,
-                          who: int | None = None, recipients=None,
+async def notify_red_zone(bot, config, pef: int, tod: str, target: int, *,
+                          recipients, who: int | None = None,
                           child_name=None, child_id=None) -> None:
     """Тревога родителям семьи при ПСВ ниже жёлтой зоны.
 
-    ``who`` — автор замера; ему тревога не отправляется (он и так знает).
+    ``recipients`` обязателен (см. ``notify_added``). ``who`` — автор замера;
+    ему тревога не отправляется (он и так знает).
     """
     if recipients is None:
-        recipients = list(getattr(config, "PARENT_IDS", []) or [])
+        logger.error("notify_red_zone: recipients не задан — уведомление пропущено")
+        return
     if child_name is None:
         child_name = getattr(config, "CHILD_NAME", "Ребёнок")
     _, zone_name = _zone(pef, target, config)

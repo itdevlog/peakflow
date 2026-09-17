@@ -27,7 +27,8 @@ from database import (
     get_measurements_for_month,
     get_measurements_paginated,
     get_previous_of_tod,
-    get_reminder_hours,    get_stats,
+    get_reminder_hours,
+    get_stats,
     get_today_measurements,
     get_effective_target as _db_effective_target,
     get_member,
@@ -84,15 +85,15 @@ def _pef_zone(pef: int, target: int, config) -> str:
 
 
 def _schedule_add_notifications(background, bot, config, who: int, pef: int,
-                                tod: str, target: int, pct: int,
-                                recipients=None, child_name=None,
+                                tod: str, target: int, pct: int, recipients,
+                                child_name=None,
                                 child_id: int | None = None) -> None:
     """Queue Telegram notifications off the request path (BackgroundTasks).
 
     A slow or unavailable Telegram API must not delay the HTTP response, so
     the sends run after it is returned. ``recipients``/``child_name``/
-    ``child_id`` carry the caller's tenant (family parents + active child);
-    when omitted the notify layer falls back to family #1's env config.
+    ``child_id`` carry the caller's tenant (family parents + active child)
+    explicitly; there is no env fallback.
     """
     background.add_task(notify_added, bot, config, who, pef, tod, target,
                         recipients=recipients, child_name=child_name,
@@ -166,7 +167,7 @@ def create_app(services: dict) -> FastAPI:
     app = FastAPI(title="Peakflow Bot Mini App API", docs_url=None, redoc_url=None)
     config = services.get("config")
 
-    def _resolve_user(init_data: str | None) -> dict:
+    async def _resolve_user(init_data: str | None) -> dict:
         token = getattr(config, "BOT_TOKEN", "") or ""
         if not token or not init_data:
             raise HTTPException(403, "Нет доступа")
@@ -175,7 +176,7 @@ def create_app(services: dict) -> FastAPI:
             raise HTTPException(403, "Нет доступа")
         uid = user.get("id")
         try:
-            member = get_member(config.DB_PATH, uid)
+            member = await _db(get_member, config.DB_PATH, uid)
         except sqlite3.OperationalError as e:
             # Uninitialized/locked DB: behave as "not a member" (403 via fallback)
             # instead of leaking a 500. Narrow to OperationalError so real
@@ -185,8 +186,11 @@ def create_app(services: dict) -> FastAPI:
         if member:
             role = member["role"]
             family_id = member["family_id"]
-            active_child_id = resolve_active_child(config.DB_PATH, member)
-            children = list_family_children(config.DB_PATH, family_id)
+            # Load the family's children once; resolve the active one from that
+            # list so the same query is not issued twice.
+            children = await _db(list_family_children, config.DB_PATH, family_id)
+            active_child_id = await _db(resolve_active_child, config.DB_PATH,
+                                        member, children)
         else:
             # Family #1 fallback (member row missing): only the env-configured
             # ids are allowed. The active child is the env child, mirroring
@@ -212,10 +216,10 @@ def create_app(services: dict) -> FastAPI:
             "children": _shape_children(children),
         }
 
-    def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
-        return _resolve_user(x_telegram_init_data)
+    async def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
+        return await _resolve_user(x_telegram_init_data)
 
-    def require_parent(auth: dict = Depends(require_user)) -> dict:
+    async def require_parent(auth: dict = Depends(require_user)) -> dict:
         if auth["role"] != "parent":
             raise HTTPException(403, "Только родители")
         return auth

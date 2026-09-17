@@ -853,12 +853,13 @@ def set_active_child(db_path: str, telegram_id: int, child_id: int) -> bool:
     return True
 
 
-def resolve_active_child(db_path: str, member) -> Optional[int]:
+def resolve_active_child(db_path: str, member, children=None) -> Optional[int]:
     if not member:
         return None
     if member["role"] == "child":
         return member["telegram_id"]
-    children = list_family_children(db_path, member["family_id"])
+    if children is None:
+        children = list_family_children(db_path, member["family_id"])
     ids = [c["telegram_id"] for c in children]
     selected = member.get("active_child_id") if hasattr(member, "get") else None
     if selected in ids:
