@@ -3946,5 +3946,71 @@ class TestTenantContext:
         assert asyncio.run(bot._family_parents(None, 1)) == [222, 333]
 
 
+class TestTenantAwareCore:
+    def test_status_block_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        seen = {}
+        def fake_today(db, child_id, family_id=bot.DEFAULT_FAMILY_ID):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+        with patch.object(bot, "get_today_measurements", side_effect=fake_today), \
+             patch.object(bot, "get_recent_measurements", return_value=[]), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700):
+            asyncio.run(bot.build_status_block(member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert seen.get("child_id") == 700
+        assert seen.get("family_id") == 2
+
+    def test_add_measurement_uses_context(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"input_context": "add"})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock(); state.clear = AsyncMock()
+        calls = {}
+        def fake_add(db, pef, tod, child_id, added_by, source="manual", family_id=1):
+            calls["child_id"] = child_id; calls["family_id"] = family_id; return 1
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "add_measurement", side_effect=fake_add), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._persist_measurement(cb, state, 250, "morning",
+                                                 member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert calls.get("child_id") == 700 and calls.get("family_id") == 2
+
+    def test_send_main_menu_forwards_member_to_status(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        msg = MagicMock()
+        msg.from_user = MagicMock(); msg.from_user.id = 999
+        msg.answer = AsyncMock()
+        member = {"role": "parent", "telegram_id": 999, "family_id": 1}
+        with patch.object(bot, "get_member",
+                          return_value={"role": "parent", "family_id": 1}), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="S")) as status:
+            asyncio.run(bot.send_main_menu(msg, 999, member=member))
+        status.assert_awaited_once_with(member)
+
+    def test_no_child_reply_hint_and_button(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock
+        msg = MagicMock(); msg.answer = AsyncMock()
+        asyncio.run(bot._no_child_reply(
+            msg, {"role": "parent", "telegram_id": 500, "family_id": 2}))
+        text = msg.answer.await_args.args[0]
+        kb = msg.answer.await_args.kwargs["reply_markup"]
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "ребёнк" in text.lower()
+        assert "children" in cbs
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -55,6 +55,7 @@ from database import (
     list_family_children,
     list_family_parents,
     resolve_active_child,
+    count_family_children,
     list_child_cards,
     create_invite,
     delete_invite,
@@ -251,9 +252,9 @@ class Registration(StatesGroup):
     adding_child_name = State()
 
 
-def get_effective_target() -> int:
-    """Целевая ПСВ из БД (settings), fallback — TARGET_PEF из .env."""
-    return _db_get_effective_target(DB_PATH, TARGET_PEF)
+def get_effective_target(family_id: int = DEFAULT_FAMILY_ID) -> int:
+    """Целевая ПСВ из БД (settings) семьи, fallback — TARGET_PEF из .env."""
+    return _db_get_effective_target(DB_PATH, TARGET_PEF, family_id=family_id)
 
 
 async def _db(func, *args, **kwargs):
@@ -285,6 +286,21 @@ async def _family_parents(member, family_id) -> list:
     if not member:
         return list(PARENT_IDS)
     return [p["telegram_id"] for p in await _db(list_family_parents, DB_PATH, family_id)]
+
+
+async def _no_child_reply(target, member):
+    """Подсказка «добавьте ребёнка», когда у семьи нет детей-участников."""
+    text = (
+        "🧒 В семье пока нет ребёнка.\n\n"
+        "Добавьте ребёнка в разделе «Дети»."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧒 Дети", callback_data="children")],
+    ])
+    if isinstance(target, types.CallbackQuery):
+        await respond(target, text, kb=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
 
 
 def auto_time_of_day() -> str:
@@ -352,11 +368,13 @@ async def respond(callback: types.CallbackQuery, text: str,
 # ---------------------------------------------------------------------------
 # Keyboards
 # ---------------------------------------------------------------------------
-def kb_main(is_parent_user: bool) -> InlineKeyboardMarkup:
+def kb_main(is_parent_user: bool, show_child_button: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💨 Измерение", callback_data="add")],
     ]
     if is_parent_user:
+        if show_child_button:
+            rows.insert(0, [InlineKeyboardButton(text="🧒 Ребёнок", callback_data="pick_child")])
         rows.append([
             InlineKeyboardButton(text="📋 История", callback_data="history"),
             InlineKeyboardButton(text="📊 График", callback_data="chart"),
@@ -434,9 +452,13 @@ def kb_pef_tens() -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 # Status block — shows in main menu
 # ---------------------------------------------------------------------------
-async def build_status_block() -> str:
-    today = await asyncio.to_thread(get_today_measurements, DB_PATH, CHILD_ID)
-    target = await asyncio.to_thread(get_effective_target)
+async def build_status_block(member=None) -> str:
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        return "🧒 В семье пока нет ребёнка. Добавьте ребёнка в разделе «Дети»."
+
+    today = await _db(get_today_measurements, DB_PATH, child_id, family_id=family_id)
+    target = await _db(get_effective_target, family_id=family_id)
 
     morning_val = None
     evening_val = None
@@ -450,7 +472,7 @@ async def build_status_block() -> str:
     evening_display = f"{tod_emoji('evening')} {evening_val} {pef_zone(evening_val, target)[0]}" if evening_val else f"{tod_emoji('evening')} —"
 
     # Last measurement diff (only the two latest rows are needed)
-    recent = await asyncio.to_thread(get_recent_measurements, DB_PATH, CHILD_ID, 2)
+    recent = await _db(get_recent_measurements, DB_PATH, child_id, 2, family_id=family_id)
     diff = ""
     if len(recent) >= 2:
         d = recent[0]["pef_value"] - recent[1]["pef_value"]
@@ -458,8 +480,9 @@ async def build_status_block() -> str:
         zone, _ = pef_zone(recent[0]["pef_value"], target)
         diff = f"\nПоследний: {recent[0]['pef_value']} {zone} ({sign}{d})"
 
+    name = _child_name(member, child_id)
     return (
-        f"👋 *{escape_md(CHILD_NAME)}* | Целевая: {target} л/мин\n\n"
+        f"👋 *{escape_md(name)}* | Целевая: {target} л/мин\n\n"
         f"Сегодня: {morning_display} | {evening_display}"
         f"{diff}"
     )
@@ -485,16 +508,20 @@ async def send_main_menu(message_or_callback, user_id: int, member=None):
         return
 
     is_p = _role(member, user_id) == "parent"
-    status = await build_status_block()
+    status = await build_status_block(member)
+    family_id = effective["family_id"] if effective else DEFAULT_FAMILY_ID
+    show_child_button = await _db(count_family_children, DB_PATH, family_id) > 1
 
     if isinstance(message_or_callback, types.CallbackQuery):
         await answer_callback(message_or_callback)
         await message_or_callback.message.answer(
-            status, parse_mode="Markdown", reply_markup=kb_main(is_p)
+            status, parse_mode="Markdown",
+            reply_markup=kb_main(is_p, show_child_button=show_child_button),
         )
     else:
         await message_or_callback.answer(
-            status, parse_mode="Markdown", reply_markup=kb_main(is_p)
+            status, parse_mode="Markdown",
+            reply_markup=kb_main(is_p, show_child_button=show_child_button),
         )
 
 
@@ -675,13 +702,19 @@ async def input_invite_code(message: types.Message, state: FSMContext, member=No
 # ADD measurement — auto time of day, inline пошаговый ввод
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "add")
-async def cb_add(callback: types.CallbackQuery, state: FSMContext):
+async def cb_add(callback: types.CallbackQuery, state: FSMContext, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     tod = auto_time_of_day()
     tod_icon = tod_emoji(tod)
     tod_name = tod_label(tod)
 
     # Check if already done (auto-carry doesn't count — it gets replaced)
-    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
+    if await _db(has_today_measurement, DB_PATH, child_id, tod,
+                 skip_auto=True, family_id=family_id):
         await respond(callback,
             f"⚠️ {tod_icon} {tod_name} уже измерено сегодня.\n\n"
             f"Хотите добавить ещё одно или исправить последнее?",
@@ -706,7 +739,11 @@ async def cb_add(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("add_force_"))
-async def cb_add_force(callback: types.CallbackQuery, state: FSMContext):
+async def cb_add_force(callback: types.CallbackQuery, state: FSMContext, member=None):
+    _, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     tod = callback.data.replace("add_force_", "")
     await state.update_data(input_context="add", forced_tod=tod)
     await respond(callback,
@@ -720,13 +757,19 @@ async def cb_add_force(callback: types.CallbackQuery, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Пошаговый inline-ввод: сотни → десятки — функции сохранения
 # ---------------------------------------------------------------------------
-async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, data: dict):
+async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, data: dict, member=None):
     """Сохранить новое измерение после inline-ввода."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     if "forced_tod" in data:
         tod = data["forced_tod"]
     else:
         tod = auto_time_of_day()
-        if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
+        if await _db(has_today_measurement, DB_PATH, child_id, tod,
+                     skip_auto=True, family_id=family_id):
             # The auto-detected slot is already filled by a real entry.
             # Never silently flip morning↔evening (that corrupts statistics) —
             # keep the chosen value and ask the user which slot to use.
@@ -744,25 +787,32 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
             )
             return
 
-    await _persist_measurement(callback, state, pef, tod)
+    await _persist_measurement(callback, state, pef, tod, member=member)
 
 
-async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, tod: str):
+async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, tod: str, member=None):
     """Insert/replace a measurement with a definitive time of day."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     who = callback.from_user.id
 
     # Auto-carry record for this slot today → replace it with the real value
-    replaced_id = await _db(replace_auto_measurement, DB_PATH, CHILD_ID, tod, pef, who)
+    replaced_id = await _db(replace_auto_measurement, DB_PATH, child_id, tod, pef, who,
+                            family_id=family_id)
     if replaced_id:
         mid = replaced_id
     else:
-        mid = await _db(add_measurement, DB_PATH, pef, tod, CHILD_ID, who)
+        mid = await _db(add_measurement, DB_PATH, pef, tod, child_id, who,
+                        family_id=family_id)
 
-    target = await _db(get_effective_target)
+    target = await _db(get_effective_target, family_id=family_id)
     zone_emoji, zone_name = pef_zone(pef, target)
 
     # Diff against the previous measurement of the same time of day
-    prev = await _db(get_previous_of_tod, DB_PATH, CHILD_ID, tod, mid)
+    prev = await _db(get_previous_of_tod, DB_PATH, child_id, tod, mid,
+                     family_id=family_id)
     diff_msg = ""
     if prev:
         d = pef - prev["pef_value"]
@@ -781,14 +831,17 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
         ]),
     )
 
+    child_name = _child_name(member, child_id)
+    parents = await _family_parents(member, family_id)
+
     # Notify other parents
-    added_by_name = _user_display_name(who)
-    for pid in PARENT_IDS:
-        if pid != who and pid != CHILD_ID:
+    added_by_name = _user_display_name(who, member)
+    for pid in parents:
+        if pid != who and pid != child_id:
             try:
                 await bot.send_message(
                     pid,
-                    f"📝 {escape_md(added_by_name)} добавил для *{escape_md(CHILD_NAME)}*: "
+                    f"📝 {escape_md(added_by_name)} добавил для *{escape_md(child_name)}*: "
                     f"{pef} л/мин {zone_emoji} ({tod_label(tod)})",
                     parse_mode="Markdown",
                 )
@@ -797,13 +850,13 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
 
     # Alert if red zone (skip the author — they already know the value)
     if pct_of(pef, target) < ZONE_YELLOW:
-        for pid in PARENT_IDS:
+        for pid in parents:
             if pid == who:
                 continue
             try:
                 await bot.send_message(
                     pid,
-                    f"🚨 *{escape_md(CHILD_NAME)}*: ПСВ *{pef}* л/мин — {zone_name}!\n"
+                    f"🚨 *{escape_md(child_name)}*: ПСВ *{pef}* л/мин — {zone_name}!\n"
                     f"Норма: {target} л/мин ({pct_of(pef, target)}%). Свяжитесь с врачом.",
                     parse_mode="Markdown",
                 )
@@ -816,7 +869,7 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
 
 
 @router.callback_query(F.data.in_({"pick_tod_morning", "pick_tod_evening"}))
-async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
+async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext, member=None):
     """User explicitly chose the time of day for a pending measurement."""
     data = await state.get_data()
     pef = data.get("pending_pef")
@@ -824,19 +877,24 @@ async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("❌ Значение потеряно, начните заново.", show_alert=True)
         return
     tod = "morning" if callback.data == "pick_tod_morning" else "evening"
-    await _persist_measurement(callback, state, pef, tod)
+    await _persist_measurement(callback, state, pef, tod, member=member)
 
 
 async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict, member=None):
     """Сохранить исправление последнего измерения."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     mid = data.get("edit_id")
     if mid is None:
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = await _db(edit_measurement, DB_PATH, mid, new_val, CHILD_ID)
+    ok = await _db(edit_measurement, DB_PATH, mid, new_val, child_id,
+                   family_id=family_id)
     if ok:
-        target = await _db(get_effective_target)
+        target = await _db(get_effective_target, family_id=family_id)
         zone, _ = pef_zone(new_val, target)
         await respond(callback,
             f"✅ Исправлено: *{new_val}* л/мин {zone}",
@@ -850,15 +908,20 @@ async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_
 
 async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict, member=None):
     """Сохранить исправление любого измерения."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     mid = data.get("edit_id")
     if mid is None:
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = await _db(edit_measurement, DB_PATH, mid, new_val, CHILD_ID)
+    ok = await _db(edit_measurement, DB_PATH, mid, new_val, child_id,
+                   family_id=family_id)
 
     if ok:
-        target = await _db(get_effective_target)
+        target = await _db(get_effective_target, family_id=family_id)
         zone, _ = pef_zone(new_val, target)
         await respond(callback,
             f"✅ Запись #{mid} исправлена: *{new_val}* л/мин {zone}",
@@ -906,7 +969,7 @@ async def cb_select_tens(callback: types.CallbackQuery, state: FSMContext, membe
 
     # Обрабатываем по контексту
     if context == "add":
-        await _save_measurement(callback, state, pef, data)
+        await _save_measurement(callback, state, pef, data, member=member)
     elif context == "edit_last":
         await _save_edit_last(callback, state, pef, data, member=member)
     elif context == "edit_any":
@@ -946,6 +1009,7 @@ async def cb_note_skip(callback: types.CallbackQuery, state: FSMContext, member=
 @router.message(Measurement.waiting_note, F.text)
 async def input_note(message: types.Message, state: FSMContext, member=None):
     """Save the note text to the last measurement."""
+    family_id, child_id = await _ctx(member)
     data = await state.get_data()
     mid = data.get("note_for_id")
     if mid is None:
@@ -953,8 +1017,14 @@ async def input_note(message: types.Message, state: FSMContext, member=None):
         await send_main_menu(message, message.from_user.id, member=member)
         return
 
+    if child_id is None:
+        await _no_child_reply(message, member)
+        await state.clear()
+        await send_main_menu(message, message.from_user.id, member=member)
+        return
+
     note = message.text.strip()[:200]
-    ok = await _db(set_note, DB_PATH, mid, note, CHILD_ID)
+    ok = await _db(set_note, DB_PATH, mid, note, child_id, family_id=family_id)
 
     truncated = "" if len(message.text.strip()) <= 200 else " (обрезано до 200 символов)"
     await message.answer(
@@ -973,7 +1043,11 @@ async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext, member=
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
-    last = await _db(get_last_measurement, DB_PATH, CHILD_ID)
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    last = await _db(get_last_measurement, DB_PATH, child_id, family_id=family_id)
     if not last:
         await respond(callback, "📭 Нет измерений для исправления.", kb=kb_back())
         return
@@ -1055,11 +1129,16 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext, member=N
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
 
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     mid = parse_callback_int(callback.data, "edit_")
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    measurement = await _db(get_measurement_by_id, DB_PATH, mid)
+    measurement = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
     if not measurement:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
         return
@@ -1086,11 +1165,16 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext, me
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     mid = parse_callback_int(callback.data, "del_confirm_")
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    ok = await _db(delete_measurement, DB_PATH, mid, CHILD_ID)
+    ok = await _db(delete_measurement, DB_PATH, mid, child_id, family_id=family_id)
 
     if ok:
         await callback.answer("✅ Запись удалена.", show_alert=True)
@@ -1107,11 +1191,16 @@ async def cb_delete(callback: types.CallbackQuery, state: FSMContext, member=Non
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     mid = parse_callback_int(callback.data, "del_")
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    row = await _db(get_measurement_by_id, DB_PATH, mid)
+    row = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
 
     if not row:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
