@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -114,14 +115,60 @@ def _rebuild_reminders_v2(conn):
     if cols:
         present = [f for f in _REMINDER_FLAGS if f in cols]
         sel = ", ".join(present)
+        import config
+        seed_child = getattr(config, "CHILD_ID", 0) or 0
         conn.execute(
             f"INSERT INTO reminders_sent (child_id, date{', ' + sel if sel else ''}) "
-            f"SELECT 0, date{', ' + sel if sel else ''} FROM reminders_v1")
+            f"SELECT ?, date{', ' + sel if sel else ''} FROM reminders_v1",
+            (seed_child,))
         conn.execute("DROP TABLE reminders_v1")
 
 
 def _seed_default_family(conn):
-    pass
+    """Create family #1 and its members from legacy users, else from env."""
+    existing = conn.execute(
+        "SELECT id FROM families WHERE id = ?", (DEFAULT_FAMILY_ID,)
+    ).fetchone()
+    if existing:
+        return
+    conn.execute(
+        "INSERT INTO families (id, name) VALUES (?, ?)", (DEFAULT_FAMILY_ID, "Семья")
+    )
+    cols = _table_columns(conn, "users")
+    seeded = False
+    if "user_id" in cols:
+        # Materialise first: `conn` may be a cursor, and reusing it for INSERT
+        # while iterating its SELECT truncates the loop after the first row.
+        rows = conn.execute(
+            "SELECT user_id, role, first_name, child_name FROM users"
+        ).fetchall()
+        for r in rows:
+            role = (r["role"] or "").strip()
+            if role not in ("parent", "child"):
+                continue
+            name = r["child_name"] or r["first_name"] or ""
+            conn.execute(
+                "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?)",
+                (r["user_id"], DEFAULT_FAMILY_ID, role, name)
+            )
+            seeded = True
+    if not seeded:
+        # Fallback: seed from .env (config snapshots at import time).
+        import config
+        child_id = getattr(config, "CHILD_ID", 0)
+        parent_ids = getattr(config, "PARENT_IDS", []) or []
+        child_name = getattr(config, "CHILD_NAME", "Ребёнок")
+        if child_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'child', ?)",
+                (child_id, DEFAULT_FAMILY_ID, child_name)
+            )
+        for pid in parent_ids:
+            if pid:
+                conn.execute(
+                    "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', 'Родитель')",
+                    (pid, DEFAULT_FAMILY_ID)
+                )
 
 
 def _migrate_to_v2(conn):
@@ -131,7 +178,39 @@ def _migrate_to_v2(conn):
     _rebuild_reminders_v2(conn)
 
 
+def _needs_migration(probe) -> bool:
+    """True when a non-empty DB does not yet have the v2 schema.
+
+    Detected by schema state, not only ``PRAGMA user_version``: Task 1 bumped
+    the version constant before this migration existed, so user_version alone
+    is unreliable (Ruling A).
+    """
+    try:
+        version = probe.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.DatabaseError:
+        return False  # not a valid SQLite file — nothing safe to back up
+    if version < SCHEMA_VERSION:
+        return True
+    mcols = {r[1] for r in probe.execute("PRAGMA table_info(measurements)")}
+    if mcols and not {"child_id", "family_id"} <= mcols:
+        return True
+    members = probe.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='members'"
+    ).fetchone()
+    return members is None
+
+
 def init_db(db_path: str):
+    # Back up a non-empty pre-v2 database before migrating it.
+    if os.path.exists(db_path) and os.path.getsize(db_path) > 0:
+        probe = sqlite3.connect(db_path)
+        try:
+            needs_backup = _needs_migration(probe)
+        finally:
+            probe.close()
+        if needs_backup:
+            backup_db(db_path, db_path + ".v1.bak")
+
     conn = get_connection(db_path)
     c = conn.cursor()
 
@@ -153,25 +232,32 @@ def init_db(db_path: str):
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_members_family ON members(family_id)")
 
-    _seed_default_family(c)                      # Task 5; заглушка pass до Task 5
-    _migrate_to_v2(c)
+    try:
+        # Seed + v1->v2 rebuild run atomically so a mid-rebuild failure cannot
+        # strand *_v1 tables (Ruling B).
+        c.execute("BEGIN IMMEDIATE")
+        _seed_default_family(c)
+        _migrate_to_v2(c)
 
-    # Default target PEF if not set
-    c.execute(
-        "INSERT OR IGNORE INTO settings (family_id, key, value) VALUES (?, 'target_pef', '260')",
-        (DEFAULT_FAMILY_ID,)
-    )
+        # Default target PEF if not set
+        c.execute(
+            "INSERT OR IGNORE INTO settings (family_id, key, value) VALUES (?, 'target_pef', '260')",
+            (DEFAULT_FAMILY_ID,)
+        )
 
-    c.execute("""
-        CREATE INDEX IF NOT EXISTS idx_meas_family_child_time
-        ON measurements(family_id, child_id, measured_at)
-    """)
+        c.execute("""
+            CREATE INDEX IF NOT EXISTS idx_meas_family_child_time
+            ON measurements(family_id, child_id, measured_at)
+        """)
 
-    # Record schema version (idempotent migrations above are v1).
-    c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-
-    conn.commit()
-    conn.close()
+        # Record schema version.
+        c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ============================================================================

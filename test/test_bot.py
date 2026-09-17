@@ -8,7 +8,7 @@ TEST_DB = "test_peakflow.db"
 @pytest.fixture(autouse=True)
 def setup_db():
     os.environ["DB_PATH"] = TEST_DB
-    for ext in ["", "-wal", "-shm", "-journal"]:
+    for ext in ["", "-wal", "-shm", "-journal", ".v1.bak"]:
         p = TEST_DB + ext
         if os.path.exists(p):
             try:
@@ -28,7 +28,7 @@ def setup_db():
 
     yield
 
-    for ext in ["", "-wal", "-shm", "-journal"]:
+    for ext in ["", "-wal", "-shm", "-journal", ".v1.bak"]:
         p = TEST_DB + ext
         if os.path.exists(p):
             try:
@@ -1358,8 +1358,13 @@ class TestRemindersFamilyScope:
                 f"{fn.__name__}: child_id must be required (no default)"
 
     def test_migration_preserves_v1_flags(self):
-        """v1 reminders_sent(date PK) migrates to (child_id, date) keeping flags."""
+        """v1 reminders_sent(date PK) migrates to (child_id, date) keeping flags.
+
+        Historical rows are attributed to the configured active child when
+        ``CHILD_ID`` is set (Task 5), else to the unknown child ``0``.
+        """
         import sqlite3
+        import config
         from database import init_db
         conn = sqlite3.connect(TEST_DB)
         conn.execute("DROP TABLE IF EXISTS reminders_sent")
@@ -1384,7 +1389,8 @@ class TestRemindersFamilyScope:
         ).fetchone()
         conn.close()
         assert "child_id" in cols
-        assert row == (0, 1, 1)
+        expected_child = getattr(config, "CHILD_ID", 0) or 0
+        assert row == (expected_child, 1, 1)
 
 
 class TestCallbackParsing:
@@ -2235,6 +2241,80 @@ class TestMeasurementV2:
         ).fetchall()
         conn.close()
         assert rows, "index idx_meas_family_child_time missing"
+
+
+class TestMigrationV2:
+    def _make_v1_db(self):
+        import sqlite3
+        from database import init_db
+        for ext in ["", "-wal", "-shm", "-journal"]:
+            import os
+            if os.path.exists(TEST_DB + ext):
+                os.remove(TEST_DB + ext)
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, pef_value INTEGER NOT NULL, "
+            "time_of_day TEXT NOT NULL, measured_at TIMESTAMP, added_by INTEGER, note TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE reminders_sent (date TEXT PRIMARY KEY, morning_reminder INTEGER DEFAULT 0, "
+            "evening_reminder INTEGER DEFAULT 0, weekly_report INTEGER DEFAULT 0)"
+        )
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, "
+                     "role TEXT, child_name TEXT, age INTEGER, target_pef INTEGER, created_at TIMESTAMP, "
+                     "reminder_morning INTEGER, reminder_evening INTEGER)")
+        conn.execute("INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by) "
+                     "VALUES (111, 240, 'morning', '2026-01-01 08:00:00', 222)")
+        conn.execute("INSERT INTO users (user_id, first_name, role, child_name) VALUES (111, 'Маша', 'child', 'Маша')")
+        conn.execute("INSERT INTO users (user_id, first_name, role) VALUES (222, 'Олег', 'parent')")
+        conn.execute("INSERT INTO settings (key, value) VALUES ('target_pef', '300')")
+        conn.execute("INSERT INTO reminders_sent (date, morning_reminder) VALUES ('2026-01-01', 1)")
+        conn.commit()
+        conn.close()
+
+    def test_migration_preserves_measurements_and_settings(self):
+        import sqlite3
+        from database import init_db, SCHEMA_VERSION
+        self._make_v1_db()
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
+        setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
+        conn.close()
+        assert version == SCHEMA_VERSION == 2
+        assert row == (1, 111, 240)
+        assert setting[0] == "300"
+
+    def test_migration_seeds_family_from_legacy_users(self):
+        from database import init_db, get_member, get_family
+        self._make_v1_db()
+        init_db(TEST_DB)
+        assert get_family(TEST_DB, 1) is not None
+        assert get_member(TEST_DB, 111)["role"] == "child"
+        assert get_member(TEST_DB, 222)["role"] == "parent"
+
+    def test_migration_is_idempotent(self):
+        from database import init_db
+        self._make_v1_db()
+        init_db(TEST_DB)
+        init_db(TEST_DB)  # must not fail or duplicate
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        assert conn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM families").fetchone()[0] == 1
+        conn.close()
+
+    def test_backup_created_before_migration(self, tmp_path):
+        import os
+        from unittest.mock import patch
+        import database
+        self._make_v1_db()
+        with patch.object(database, "backup_db") as m:
+            database.init_db(TEST_DB)
+            m.assert_called_once()
 
 
 if __name__ == "__main__":
