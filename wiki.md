@@ -132,7 +132,7 @@ peakflow/
 Проверки прав в хендлерах:
 
 - `cb_edit_any`, `cb_delete`, `cb_delete_confirm`*(частично)*, `cb_settings`, `cb_change_target` — только для родителей (`is_parent`), иначе alert «Только родители…».
-- **Все измерения пишутся от имени ребёнка**: в БД `user_id` = `CHILD_ID` всегда, а ID того, кто нажал кнопки, хранится в `added_by`.
+- **Все измерения пишутся от имени ребёнка**: в БД `child_id` = `CHILD_ID` всегда, а ID того, кто нажал кнопки, хранится в `added_by`.
 
 ---
 
@@ -140,57 +140,93 @@ peakflow/
 
 Подключение (`database.py: get_connection`): `sqlite3.connect` + `row_factory=Row` + `PRAGMA journal_mode=WAL` — **новое соединение на каждый запрос**.
 
+Схема — **v2 (мульти-тенант)**: `SCHEMA_VERSION = 2`, `DEFAULT_FAMILY_ID = 1`.
+Данные изолированы по семье; замеры принадлежат паре `(family_id, child_id)`.
+
+### Правило tenant-aware доступа
+
+Каждая функция доступа к данным принимает `family_id` **последним параметром**
+со значением по умолчанию `DEFAULT_FAMILY_ID` (= 1), а `child_id` занимает
+прежнюю позицию `user_id`. Благодаря этому существующие вызовы бота и Mini App
+остаются валидными (single-family режим). Исключение — `mark_reminder_sent` /
+`was_reminder_sent`: там `child_id` **обязателен** (входит в ключ
+`reminders_sent(child_id, date)`), поэтому напоминания scoped по ребёнку.
+
+### Таблицы `families` и `members` (v2)
+
+| Таблица | Поля |
+|---------|------|
+| `families` | `id` (PK), `name`, `created_at`; семья №1 — `DEFAULT_FAMILY_ID` |
+| `members` | `telegram_id` (PK), `family_id` (FK), `role` CHECK `parent`/`child`, `name`, `created_at`; индекс `idx_members_family` |
+
 ### Таблица `measurements`
 
 | Поле | Тип | Описание |
 |------|-----|----------|
 | `id` | INTEGER PK AUTOINCREMENT | ID записи |
-| `user_id` | INTEGER | Всегда `CHILD_ID` |
+| `family_id` | INTEGER NOT NULL DEFAULT 1 | Семья-владелец (v2) |
+| `child_id` | INTEGER NOT NULL | ID ребёнка (в v1 — `user_id`) |
 | `pef_value` | INTEGER | Значение ПСВ, л/мин (100–690) |
-| `time_of_day` | TEXT, CHECK `morning`/`evening` | Время суток |
+| `time_of_day` | TEXT, CHECK `morning`/`evening`/`unknown` | Время суток |
 | `measured_at` | TIMESTAMP | Локальное время записи `ГГГГ-ММ-ДД ЧЧ:ММ:СС` |
 | `added_by` | INTEGER | Telegram ID добавившего (для 👨‍👧/👶 в истории) |
+| `note` | TEXT | Заметка к замеру |
+| `source` | TEXT DEFAULT `'manual'` | `'manual'` или `'auto'` (автозаполнение) |
 
-### Таблица `reminders_sent`
+Индекс: `idx_meas_family_child_time` по `(family_id, child_id, measured_at)`.
+
+### Таблица `reminders_sent` (v2, по ребёнку)
 
 | Поле | Описание |
 |------|----------|
-| `date` (PK) | Дата `ГГГГ-ММ-ДД` |
-| `morning_reminder` | Отправлено ли напоминание о пропуске утреннего замера |
-| `evening_reminder` | То же для вечернего |
+| `child_id` + `date` (составной PK) | Ребёнок и дата `ГГГГ-ММ-ДД` |
+| `morning_reminder` / `evening_reminder` | Отправлено ли напоминание родителям о пропуске |
 | `weekly_report` | Отправлен ли недельный отчёт в этот день |
+| `child_morning_reminder` / `child_evening_reminder` | Отправлено ли напоминание ребёнку |
+| `auto_morning` / `auto_evening` | Выполнено ли автозаполнение пропуска |
 
-Назначение — защита от повторной отправки в течение дня (планировщик тикает каждую минуту).
+Назначение — защита от повторной отправки в течение дня (планировщик тикает каждую минуту); ключ по `child_id` изолирует флаги разных детей.
 
-### Таблица `settings`
+### Таблица `settings` (v2, по семье)
 
-Ключ-значение (`key`, `value`). Единственный используемый ключ — `target_pef` (создаётся при `init_db` со значением `260`). Хранит целевую ПСВ, изменяемую родителями через бота.
+Составной ключ `(family_id, key)`. Единственный используемый ключ — `target_pef` (создаётся при `init_db` со значением `260`). Хранит целевую ПСВ, изменяемую родителями через бота.
 
 ### Миграции в `init_db()`
 
-- `CREATE TABLE IF NOT EXISTS` для трёх таблиц.
-- `try/except ALTER`: добавление `time_of_day` (старые записи → `morning`) и `added_by` — для совместимости со старой схемой. Версионирования миграций нет.
-- В прод-БД есть legacy-таблицы (`users`, `parent_child_links`, колонка `note`), которые текущий код не использует.
+- `CREATE TABLE IF NOT EXISTS` для `families`, `members` и `measurements` v2.
+- **Версия схемы:** `PRAGMA user_version` = `SCHEMA_VERSION` (2).
+- **Бэкап:** на непустой v1-БД перед миграцией `backup_db` пишет `<db>.v1.bak`; при ошибке бэкапа миграция прерывается.
+- **Миграция v1→v2:** `measurements.user_id` → `child_id` + `family_id=1`; `settings` и `reminders_sent` перестраиваются паттерном new→copy→drop→rename (SQLite не меняет PK через `ALTER`), данные переносятся в семью №1 / `CHILD_ID`. Всё в одной транзакции, идемпотентно.
+- **Сидинг семьи №1:** из конфига `.env` (`CHILD_ID`/`PARENT_IDS`/`CHILD_NAME`) — **конфиг авторитетен** для перечисленных в нём ID; legacy-таблица `users` лишь добивает ID, которых нет в конфиге (`INSERT OR IGNORE`).
+- Legacy-таблицы (`users`, `parent_child_links`) не удаляются, кодом после миграции не читаются.
 
 ### Функции `database.py`
 
+Все функции замеров/настроек принимают `family_id` последним параметром
+(`DEFAULT_FAMILY_ID = 1` по умолчанию), `child_id` — на позиции `user_id`.
+
 | Функция | Возвращает / делает |
 |---------|---------------------|
-| `init_db(path)` | Создание таблиц, миграции, дефолт `target_pef`, индекс `idx_meas_user_time` |
-| `add_measurement(db, pef, tod, uid, by)` | INSERT; возвращает `id` |
-| `edit_measurement(db, mid, val, uid)` | UPDATE по `id`+`user_id`; bool |
-| `delete_measurement(db, mid, uid)` | DELETE по `id`+`user_id`; bool |
-| `get_last_measurement(db, uid)` | Последняя запись (`ORDER BY id DESC LIMIT 1`) |
-| `get_all_measurements(db, uid)` | Все записи, новые сверху |
-| `get_today_measurements(db, uid)` | Записи за сегодня (`LIKE 'ГГГГ-ММ-ДД%'`), по возрастанию времени |
-| `has_today_measurement(db, uid, tod)` | Есть ли запись «сегодня + время суток» |
-| `get_week_measurements(...)` | ⚠️ удалена (мёртвый код) |
-| `get_last_two_weeks(db, uid)` | `(эта_неделя, прошлая)` от понедельника 00:00 |
-| `get_measurements_paginated(db, uid, page, per_page)` | `(страница, всего, всего_страниц)`; по 10 записей |
-| `get_measurements_for_chart(db, uid, days=30)` | Данные за N дней, по возрастанию |
-| `get_stats(db, uid)` | Полная статистика (см. §15) |
-| `mark_reminder_sent` / `was_reminder_sent` | Флаги отправленных напоминаний по дате (INSERT … ON CONFLICT DO NOTHING — соседние флаги дня не затираются) |
-| `get_setting` / `set_setting` | Чтение/запись `settings` |
+| `init_db(path)` | Схема v2, миграция, бэкап `*.v1.bak`, сидинг семьи №1, дефолт `target_pef`, индекс `idx_meas_family_child_time` |
+| `add_measurement(db, pef, tod, child_id, by, source, family_id)` | INSERT; возвращает `id` |
+| `add_or_replace_measurement(db, pef, tod, child_id, by, force, source, family_id)` | Атомарно (`BEGIN IMMEDIATE`) вставка/замена авто-записи; `(id, status)` `ok`/`exists` |
+| `edit_measurement(db, mid, val, child_id, family_id)` | UPDATE по `id`+`child_id`+`family_id`; bool |
+| `delete_measurement(db, mid, child_id, family_id)` | DELETE по `id`+`child_id`+`family_id`; bool |
+| `get_last_measurement(db, child_id, family_id)` | Последняя запись (`ORDER BY id DESC LIMIT 1`) |
+| `get_recent_measurements(db, child_id, limit=2, family_id)` | Последние N реальных замеров (без auto) |
+| `get_all_measurements(db, child_id, include_auto=False, family_id)` | Все записи, новые сверху |
+| `get_today_measurements(db, child_id, family_id)` | Записи за сегодня (`LIKE 'ГГГГ-ММ-ДД%'`), по возрастанию времени |
+| `has_today_measurement(db, child_id, tod, skip_auto=False, family_id)` | Есть ли запись «сегодня + время суток» |
+| `get_previous_of_tod(db, child_id, tod, before_id, family_id)` | Предыдущий реальный замер того же времени суток |
+| `get_last_two_weeks(db, child_id, family_id)` | `(эта_неделя, прошлая)` от понедельника 00:00 |
+| `get_measurements_paginated(db, child_id, page, per_page, family_id)` | `(страница, всего, всего_страниц)`; по 10 записей |
+| `get_measurements_for_chart(db, child_id, days=30, family_id)` | Данные за N дней, по возрастанию |
+| `get_stats(db, child_id, family_id)` | Полная статистика (см. §15) |
+| `mark_reminder_sent(db, date, type, child_id)` / `was_reminder_sent(...)` | Флаги напоминаний по `(child_id, date)` (`INSERT … ON CONFLICT DO NOTHING` — соседние флаги дня не затираются); `child_id` **обязателен** |
+| `get_setting` / `set_setting` | Чтение/запись `settings` в разрезе `(family_id, key)` |
+| `get_effective_target(db, fallback, family_id)` | Целевая ПСВ из `settings` → fallback → 300 |
+| `get_reminder_hours(db, family_id)` | Часы напоминаний (`REMINDER_HOURS_DEFAULT` + `reminder_*` из settings) |
+| `create_family` / `get_family` / `add_member` / `get_member` / `list_family_children` | Доступоры мульти-тенанта |
 
 ---
 
@@ -313,7 +349,7 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
    forced_tod есть?  → берём его (повторный замер)
    иначе             → auto_time_of_day();
                        если этот слот занят → МОЛЧА инвертируем утро↔вечер (⚠️ см. §24, п.6)
-2. add_measurement() → INSERT (user_id=CHILD_ID, added_by=кто нажал)
+2. add_measurement() → INSERT (child_id=CHILD_ID, added_by=кто нажал)
 3. Ответ: «✅ ☀️ Утро: *240* л/мин 🟢 / Зона: Зелёная (92% от нормы) / 📈 Изменение: +5»
    (изменение = разница с ПРЕДПОСЛЕДНИМ замером)
 4. Уведомление «📝 <кто> добавил для *Motya*: 240 л/мин 🟢 (Утро)»
@@ -332,14 +368,14 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 - Берётся `get_last_measurement()` (последняя запись ребёнка).
 - Если записей нет → «📭 Нет измерений для исправления».
 - FSM: `edit_id`, `input_context="edit_last"`, показ старого значения, клавиатура сотен → десятков.
-- `_save_edit_last()`: `edit_measurement(DB_PATH, mid, new_val, CHILD_ID)` — запись принадлежит ребёнку, поэтому `user_id` передаётся всегда `CHILD_ID` (работает и для родителей, и для ребёнка).
+- `_save_edit_last()`: `edit_measurement(DB_PATH, mid, new_val, CHILD_ID)` — запись принадлежит ребёнку, поэтому `child_id` передаётся всегда `CHILD_ID` (работает и для родителей, и для ребёнка).
 
 ### Редактирование любой записи (`edit_<id>`) — только родитель
 
 - Хендлер `cb_edit_any` перехватывает все `edit_*` кроме `edit_last` (проверка равенства — хак, т.к. `startswith("edit_")`).
 - Проверка `is_parent` → иначе alert.
 - Чтение записи прямым SQL (в обход `database.py`), показ «✏️ Запись #id: …», FSM: `edit_id`, `input_context="edit_any"` → ввод сотен/десятков.
-- `_save_edit_any()`: прямой `UPDATE ... WHERE id=? AND user_id=CHILD_ID` — здесь `user_id` передаётся верно (CHILD_ID), поэтому для родителей работает.
+- `_save_edit_any()`: прямой `UPDATE ... WHERE id=? AND child_id=CHILD_ID` — здесь `child_id` передаётся верно (CHILD_ID), поэтому для родителей работает.
 - После сохранения — возврат в историю (`_show_history_from_callback`, страница 1).
 
 ---
@@ -361,7 +397,7 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 ### Шаг 2: `cb_delete_confirm` (callback `del_confirm_<id>`)
 
 - Проверка `is_parent` → иначе alert «Только родители могут удалять» (защита и на этапе подтверждения).
-- Прямой `DELETE FROM measurements WHERE id=? AND user_id=CHILD_ID`.
+- Прямой `DELETE FROM measurements WHERE id=? AND child_id=CHILD_ID`.
 - Результат — alert «✅ Запись удалена» / «❌ Не удалось», затем `state.clear()` и возврат в историю (стр. 1).
 
 ---
@@ -665,10 +701,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 197 тестов
+python -m pytest test/ -v         # 263 теста
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД, а также Mini App (auth initData, чтение, запись, настройки, экспорт, бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД, миграция v1→v2 и изоляция семей, а также Mini App (auth initData, чтение, запись, настройки, экспорт, бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 

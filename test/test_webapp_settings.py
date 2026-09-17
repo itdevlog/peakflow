@@ -106,3 +106,11 @@ def test_put_reminders_child_forbidden():
     body = {"child_morning": 8, "child_evening": 20, "parent_morning": 10, "parent_evening": 22}
     assert _client().put("/api/settings/reminders", json=body,
                          headers=_auth(CHILD_ID)).status_code == 403
+
+
+def test_put_reminders_rejects_parent_at_child_hour():
+    """Escalation must come after the child ping, not at the same minute."""
+    body = {"child_morning": 8, "child_evening": 20, "parent_morning": 8, "parent_evening": 22}
+    r = _client().put("/api/settings/reminders", json=body, headers=_auth(PARENT_IDS[0]))
+    assert r.status_code == 422
+    assert get_reminder_hours(TEST_DB)["parent_morning"] == 10  # unchanged default

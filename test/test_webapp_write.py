@@ -123,6 +123,68 @@ def test_add_duplicate_force_creates_second_slot():
     assert len(get_all_measurements(TEST_DB, CHILD_ID)) == 2
 
 
+class TestNotifyScheduling:
+    """Phase 0.4: Telegram notifications must be deferred to background tasks.
+
+    Awaiting them inline means a slow/hung Telegram API holds the HTTP request
+    open. The endpoint must only *schedule* them.
+    """
+
+    def test_schedules_added_and_red_zone(self):
+        import web.api as api
+        from web import notify
+
+        scheduled = []
+
+        class FakeBackground:
+            def add_task(self, func, *args, **kwargs):
+                scheduled.append((func, args, kwargs))
+
+        cfg = _config()
+        api._schedule_add_notifications(
+            FakeBackground(), bot=None, config=cfg,
+            who=CHILD_ID, pef=120, tod="morning", target=260, pct=46,
+        )
+        funcs = [f for f, _, _ in scheduled]
+        assert notify.notify_added in funcs
+        assert notify.notify_red_zone in funcs
+
+    def test_no_red_zone_when_green(self):
+        import web.api as api
+        from web import notify
+
+        scheduled = []
+
+        class FakeBackground:
+            def add_task(self, func, *args, **kwargs):
+                scheduled.append((func, args, kwargs))
+
+        api._schedule_add_notifications(
+            FakeBackground(), bot=None, config=_config(),
+            who=CHILD_ID, pef=250, tod="morning", target=260, pct=96,
+        )
+        funcs = [f for f, _, _ in scheduled]
+        assert notify.notify_added in funcs
+        assert notify.notify_red_zone not in funcs
+
+    def test_red_zone_excludes_author(self):
+        import web.api as api
+        from web import notify
+
+        scheduled = []
+
+        class FakeBackground:
+            def add_task(self, func, *args, **kwargs):
+                scheduled.append((func, args, kwargs))
+
+        api._schedule_add_notifications(
+            FakeBackground(), bot=None, config=_config(),
+            who=PARENT_IDS[0], pef=120, tod="morning", target=260, pct=46,
+        )
+        red = [kw for f, _, kw in scheduled if f is notify.notify_red_zone]
+        assert red and red[0].get("who") == PARENT_IDS[0]
+
+
 def test_add_duplicate_other_slot_not_blocked():
     _setup_db()
     add_measurement(TEST_DB, 250, "evening", CHILD_ID, CHILD_ID)

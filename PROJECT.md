@@ -49,7 +49,7 @@ peakflow/
 ├── config.py           # Настройки, ID семьи, пороги
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (197)
+├── test/               # Pytest тесты (263)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -78,31 +78,72 @@ peakflow/
 
 ## База данных
 
+Схема — **v2 (мульти-тенант)**: `SCHEMA_VERSION = 2`, `DEFAULT_FAMILY_ID = 1`.
+Данные изолированы по семье (`families`/`members`), замеры принадлежат семье и
+ребёнку. При старте `init_db()` на непустой v1-БД сначала делает резервную копию
+`<db>.v1.bak` (`backup_db`), затем мигрирует схему v1→v2. Миграция идемпотентна,
+выполняется в транзакции, при ошибке бэкапа прерывается.
+
+### Таблица `families` (v2)
+
+| Поле | Тип | Ограничения | Описание |
+|------|-----|-------------|----------|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | ID семьи (тенанта); семья №1 — `DEFAULT_FAMILY_ID` |
+| `name` | TEXT | NOT NULL | Название семьи |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | Дата создания |
+
+### Таблица `members` (v2)
+
+| Поле | Тип | Ограничения | Описание |
+|------|-----|-------------|----------|
+| `telegram_id` | INTEGER | PRIMARY KEY | Telegram ID участника |
+| `family_id` | INTEGER | NOT NULL REFERENCES families(id) | Семья участника |
+| `role` | TEXT | NOT NULL CHECK IN ('parent', 'child') | Роль участника |
+| `name` | TEXT | NOT NULL DEFAULT '' | Отображаемое имя |
+| `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | Дата добавления |
+
+**Индекс:** `idx_members_family` по `family_id`.
+
 ### Таблица `measurements`
 
 | Поле | Тип | Ограничения | Описание |
 |------|-----|-------------|----------|
 | `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | Уникальный ID записи |
-| `user_id` | INTEGER | NOT NULL | ID ребёнка (CHILD_ID) |
+| `family_id` | INTEGER | NOT NULL DEFAULT 1 | Семья-владелец (v2) |
+| `child_id` | INTEGER | NOT NULL | ID ребёнка (в v1 — `user_id`, обычно `CHILD_ID`) |
 | `pef_value` | INTEGER | NOT NULL | Значение ПСВ (л/мин) |
-| `time_of_day` | TEXT | CHECK IN ('morning', 'evening') | Время суток |
+| `time_of_day` | TEXT | CHECK IN ('morning', 'evening', 'unknown') | Время суток |
 | `measured_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | Дата и время записи |
 | `added_by` | INTEGER | — | Telegram ID того, кто добавил |
+| `note` | TEXT | — | Заметка к замеру |
+| `source` | TEXT | DEFAULT 'manual' | `'manual'` или `'auto'` (автозаполнение пропуска) |
 
-**Индексы:** Автоматический по `id`. Рекомендация: `CREATE INDEX idx_measurements_user_time ON measurements(user_id, measured_at DESC)`.
+**Индексы:** Автоматический по `id`; `idx_meas_family_child_time` по
+`(family_id, child_id, measured_at)`.
 
-### Таблица `reminders_sent`
+### Таблица `reminders_sent` (v2)
 
 | Поле | Тип | Ограничения | Описание |
 |------|-----|-------------|----------|
-| `date` | TEXT | PRIMARY KEY | Дата в формате `YYYY-MM-DD` |
+| `child_id` | INTEGER | NOT NULL DEFAULT 0, PRIMARY KEY (child_id, date) | ID ребёнка |
+| `date` | TEXT | NOT NULL, PRIMARY KEY (child_id, date) | Дата в формате `YYYY-MM-DD` |
 | `morning_reminder` | INTEGER | DEFAULT 0 | Отправлено напоминание об утреннем замере |
 | `evening_reminder` | INTEGER | DEFAULT 0 | Отправлено напоминание о вечернем замере |
 | `weekly_report` | INTEGER | DEFAULT 0 | Отправлен недельный отчёт |
+| `child_morning_reminder` / `child_evening_reminder` | INTEGER | DEFAULT 0 | Отправлено напоминание ребёнку |
+| `auto_morning` / `auto_evening` | INTEGER | DEFAULT 0 | Выполнено автозаполнение пропуска |
+
+### Таблица `settings` (v2)
+
+Ключ-значение в разрезе семьи: `PRIMARY KEY (family_id, key)`. При миграции
+данные v1 переносятся в семью №1.
 
 ### SQL-запросы
 
-См. функции в [`database.py`](#модуль-databasepy).
+См. функции в [`database.py`](#модуль-databasepy). Правило tenant-aware доступа:
+`family_id` — **последний** параметр со значением по умолчанию `DEFAULT_FAMILY_ID`
+(= 1), `child_id` занимает прежнюю позицию `user_id`. Исключение:
+`mark_reminder_sent`/`was_reminder_sent` — `child_id` обязателен (см. ниже).
 
 ---
 
@@ -279,20 +320,27 @@ def main():
 
 | Функция | Параметры | Возвращает | Описание |
 |---------|-----------|-----------|----------|
-| `init_db(db_path)` | `db_path: str` | — | Создание таблиц |
-| `add_measurement(db, pef, tod, uid, by)` | `str, int, str, int, int` | `int` | Добавление замера, возвращает ID |
-| `edit_measurement(db, mid, val, uid)` | `str, int, int, int` | `bool` | Редактирование по ID |
-| `delete_measurement(db, mid, uid)` | `str, int, int` | `bool` | Удаление по ID |
-| `get_last_measurement(db, uid)` | `str, int` | `Optional[dict]` | Последний замер |
-| `get_all_measurements(db, uid)` | `str, int` | `list[dict]` | Все замеры (DESC по id) |
-| `get_today_measurements(db, uid)` | `str, int` | `list[dict]` | Замеры за сегодня |
-| `has_today_measurement(db, uid, tod)` | `str, int, str` | `bool` | Есть ли замер today+tod |
-| `get_measurements_paginated(db, uid, p, pp)` | `str, int, int, int` | `tuple` | `(замеры, всего, страниц)` |
-| `get_measurements_for_chart(db, uid, days)` | `str, int, int` | `list[dict]` | Данные для графика |
-| `get_stats(db, uid)` | `str, int` | `dict` | Полная статистика |
-| `get_last_two_weeks(db, uid)` | `str, int` | `tuple` | `(эта_неделя, прошлая_неделя)` |
-| `mark_reminder_sent(db, date, type)` | `str, str, str` | — | Отметить отправку напоминания |
-| `was_reminder_sent(db, date, type)` | `str, str, str` | `bool` | Было ли напоминание сегодня |
+| `init_db(db_path)` | `db_path: str` | — | Создание таблиц, миграция v1→v2, бэкап `<db>.v1.bak` |
+| `add_measurement(db, pef, tod, child_id, by, source='manual', family_id=1)` | `str, int, str, int, int, str, int` | `int` | Добавление замера, возвращает ID |
+| `add_or_replace_measurement(db, pef, tod, child_id, by, force=False, source='manual', family_id=1)` | `...` | `tuple` | Атомарно добавить/заменить авто-запись, `(id, status)` |
+| `edit_measurement(db, mid, val, child_id, family_id=1)` | `str, int, int, int, int` | `bool` | Редактирование по ID |
+| `delete_measurement(db, mid, child_id, family_id=1)` | `str, int, int, int` | `bool` | Удаление по ID |
+| `get_last_measurement(db, child_id, family_id=1)` | `str, int, int` | `Optional[dict]` | Последний замер |
+| `get_all_measurements(db, child_id, include_auto=False, family_id=1)` | `str, int, bool, int` | `list[dict]` | Все замеры (DESC по id) |
+| `get_today_measurements(db, child_id, family_id=1)` | `str, int, int` | `list[dict]` | Замеры за сегодня |
+| `has_today_measurement(db, child_id, tod, skip_auto=False, family_id=1)` | `str, int, str, bool, int` | `bool` | Есть ли замер today+tod |
+| `get_measurements_paginated(db, child_id, p, pp, family_id=1)` | `str, int, int, int, int` | `tuple` | `(замеры, всего, страниц)` |
+| `get_measurements_for_chart(db, child_id, days=30, family_id=1)` | `str, int, int, int` | `list[dict]` | Данные для графика |
+| `get_stats(db, child_id, family_id=1)` | `str, int, int` | `dict` | Полная статистика |
+| `get_last_two_weeks(db, child_id, family_id=1)` | `str, int, int` | `tuple` | `(эта_неделя, прошлая_неделя)` |
+| `mark_reminder_sent(db, date, type, child_id)` | `str, str, str, int` | — | Отметить отправку напоминания (child_id обязателен) |
+| `was_reminder_sent(db, date, type, child_id)` | `str, str, str, int` | `bool` | Было ли напоминание сегодня (child_id обязателен) |
+| `create_family(db, name)` / `get_family(db, fid)` | `str, str` / `str, int` | `int` / `Optional[dict]` | Создать/прочитать семью |
+| `add_member(db, telegram_id, family_id, role, name)` / `get_member(db, telegram_id)` | `...` | — / `Optional[dict]` | Upsert/чтение участника |
+| `list_family_children(db, family_id)` | `str, int` | `list[dict]` | Дети семьи |
+| `get_setting(db, key, default='', family_id=1)` / `set_setting(db, key, value, family_id=1)` | `...` | `str` / — | Настройки в разрезе семьи |
+| `get_effective_target(db, fallback, family_id=1)` | `str, int, int` | `int` | Целевая ПСВ (settings → fallback → 300) |
+| `get_reminder_hours(db, family_id=1)` | `str, int` | `dict` | Часы напоминаний |
 
 ### `get_stats()` — структура результата
 
@@ -441,7 +489,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 197 passed
+# 263 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

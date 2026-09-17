@@ -8,7 +8,7 @@ TEST_DB = "test_peakflow.db"
 @pytest.fixture(autouse=True)
 def setup_db():
     os.environ["DB_PATH"] = TEST_DB
-    for ext in ["", "-wal", "-shm", "-journal"]:
+    for ext in ["", "-wal", "-shm", "-journal", ".v1.bak"]:
         p = TEST_DB + ext
         if os.path.exists(p):
             try:
@@ -20,13 +20,15 @@ def setup_db():
     from database import init_db
     init_db(TEST_DB)  # single source of schema truth (incl. migrations, index)
     conn = sqlite3.connect(TEST_DB)
-    conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('target_pef', '260')")
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (family_id, key, value) VALUES (1, 'target_pef', '260')"
+    )
     conn.commit()
     conn.close()
 
     yield
 
-    for ext in ["", "-wal", "-shm", "-journal"]:
+    for ext in ["", "-wal", "-shm", "-journal", ".v1.bak"]:
         p = TEST_DB + ext
         if os.path.exists(p):
             try:
@@ -134,9 +136,9 @@ class TestDatabase:
     def test_reminder_tracking(self):
         from database import mark_reminder_sent, was_reminder_sent
         today = "2026-04-13"
-        assert not was_reminder_sent(TEST_DB, today, "morning_missing")
-        mark_reminder_sent(TEST_DB, today, "morning_missing")
-        assert was_reminder_sent(TEST_DB, today, "morning_missing")
+        assert not was_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        mark_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, today, "morning_missing", 111)
 
     def test_get_reminder_hours_defaults(self):
         from database import get_reminder_hours
@@ -170,7 +172,7 @@ class TestDatabase:
         dest = "/tmp/opencode/backup_test.db"
         backup_db(TEST_DB, dest)
         conn = sqlite3.connect(dest)
-        n = conn.execute("SELECT COUNT(*) FROM measurements WHERE user_id=111").fetchone()[0]
+        n = conn.execute("SELECT COUNT(*) FROM measurements WHERE child_id=111").fetchone()[0]
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")]
         conn.close()
@@ -185,7 +187,7 @@ class TestDatabase:
         for d, v in [("2026-08-05 08:00:00", 240), ("2026-08-20 20:00:00", 250),
                      ("2026-09-01 08:00:00", 260)]:
             conn.execute(
-                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
                 "VALUES (111, ?, ?, ?, 222, 'manual')",
                 (v, "morning" if "08:00" in d else "evening", d))
         conn.commit()
@@ -203,7 +205,7 @@ class TestDatabase:
         for d in ["2026-07-15 08:00:00", "2026-08-01 08:00:00",
                   "2026-08-31 20:00:00", "2026-09-10 08:00:00"]:
             conn.execute(
-                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
                 "VALUES (111, 240, 'morning', ?, 222, 'manual')", (d,))
         conn.commit()
         conn.close()
@@ -217,7 +219,7 @@ class TestDatabase:
         for d in ["2026-08-01 08:00:00", "2026-08-15 08:00:00",
                   "2026-08-31 23:00:00", "2026-09-05 08:00:00"]:
             conn.execute(
-                "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+                "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
                 "VALUES (111, 240, 'morning', ?, 222, 'manual')", (d,))
         conn.commit()
         conn.close()
@@ -229,12 +231,12 @@ class TestDatabase:
         """Bug regression: marking evening/weekly must not reset morning flag."""
         from database import mark_reminder_sent, was_reminder_sent
         today = "2026-04-13"
-        mark_reminder_sent(TEST_DB, today, "morning_missing")
-        mark_reminder_sent(TEST_DB, today, "evening_missing")
-        mark_reminder_sent(TEST_DB, today, "weekly")
-        assert was_reminder_sent(TEST_DB, today, "morning_missing")
-        assert was_reminder_sent(TEST_DB, today, "evening_missing")
-        assert was_reminder_sent(TEST_DB, today, "weekly")
+        mark_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        mark_reminder_sent(TEST_DB, today, "evening_missing", 111)
+        mark_reminder_sent(TEST_DB, today, "weekly", 111)
+        assert was_reminder_sent(TEST_DB, today, "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, today, "evening_missing", 111)
+        assert was_reminder_sent(TEST_DB, today, "weekly", 111)
 
     def test_schema_version_is_set(self):
         """init_db must record a schema version via PRAGMA user_version."""
@@ -295,16 +297,16 @@ class TestDatabase:
         conn.close()
 
     def test_index_created(self):
-        """init_db must create index on (user_id, measured_at)."""
+        """init_db must create index on (family_id, child_id, measured_at)."""
         from database import init_db
         init_db(TEST_DB)
         import sqlite3
         conn = sqlite3.connect(TEST_DB)
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_user_time'"
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_family_child_time'"
         ).fetchall()
         conn.close()
-        assert rows, "index idx_meas_user_time missing"
+        assert rows, "index idx_meas_family_child_time missing"
 
     def test_migration_new_columns(self):
         """init_db must add child-reminder, auto-fill flags and measurements.source."""
@@ -603,6 +605,82 @@ class TestNotes:
         assert len(m["note"]) <= 200
 
 
+class TestRedZoneAuthorExclusion:
+    """Phase 0.5: the parent who entered a red-zone value must not alarm
+    themselves. Informational notify_added already excludes the author;
+    the red-zone alert must do the same."""
+
+    def test_red_zone_skips_author_parent(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        author = bot.PARENT_IDS[0]
+        other = bot.PARENT_IDS[1]
+
+        cb = MagicMock()
+        cb.from_user.id = author
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock()
+        state.set_state = AsyncMock()
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            return MagicMock()
+
+        sent = []
+
+        async def fake_send(pid, text, **kwargs):
+            sent.append(pid)
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "replace_auto_measurement", return_value=False), \
+             patch.object(bot, "add_measurement", return_value=1), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_recent_measurements", return_value=[]), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._persist_measurement(cb, state, 120, "morning"))
+
+        assert other in sent, "the other parent must be alerted"
+        assert author not in sent, "the author must not alert themselves"
+
+
+class TestSchedulerTaskReference:
+    """Phase 0.6: on_startup must keep a strong reference to the scheduler
+    task, otherwise asyncio may garbage-collect it mid-flight and any crash
+    goes unnoticed."""
+
+    def test_startup_stores_task_reference(self, monkeypatch):
+        import asyncio
+        import bot
+        from unittest.mock import MagicMock
+
+        tasks = []
+
+        def fake_create_task(coro):
+            coro.close()
+            task = MagicMock()
+            task.add_done_callback = MagicMock()
+            tasks.append(task)
+            return task
+
+        async def fake_menu_button():
+            return None
+
+        monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+        monkeypatch.setattr(bot, "_setup_menu_button", fake_menu_button)
+        monkeypatch.setattr(bot, "_scheduler_task", None, raising=False)
+
+        asyncio.run(bot.on_startup())
+
+        assert bot._scheduler_task is tasks[0]
+        tasks[0].add_done_callback.assert_called_once()
+
+
 class TestScheduler:
     """Scheduler logic: child pings, auto-carry, escalation."""
 
@@ -699,6 +777,73 @@ class TestScheduler:
                 pass
         recipients = [c[0][0] for c in mb.send_message.call_args_list]
         assert bot.CHILD_ID not in recipients
+
+
+class TestSchedulerAlignment:
+    """Phase 1.4: ticks must align to the minute boundary and a failed send
+    must not permanently swallow the reminder (flag only set on success)."""
+
+    def test_seconds_until_next_minute(self):
+        from datetime import datetime, timedelta, timezone
+        import bot
+
+        tz = timezone(timedelta(hours=5))
+        assert bot.seconds_until_next_minute(datetime(2026, 9, 12, 8, 0, 0, tzinfo=tz)) == 60
+        assert bot.seconds_until_next_minute(datetime(2026, 9, 12, 8, 0, 30, tzinfo=tz)) == 30
+        assert bot.seconds_until_next_minute(datetime(2026, 9, 12, 8, 0, 59, tzinfo=tz)) >= 1
+
+    def test_ping_flag_not_set_when_send_fails(self):
+        """A blocking failure from the child must allow retry on the next tick."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        async def failing_send(*a, **kw):
+            raise RuntimeError("blocked")
+
+        marked = []
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "mark_reminder_sent", side_effect=lambda *a: marked.append(a)) as m, \
+             patch.object(bot.bot, "send_message", side_effect=failing_send):
+            asyncio.run(bot._maybe_ping_child("morning", {"child_morning": 8}, 8, 0, "2026-09-12"))
+
+        m.assert_not_called()
+        assert marked == []
+
+    def test_ping_flag_set_on_success(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        marked = []
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "mark_reminder_sent", side_effect=lambda *a: marked.append(a)), \
+             patch.object(bot.bot, "send_message", new=AsyncMock()):
+            asyncio.run(bot._maybe_ping_child("morning", {"child_morning": 8}, 8, 0, "2026-09-12"))
+
+        assert marked, "flag must be set after a successful send"
+
+    def test_escalation_flag_not_set_when_all_sends_fail(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        async def failing_send(*a, **kw):
+            raise RuntimeError("blocked")
+
+        marked = []
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "get_last_of_tod", return_value={"pef_value": 240}), \
+             patch.object(bot, "add_measurement", return_value=1), \
+             patch.object(bot, "mark_reminder_sent", side_effect=lambda *a: marked.append(a)), \
+             patch.object(bot.bot, "send_message", side_effect=failing_send):
+            asyncio.run(bot._escalate_parents("morning", {"parent_morning": 10}, 10, 0, "2026-09-12"))
+
+        assert not any(a[2] == "morning_missing" for a in marked if len(a) >= 3), \
+            "escalation flag must not be set if no parent got the message"
 
 
 class TestRemindersScreen:
@@ -907,13 +1052,13 @@ class TestExportAndBackup:
 
         conn = sqlite3.connect(TEST_DB)
         conn.execute(
-            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source, note) "
+            "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source, note) "
             "VALUES (111, 240, 'morning', '2026-08-05 08:00:00', 222, 'manual', 'болел')")
         conn.execute(
-            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+            "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
             "VALUES (111, 250, 'evening', '2026-08-06 20:00:00', 222, 'auto')")
         conn.execute(
-            "INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by, source) "
+            "INSERT INTO measurements (child_id, pef_value, time_of_day, measured_at, added_by, source) "
             "VALUES (111, 260, 'morning', '2026-09-01 08:00:00', 222, 'manual')")
         conn.commit()
         conn.close()
@@ -1067,7 +1212,7 @@ class TestEditDeleteExport:
         # Simulate parent edit: update by ID and user_id
         conn = sqlite3.connect(TEST_DB)
         cur = conn.execute(
-            "UPDATE measurements SET pef_value = ? WHERE id = ? AND user_id = ?",
+            "UPDATE measurements SET pef_value = ? WHERE id = ? AND child_id = ?",
             (300, mid, 111)
         )
         conn.commit()
@@ -1120,7 +1265,7 @@ class TestEditDeleteExport:
         assert len(get_all_measurements(TEST_DB, 111)) == 1
         conn = sqlite3.connect(TEST_DB)
         cur = conn.execute(
-            "DELETE FROM measurements WHERE id = ? AND user_id = ?",
+            "DELETE FROM measurements WHERE id = ? AND child_id = ?",
             (mid, 111)
         )
         conn.commit()
@@ -1165,6 +1310,87 @@ class TestEditDeleteExport:
         from database import get_setting
         val = get_setting(TEST_DB, "target_pef")
         assert val == "260"
+
+
+class TestSettingsFamilyScope:
+    def test_settings_isolated_by_family(self):
+        from database import set_setting, get_setting
+        set_setting(TEST_DB, "target_pef", "300", family_id=1)
+        set_setting(TEST_DB, "target_pef", "400", family_id=2)
+        assert get_setting(TEST_DB, "target_pef", family_id=1) == "300"
+        assert get_setting(TEST_DB, "target_pef", family_id=2) == "400"
+
+    def test_effective_target_per_family(self):
+        from database import set_setting, get_effective_target
+        set_setting(TEST_DB, "target_pef", "333", family_id=1)
+        assert get_effective_target(TEST_DB, 260, family_id=1) == 333
+        assert get_effective_target(TEST_DB, 260, family_id=2) == 260
+
+    def test_reminder_hours_per_family(self):
+        from database import set_setting, get_reminder_hours
+        set_setting(TEST_DB, "reminder_child_morning", "6", family_id=1)
+        set_setting(TEST_DB, "reminder_child_morning", "9", family_id=2)
+        assert get_reminder_hours(TEST_DB, family_id=1)["child_morning"] == 6
+        assert get_reminder_hours(TEST_DB, family_id=2)["child_morning"] == 9
+
+
+class TestRemindersFamilyScope:
+    def test_reminders_isolated_by_child(self):
+        from database import mark_reminder_sent, was_reminder_sent
+        mark_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        assert not was_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 222)
+
+    def test_flags_not_reset_by_other_type_same_child(self):
+        from database import mark_reminder_sent, was_reminder_sent
+        mark_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        mark_reminder_sent(TEST_DB, "2026-09-17", "evening_missing", 111)
+        mark_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "morning_missing", 111)
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+
+    def test_child_id_is_required(self):
+        import inspect
+        from database import mark_reminder_sent, was_reminder_sent
+        for fn in (mark_reminder_sent, was_reminder_sent):
+            p = inspect.signature(fn).parameters["child_id"]
+            assert p.default is inspect.Parameter.empty, \
+                f"{fn.__name__}: child_id must be required (no default)"
+
+    def test_migration_preserves_v1_flags(self):
+        """v1 reminders_sent(date PK) migrates to (child_id, date) keeping flags.
+
+        Historical rows are attributed to the configured active child when
+        ``CHILD_ID`` is set (Task 5), else to the unknown child ``0``.
+        """
+        import sqlite3
+        import config
+        from database import init_db
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute("DROP TABLE IF EXISTS reminders_sent")
+        conn.execute(
+            "CREATE TABLE reminders_sent (date TEXT PRIMARY KEY, "
+            "morning_reminder INTEGER DEFAULT 0, weekly_report INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO reminders_sent (date, morning_reminder, weekly_report) "
+            "VALUES ('2026-01-01', 1, 1)"
+        )
+        conn.commit()
+        conn.close()
+
+        init_db(TEST_DB)
+
+        conn = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(reminders_sent)")]
+        row = conn.execute(
+            "SELECT child_id, morning_reminder, weekly_report FROM reminders_sent "
+            "WHERE date = '2026-01-01'"
+        ).fetchone()
+        conn.close()
+        assert "child_id" in cols
+        expected_child = getattr(config, "CHILD_ID", 0) or 0
+        assert row == (expected_child, 1, 1)
 
 
 class TestCallbackParsing:
@@ -1500,7 +1726,7 @@ class TestMarkdownEscaping:
 
         monkeypatch.setattr(bot, "CHILD_NAME", "Ма_ша")
         with patch.object(bot, "get_today_measurements", return_value=[]), \
-             patch.object(bot, "get_all_measurements", return_value=[]), \
+             patch.object(bot, "get_recent_measurements", return_value=[]), \
              patch.object(bot, "get_effective_target", return_value=260):
             text = asyncio.run(bot.build_status_block())
 
@@ -1558,6 +1784,348 @@ class TestMenuButton:
         asyncio.run(bot._setup_menu_button())  # must not raise
 
 
+class TestRecentMeasurements:
+    """Phase 1.2: status/diff only needs the last few rows, not full history."""
+
+    def test_returns_latest_n_desc(self):
+        from database import add_measurement, get_recent_measurements
+        for v in (200, 210, 220, 230):
+            add_measurement(TEST_DB, v, "morning", 111, 222)
+        rows = get_recent_measurements(TEST_DB, 111, 2)
+        assert [r["pef_value"] for r in rows] == [230, 220]
+
+    def test_excludes_auto_and_other_users(self):
+        from database import add_measurement, get_recent_measurements
+        add_measurement(TEST_DB, 999, "morning", 111, 222)
+        add_measurement(TEST_DB, 180, "evening", 111, 0, source="auto")
+        add_measurement(TEST_DB, 500, "morning", 999, 222)
+        rows = get_recent_measurements(TEST_DB, 111, 5)
+        assert [r["pef_value"] for r in rows] == [999]
+
+    def test_empty(self):
+        from database import get_recent_measurements
+        assert get_recent_measurements(TEST_DB, 111, 2) == []
+
+
+class TestAddOrReplaceAtomic:
+    """Phase 0.3: adding a measurement must be a single atomic transaction.
+
+    check-then-insert across separate connections is a TOCTOU race (two
+    requests can both see the slot free). add_or_replace_measurement does the
+    check, optional auto-replace and insert under one BEGIN IMMEDIATE.
+    """
+
+    def test_creates_measurement(self):
+        from database import add_or_replace_measurement, get_all_measurements
+        mid, status = add_or_replace_measurement(TEST_DB, 240, "morning", 111, 222)
+        assert status == "ok"
+        assert mid
+        rows = get_all_measurements(TEST_DB, 111)
+        assert len(rows) == 1 and rows[0]["pef_value"] == 240
+
+    def test_duplicate_slot_without_force_returns_exists(self):
+        from database import add_or_replace_measurement, get_all_measurements
+        first_id, _ = add_or_replace_measurement(TEST_DB, 240, "morning", 111, 222)
+        dup_id, status = add_or_replace_measurement(TEST_DB, 250, "morning", 111, 222)
+        assert status == "exists"
+        assert dup_id == first_id
+        assert len(get_all_measurements(TEST_DB, 111)) == 1
+
+    def test_force_allows_second_measurement(self):
+        from database import add_or_replace_measurement, get_all_measurements
+        add_or_replace_measurement(TEST_DB, 240, "morning", 111, 222)
+        mid, status = add_or_replace_measurement(TEST_DB, 250, "morning", 111, 222, force=True)
+        assert status == "ok"
+        assert len(get_all_measurements(TEST_DB, 111)) == 2
+
+    def test_replaces_today_auto_record(self):
+        from database import (add_or_replace_measurement, add_measurement,
+                              get_all_measurements)
+        auto_id = add_measurement(TEST_DB, 180, "morning", 111, 0, source="auto")
+        mid, status = add_or_replace_measurement(TEST_DB, 250, "morning", 111, 222)
+        assert status == "ok"
+        assert mid == auto_id
+        rows = get_all_measurements(TEST_DB, 111, include_auto=True)
+        assert len(rows) == 1
+        assert rows[0]["pef_value"] == 250 and rows[0]["source"] == "manual"
+
+    def test_concurrent_requests_create_one_row(self):
+        import threading
+        from database import add_or_replace_measurement, get_all_measurements
+
+        barrier = threading.Barrier(2)
+        results = []
+
+        def worker(value):
+            barrier.wait()
+            results.append(add_or_replace_measurement(TEST_DB, value, "morning", 111, 222))
+
+        threads = [threading.Thread(target=worker, args=(v,)) for v in (240, 250)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert sorted(status for _, status in results) == ["exists", "ok"]
+        assert len(get_all_measurements(TEST_DB, 111)) == 1
+
+
+class TestHistoryPageClamp:
+    """Phase 1.6: a stale page number (after deletions) must not render
+    an empty history screen — it clamps to the last available page."""
+
+    def test_stale_page_falls_back_to_last(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        calls = []
+
+        def fake_paginated(db, uid, page=1, per_page=10):
+            calls.append(page)
+            if page > 2:
+                return [], 3, 2
+            return [{"id": 1, "pef_value": 240, "time_of_day": "morning",
+                     "measured_at": "2026-09-01 08:00:00", "added_by": 222,
+                     "note": None, "source": "manual"}], 3, 2
+
+        cb = MagicMock()
+        cb.from_user.id = 222
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.delete = AsyncMock()
+        cb.message.answer = AsyncMock()
+
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "get_measurements_paginated", side_effect=fake_paginated), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "respond", side_effect=fake_respond):
+            asyncio.run(bot._show_history(cb, page=99))
+
+        assert 2 in calls, "out-of-range page must be clamped to total_pages"
+        assert "История" in sent.get("text", "")
+
+
+class TestSessionClose:
+    """Phase 1.8: bot.session must be closed when polling stops, with or
+    without the web server (otherwise aiohttp leaks an unclosed session)."""
+
+    def test_session_closed_without_webapp(self, monkeypatch):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock
+
+        closed = AsyncMock()
+        monkeypatch.setattr(bot, "WEBAPP_PORT", 0)
+        monkeypatch.setattr(bot.dp, "start_polling", AsyncMock(return_value=None))
+        monkeypatch.setattr(bot.bot.session, "close", closed)
+
+        asyncio.run(bot.run_async())
+
+        closed.assert_awaited()
+
+
+class TestReminderHourValidation:
+    """Phase 1.12: parent escalation must come after the child ping, never at
+    the same minute (parent_morning > child_morning, parent_evening > child_evening)."""
+
+    def test_valid_ordering(self):
+        from database import validate_reminder_hours
+        assert validate_reminder_hours(
+            {"child_morning": 8, "child_evening": 20, "parent_morning": 10, "parent_evening": 22}
+        ) is None
+
+    def test_equal_hours_rejected(self):
+        from database import validate_reminder_hours
+        err = validate_reminder_hours(
+            {"child_morning": 8, "child_evening": 20, "parent_morning": 8, "parent_evening": 22}
+        )
+        assert err
+
+    def test_parent_before_child_rejected(self):
+        from database import validate_reminder_hours
+        err = validate_reminder_hours(
+            {"child_morning": 8, "child_evening": 20, "parent_morning": 7, "parent_evening": 21}
+        )
+        assert err
+
+    def test_bot_handler_rejects_equal_parent_morning(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.text = "8"
+        msg.answer = AsyncMock()
+
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"reminder_key": "parent_morning"})
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "get_reminder_hours",
+                          return_value={"child_morning": 8, "child_evening": 20,
+                                        "parent_morning": 10, "parent_evening": 22}), \
+             patch.object(bot, "set_setting", new=AsyncMock()) as m_set:
+            asyncio.run(bot.input_reminder_hour(msg, state))
+
+        m_set.assert_not_called()
+        msg.answer.assert_awaited()
+        assert "позже" in msg.answer.await_args.args[0].lower() or \
+               "больше" in msg.answer.await_args.args[0].lower()
+
+
+class TestDiffSameTod:
+    """Phase 1.10: the "change" must compare against the previous measurement
+    of the *same* time of day (morning↔morning), not just the previous row."""
+
+    def test_previous_same_tod(self):
+        from database import add_measurement, get_previous_of_tod
+        add_measurement(TEST_DB, 240, "morning", 111, 222)
+        add_measurement(TEST_DB, 200, "evening", 111, 222)
+        last_id = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        prev = get_previous_of_tod(TEST_DB, 111, "morning", last_id)
+        assert prev["pef_value"] == 240
+
+    def test_previous_excludes_auto(self):
+        from database import add_measurement, get_previous_of_tod
+        add_measurement(TEST_DB, 240, "morning", 111, 222)
+        add_measurement(TEST_DB, 999, "morning", 111, 0, source="auto")
+        last_id = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        prev = get_previous_of_tod(TEST_DB, 111, "morning", last_id)
+        assert prev["pef_value"] == 240
+
+    def test_none_when_no_previous_real(self):
+        from database import add_measurement, get_previous_of_tod
+        add_measurement(TEST_DB, 999, "morning", 111, 0, source="auto")
+        last_id = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        assert get_previous_of_tod(TEST_DB, 111, "morning", last_id) is None
+
+
+class TestSingletonLock:
+    """Phase 0.1: the lock must stay held after acquire_lock() returns.
+
+    Regression: acquire_lock() returned only the fd (an int); the file object
+    was dropped and its refcount hit zero at function exit, closing the fd and
+    releasing the flock — so a second bot instance could start.
+    """
+
+    def test_lock_survives_after_acquire_returns(self, tmp_path, monkeypatch):
+        import gc
+        import fcntl
+        import bot
+
+        lock_path = str(tmp_path / "peakflow.lock")
+        monkeypatch.setattr(bot, "LOCK_FILE", lock_path)
+
+        handle = bot.acquire_lock()
+        gc.collect()  # would drop a dangling file object and release the lock
+
+        other = open(lock_path, "w")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            other.close()
+
+        bot.release_lock(handle)
+
+    def test_second_acquire_is_refused(self, tmp_path, monkeypatch):
+        import bot
+
+        lock_path = str(tmp_path / "peakflow.lock")
+        monkeypatch.setattr(bot, "LOCK_FILE", lock_path)
+
+        handle = bot.acquire_lock()
+        try:
+            with pytest.raises(SystemExit):
+                bot.acquire_lock()
+        finally:
+            bot.release_lock(handle)
+
+
+class TestRoleChecks:
+    """Phase 0.2: export/summary/weekly callbacks must require a parent.
+
+    A child could receive or forward a keyboard with these callbacks and pull
+    the full CSV or family summary. Every parent-only handler must reject a
+    non-parent caller at execution time (show_alert), not just hide the button.
+    """
+
+    NON_PARENT = 555
+
+    def _callback(self, data):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user.id = self.NON_PARENT
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def _state(self):
+        from unittest.mock import AsyncMock, MagicMock
+        st = MagicMock()
+        st.clear = AsyncMock()
+        return st
+
+    @pytest.mark.parametrize("handler,data", [
+        ("cb_export", "export"),
+        ("cb_export_all", "export_all"),
+        ("cb_export_month", "csv_2026-09"),
+        ("cb_summary", "summary"),
+        ("cb_weekly", "weekly"),
+    ])
+    def test_parent_only_handler_rejects_non_parent(self, handler, data):
+        import asyncio
+        import bot
+
+        cb = self._callback(data)
+        asyncio.run(getattr(bot, handler)(cb))
+        cb.message.answer.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_edit_last_rejects_non_parent(self):
+        """B7: the 'fix last' button leaks into the add-flow for a child."""
+        import asyncio
+        import bot
+
+        cb = self._callback("edit_last")
+        asyncio.run(bot.cb_edit_last(cb, self._state()))
+        cb.message.answer.assert_not_called()
+        cb.answer.assert_awaited()
+
+
+class TestChartFigureCleanup:
+    """Phase 1.5: a render failure must not leak the matplotlib figure."""
+
+    def test_figure_closed_on_render_error(self):
+        import bot
+        from unittest.mock import MagicMock, patch
+
+        rows = [
+            {"measured_at": "2026-08-05 08:00:00", "pef_value": 240, "time_of_day": "morning"},
+            {"measured_at": "2026-08-06 20:00:00", "pef_value": 250, "time_of_day": "evening"},
+        ]
+
+        fig = MagicMock()
+        fig.savefig.side_effect = RuntimeError("boom")
+        ax = MagicMock()
+
+        closed = []
+        with patch.object(bot.plt, "subplots", return_value=(fig, ax)), \
+             patch.object(bot.plt, "close", side_effect=lambda f=None: closed.append(f)):
+            with pytest.raises(RuntimeError, match="boom"):
+                bot._render_chart_png(rows, 260, "Test")
+
+        assert fig in closed, "figure must be closed even when rendering raises"
+
+
 class TestEventLoopOffload:
     """Phase 1.2: the CPU-bound chart render must run off the event loop."""
 
@@ -1586,6 +2154,315 @@ class TestEventLoopOffload:
         assert result == b"PNG"
         assert seen["args"] == (rows, 260, "Test")
         assert seen["thread"] != main_thread, "render must run in a worker thread"
+
+
+class TestFamiliesAndMembers:
+    def test_create_and_get_family(self):
+        from database import create_family, get_family
+        fid = create_family(TEST_DB, "Ивановы")
+        fam = get_family(TEST_DB, fid)
+        assert fam["name"] == "Ивановы"
+        assert get_family(TEST_DB, 99999) is None
+
+    def test_add_and_get_member(self):
+        from database import create_family, add_member, get_member
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 222, fid, "parent", "Олег")
+        m = get_member(TEST_DB, 222)
+        assert m["family_id"] == fid and m["role"] == "parent" and m["name"] == "Олег"
+        assert get_member(TEST_DB, 555) is None
+
+    def test_add_member_is_upsert(self):
+        from database import create_family, add_member, get_member
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 222, fid, "parent", "Олег")
+        add_member(TEST_DB, 222, fid, "parent", "Олег Петров")
+        assert get_member(TEST_DB, 222)["name"] == "Олег Петров"
+
+    def test_list_family_children(self):
+        from database import create_family, add_member, list_family_children
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 111, fid, "child", "Маша")
+        add_member(TEST_DB, 222, fid, "parent", "Олег")
+        add_member(TEST_DB, 333, fid, "child", "Петя")
+        kids = list_family_children(TEST_DB, fid)
+        assert sorted(k["name"] for k in kids) == ["Маша", "Петя"]
+
+    def test_default_family_constants(self):
+        import database
+        assert database.DEFAULT_FAMILY_ID == 1
+        assert database.SCHEMA_VERSION == 2
+
+
+class TestMeasurementV2:
+    def test_child_id_column_and_family_scope(self):
+        import sqlite3
+        from database import init_db, add_measurement
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(measurements)")]
+        conn.close()
+        assert "child_id" in cols and "user_id" not in cols
+        assert "family_id" in cols
+
+    def test_measurements_are_isolated_by_family(self):
+        from database import add_measurement, get_all_measurements
+        add_measurement(TEST_DB, 240, "morning", 111, 222, family_id=1)
+        add_measurement(TEST_DB, 300, "morning", 111, 222, family_id=2)
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=1)] == [240]
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=2)] == [300]
+
+    def test_add_and_get_last_default_family(self):
+        from database import add_measurement, get_last_measurement
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        m = get_last_measurement(TEST_DB, 111)
+        assert m["pef_value"] == 250 and m["family_id"] == 1 and m["child_id"] == 111
+
+    def test_has_today_isolated_by_family(self):
+        from database import add_measurement, has_today_measurement
+        add_measurement(TEST_DB, 250, "morning", 111, 222, family_id=1)
+        assert has_today_measurement(TEST_DB, 111, "morning", family_id=1)
+        assert not has_today_measurement(TEST_DB, 111, "morning", family_id=2)
+
+    def test_paginated_isolated_by_family(self):
+        from database import add_measurement, get_measurements_paginated
+        add_measurement(TEST_DB, 250, "morning", 111, 222, family_id=1)
+        add_measurement(TEST_DB, 300, "morning", 111, 222, family_id=2)
+        items, total, pages = get_measurements_paginated(TEST_DB, 111, 1, 10, family_id=1)
+        assert total == 1 and items[0]["pef_value"] == 250
+
+    def test_measurements_index_created(self):
+        import sqlite3
+        from database import init_db
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_meas_family_child_time'"
+        ).fetchall()
+        conn.close()
+        assert rows, "index idx_meas_family_child_time missing"
+
+
+class TestMigrationV2:
+    def _make_v1_db(self):
+        import sqlite3
+        from database import init_db
+        for ext in ["", "-wal", "-shm", "-journal"]:
+            import os
+            if os.path.exists(TEST_DB + ext):
+                os.remove(TEST_DB + ext)
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, pef_value INTEGER NOT NULL, "
+            "time_of_day TEXT NOT NULL, measured_at TIMESTAMP, added_by INTEGER, note TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE reminders_sent (date TEXT PRIMARY KEY, morning_reminder INTEGER DEFAULT 0, "
+            "evening_reminder INTEGER DEFAULT 0, weekly_report INTEGER DEFAULT 0)"
+        )
+        conn.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, "
+                     "role TEXT, child_name TEXT, age INTEGER, target_pef INTEGER, created_at TIMESTAMP, "
+                     "reminder_morning INTEGER, reminder_evening INTEGER)")
+        conn.execute("INSERT INTO measurements (user_id, pef_value, time_of_day, measured_at, added_by) "
+                     "VALUES (111, 240, 'morning', '2026-01-01 08:00:00', 222)")
+        conn.execute("INSERT INTO users (user_id, first_name, role, child_name) VALUES (111, 'Маша', 'child', 'Маша')")
+        conn.execute("INSERT INTO users (user_id, first_name, role) VALUES (222, 'Олег', 'parent')")
+        conn.execute("INSERT INTO settings (key, value) VALUES ('target_pef', '300')")
+        conn.execute("INSERT INTO reminders_sent (date, morning_reminder) VALUES ('2026-01-01', 1)")
+        conn.commit()
+        conn.close()
+
+    def test_migration_preserves_measurements_and_settings(self):
+        import sqlite3
+        from database import init_db, SCHEMA_VERSION
+        self._make_v1_db()
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
+        setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
+        conn.close()
+        assert version == SCHEMA_VERSION == 2
+        assert row == (1, 111, 240)
+        assert setting[0] == "300"
+
+    def test_migration_seeds_family_from_legacy_users(self):
+        from database import init_db, get_member, get_family
+        self._make_v1_db()
+        init_db(TEST_DB)
+        assert get_family(TEST_DB, 1) is not None
+        assert get_member(TEST_DB, 111)["role"] == "child"
+        assert get_member(TEST_DB, 222)["role"] == "parent"
+
+    def test_migration_unions_legacy_users_and_config(self, monkeypatch):
+        """Config CHILD_ID/PARENT_IDS seed even when legacy users exist."""
+        import config
+        from database import init_db, get_member
+        self._make_v1_db()
+        monkeypatch.setattr(config, "CHILD_ID", 1727847144)
+        monkeypatch.setattr(config, "PARENT_IDS", [35641953, 704630847])
+        monkeypatch.setattr(config, "CHILD_NAME", "Матвей")
+        init_db(TEST_DB)
+
+        # Legacy members are still present with their roles.
+        assert get_member(TEST_DB, 111)["role"] == "child"
+        assert get_member(TEST_DB, 222)["role"] == "parent"
+        # Config members are seeded too (union, not either/or).
+        assert get_member(TEST_DB, 1727847144)["role"] == "child"
+        assert get_member(TEST_DB, 1727847144)["name"] == "Матвей"
+        assert get_member(TEST_DB, 35641953)["role"] == "parent"
+        assert get_member(TEST_DB, 704630847)["role"] == "parent"
+
+    def test_migration_config_role_wins_over_stale_legacy(self, monkeypatch):
+        """Config lists an ID as parent; stale legacy users calls it child.
+
+        Config (env) is authoritative for every ID it lists, because legacy
+        `users` can be stale (prod: 35641953 owns 126 measurements but is
+        recorded as a child).
+        """
+        import config
+        from database import init_db, get_member
+        self._make_v1_db()
+        # Add the stale legacy row: 35641953 marked as child.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO users (user_id, first_name, role) VALUES (35641953, 'Матвей', 'child')"
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(config, "CHILD_ID", 1727847144)
+        monkeypatch.setattr(config, "PARENT_IDS", [35641953, 704630847])
+        monkeypatch.setattr(config, "CHILD_NAME", "Motya")
+        init_db(TEST_DB)
+        assert get_member(TEST_DB, 35641953)["role"] == "parent"
+        assert get_member(TEST_DB, 704630847)["role"] == "parent"
+        assert get_member(TEST_DB, 1727847144)["role"] == "child"
+
+    def test_migration_legacy_only_member_kept(self, monkeypatch):
+        """A legacy member absent from config is seeded with its legacy role."""
+        import config
+        from database import init_db, get_member
+        self._make_v1_db()
+        # 333 is legacy-only and not listed in config.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO users (user_id, first_name, role) VALUES (333, 'Бабушка', 'parent')"
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(config, "CHILD_ID", 1727847144)
+        monkeypatch.setattr(config, "PARENT_IDS", [35641953])
+        monkeypatch.setattr(config, "CHILD_NAME", "Motya")
+        init_db(TEST_DB)
+        assert get_member(TEST_DB, 333)["role"] == "parent"
+        assert get_member(TEST_DB, 333)["name"] == "Бабушка"
+
+    def test_migration_is_idempotent(self):
+        from database import init_db
+        self._make_v1_db()
+        init_db(TEST_DB)
+        init_db(TEST_DB)  # must not fail or duplicate
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        assert conn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM families").fetchone()[0] == 1
+        conn.close()
+
+    def test_backup_created_before_migration(self, tmp_path):
+        import os
+        from unittest.mock import patch
+        import database
+        self._make_v1_db()
+        with patch.object(database, "backup_db") as m:
+            database.init_db(TEST_DB)
+            m.assert_called_once()
+
+    def test_needs_migration_true_on_locked_db(self):
+        """A busy/locked DB must trigger a backup rather than be skipped (F1)."""
+        from database import _needs_migration
+
+        class LockedProbe:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("database is locked")
+
+        assert _needs_migration(LockedProbe()) is True
+
+    def test_needs_migration_false_on_malformed_file(self):
+        """A non-SQLite file is not migration-worthy (F1, no crash)."""
+        import os
+        from database import _needs_migration
+        for ext in ["", "-wal", "-shm", "-journal"]:
+            if os.path.exists(TEST_DB + ext):
+                os.remove(TEST_DB + ext)
+        with open(TEST_DB, "wb") as f:
+            f.write(b"this is not a sqlite database")
+        probe = sqlite3.connect(TEST_DB)
+        try:
+            assert _needs_migration(probe) is False
+        finally:
+            probe.close()
+
+    def test_rebuild_preserves_existing_family_id(self):
+        """v1 measurements that already carry family_id keep it (F3)."""
+        import os
+        import sqlite3
+        from database import init_db
+        for ext in ["", "-wal", "-shm", "-journal"]:
+            if os.path.exists(TEST_DB + ext):
+                os.remove(TEST_DB + ext)
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "family_id INTEGER, user_id INTEGER NOT NULL, pef_value INTEGER NOT NULL, "
+            "time_of_day TEXT NOT NULL, measured_at TIMESTAMP, added_by INTEGER, note TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO measurements (family_id, user_id, pef_value, time_of_day, measured_at) "
+            "VALUES (7, 111, 240, 'morning', '2026-01-01 08:00:00')"
+        )
+        conn.commit()
+        conn.close()
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        row = conn.execute("SELECT family_id, child_id FROM measurements").fetchone()
+        conn.close()
+        assert row == (7, 111)
+
+
+class TestFamilyIsolation:
+    def test_two_families_do_not_see_each_other(self):
+        from database import (create_family, add_measurement,
+                              set_setting, mark_reminder_sent,
+                              get_all_measurements, get_stats, get_setting,
+                              get_today_measurements,
+                              was_reminder_sent)
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        add_measurement(TEST_DB, 240, "morning", 111, 111, family_id=f1)
+        add_measurement(TEST_DB, 300, "morning", 111, 111, family_id=f2)
+        set_setting(TEST_DB, "target_pef", "240", family_id=f1)
+        set_setting(TEST_DB, "target_pef", "400", family_id=f2)
+        mark_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=f1)] == [240]
+        assert [m["pef_value"] for m in get_all_measurements(TEST_DB, 111, family_id=f2)] == [300]
+        assert get_stats(TEST_DB, 111, family_id=f1)["total"] == 1
+        assert get_setting(TEST_DB, "target_pef", family_id=f1) == "240"
+        assert get_setting(TEST_DB, "target_pef", family_id=f2) == "400"
+        assert was_reminder_sent(TEST_DB, "2026-09-17", "weekly", 111)
+        assert get_today_measurements(TEST_DB, 111, family_id=f2)[0]["pef_value"] == 300
+
+    def test_delete_only_touches_own_family(self):
+        from database import create_family, add_measurement, delete_measurement, get_all_measurements
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        mid1 = add_measurement(TEST_DB, 240, "morning", 111, 111, family_id=f1)
+        mid2 = add_measurement(TEST_DB, 300, "morning", 111, 111, family_id=f2)
+        assert delete_measurement(TEST_DB, mid2, 111, family_id=f1) is False
+        assert len(get_all_measurements(TEST_DB, 111, family_id=f2)) == 1
+        assert delete_measurement(TEST_DB, mid1, 111, family_id=f1) is True
 
 
 if __name__ == "__main__":

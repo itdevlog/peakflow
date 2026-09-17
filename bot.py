@@ -36,14 +36,16 @@ from report import (
 from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
+    get_recent_measurements,
     has_today_measurement, get_measurements_paginated,
     get_stats, get_last_two_weeks,
     mark_reminder_sent, was_reminder_sent,
     set_setting, set_note,
     get_effective_target as _db_get_effective_target,
-    get_reminder_hours, backup_db,
+    get_reminder_hours, backup_db, validate_reminder_hours,
     get_measurements_for_month, get_available_months, get_measurements_between,
     get_last_of_tod, replace_auto_measurement,
+    get_previous_of_tod,
     get_measurement_by_id,
 )
 
@@ -73,24 +75,39 @@ logger = logging.getLogger("peakflow_bot")
 # ---------------------------------------------------------------------------
 LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
 
+# Strong reference to the open lock file. Without it the file object would be
+# garbage-collected the moment acquire_lock() returns, closing the descriptor
+# and releasing the flock — silently allowing a second bot instance.
+_lock_handle = None
 
-def acquire_lock() -> int:
-    lock_fd = open(LOCK_FILE, "w")
+
+def acquire_lock():
+    """Take an exclusive non-blocking flock. Returns the open file handle.
+
+    The caller must keep the returned handle alive (and pass it to
+    release_lock) for as long as the lock should be held.
+    """
+    global _lock_handle
+    lock_file = open(LOCK_FILE, "w")
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        lock_fd.write(str(os.getpid()))
-        lock_fd.flush()
-        return lock_fd.fileno()
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        _lock_handle = lock_file
+        return lock_file
     except BlockingIOError:
         logger.error("Бот уже запущен!")
-        lock_fd.close()
+        lock_file.close()
         sys.exit(1)
 
 
-def release_lock(fd):
+def release_lock(handle):
+    global _lock_handle
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+        if handle is not None:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
+        _lock_handle = None
         if os.path.exists(LOCK_FILE):
             os.remove(LOCK_FILE)
     except Exception:
@@ -123,6 +140,16 @@ def get_effective_target() -> int:
     return _db_get_effective_target(DB_PATH, TARGET_PEF)
 
 
+async def _db(func, *args, **kwargs):
+    """Run a synchronous SQLite/database helper off the event loop.
+
+    Blocking the aiogram (and shared uvicorn) event loop on disk I/O freezes
+    every other user; handlers must await this wrapper instead of calling the
+    database functions directly.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
 def auto_time_of_day() -> str:
     """Auto-detect morning/evening based on current hour."""
     hour = now_tz().hour
@@ -151,6 +178,15 @@ def is_reminder_minute(minute: int) -> bool:
     reminder fires; per-day flags in the DB prevent duplicates.
     """
     return minute < 2
+
+
+def seconds_until_next_minute(now: datetime) -> float:
+    """Seconds to sleep so the next tick lands on a minute boundary.
+
+    Without alignment the loop drifts and can skip the reminder window
+    entirely when one iteration takes longer than expected.
+    """
+    return max(1.0, 60.0 - now.second - now.microsecond / 1_000_000)
 
 
 def pef_zone(value: int, target: int) -> tuple[str, str]:
@@ -262,8 +298,8 @@ def kb_pef_tens() -> InlineKeyboardMarkup:
 # Status block — shows in main menu
 # ---------------------------------------------------------------------------
 async def build_status_block() -> str:
-    today = get_today_measurements(DB_PATH, CHILD_ID)
-    target = get_effective_target()
+    today = await asyncio.to_thread(get_today_measurements, DB_PATH, CHILD_ID)
+    target = await asyncio.to_thread(get_effective_target)
 
     morning_val = None
     evening_val = None
@@ -276,14 +312,14 @@ async def build_status_block() -> str:
     morning_display = f"{tod_emoji('morning')} {morning_val} {pef_zone(morning_val, target)[0]}" if morning_val else f"{tod_emoji('morning')} —"
     evening_display = f"{tod_emoji('evening')} {evening_val} {pef_zone(evening_val, target)[0]}" if evening_val else f"{tod_emoji('evening')} —"
 
-    # Last measurement diff
-    all_m = get_all_measurements(DB_PATH, CHILD_ID)
+    # Last measurement diff (only the two latest rows are needed)
+    recent = await asyncio.to_thread(get_recent_measurements, DB_PATH, CHILD_ID, 2)
     diff = ""
-    if len(all_m) >= 2:
-        d = all_m[0]["pef_value"] - all_m[1]["pef_value"]
+    if len(recent) >= 2:
+        d = recent[0]["pef_value"] - recent[1]["pef_value"]
         sign = "+" if d > 0 else ""
-        zone, _ = pef_zone(all_m[0]["pef_value"], target)
-        diff = f"\nПоследний: {all_m[0]['pef_value']} {zone} ({sign}{d})"
+        zone, _ = pef_zone(recent[0]["pef_value"], target)
+        diff = f"\nПоследний: {recent[0]['pef_value']} {zone} ({sign}{d})"
 
     return (
         f"👋 *{escape_md(CHILD_NAME)}* | Целевая: {target} л/мин\n\n"
@@ -354,7 +390,7 @@ async def cb_add(callback: types.CallbackQuery, state: FSMContext):
     tod_name = tod_label(tod)
 
     # Check if already done (auto-carry doesn't count — it gets replaced)
-    if has_today_measurement(DB_PATH, CHILD_ID, tod, skip_auto=True):
+    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
         await respond(callback,
             f"⚠️ {tod_icon} {tod_name} уже измерено сегодня.\n\n"
             f"Хотите добавить ещё одно или исправить последнее?",
@@ -399,7 +435,7 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
         tod = data["forced_tod"]
     else:
         tod = auto_time_of_day()
-        if has_today_measurement(DB_PATH, CHILD_ID, tod, skip_auto=True):
+        if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
             # The auto-detected slot is already filled by a real entry.
             # Never silently flip morning↔evening (that corrupts statistics) —
             # keep the chosen value and ask the user which slot to use.
@@ -425,20 +461,20 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
     who = callback.from_user.id
 
     # Auto-carry record for this slot today → replace it with the real value
-    replaced_id = replace_auto_measurement(DB_PATH, CHILD_ID, tod, pef, who)
+    replaced_id = await _db(replace_auto_measurement, DB_PATH, CHILD_ID, tod, pef, who)
     if replaced_id:
         mid = replaced_id
     else:
-        mid = add_measurement(DB_PATH, pef, tod, CHILD_ID, who)
+        mid = await _db(add_measurement, DB_PATH, pef, tod, CHILD_ID, who)
 
-    target = get_effective_target()
+    target = await _db(get_effective_target)
     zone_emoji, zone_name = pef_zone(pef, target)
 
-    # Diff
-    all_m = get_all_measurements(DB_PATH, CHILD_ID)
+    # Diff against the previous measurement of the same time of day
+    prev = await _db(get_previous_of_tod, DB_PATH, CHILD_ID, tod, mid)
     diff_msg = ""
-    if len(all_m) >= 2:
-        d = pef - all_m[1]["pef_value"]
+    if prev:
+        d = pef - prev["pef_value"]
         sign = "+" if d > 0 else ""
         diff_msg = f"\n📈 Изменение: {sign}{d} л/мин"
 
@@ -468,9 +504,11 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
             except Exception:
                 pass
 
-    # Alert if red zone
+    # Alert if red zone (skip the author — they already know the value)
     if pct_of(pef, target) < ZONE_YELLOW:
         for pid in PARENT_IDS:
+            if pid == who:
+                continue
             try:
                 await bot.send_message(
                     pid,
@@ -505,9 +543,9 @@ async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = edit_measurement(DB_PATH, mid, new_val, CHILD_ID)
+    ok = await _db(edit_measurement, DB_PATH, mid, new_val, CHILD_ID)
     if ok:
-        target = get_effective_target()
+        target = await _db(get_effective_target)
         zone, _ = pef_zone(new_val, target)
         await respond(callback,
             f"✅ Исправлено: *{new_val}* л/мин {zone}",
@@ -526,10 +564,10 @@ async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_v
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = edit_measurement(DB_PATH, mid, new_val, CHILD_ID)
+    ok = await _db(edit_measurement, DB_PATH, mid, new_val, CHILD_ID)
 
     if ok:
-        target = get_effective_target()
+        target = await _db(get_effective_target)
         zone, _ = pef_zone(new_val, target)
         await respond(callback,
             f"✅ Запись #{mid} исправлена: *{new_val}* л/мин {zone}",
@@ -538,7 +576,7 @@ async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_v
         await respond(callback, "❌ Не удалось изменить запись.")
 
     await state.clear()
-    await _show_history_from_callback(callback)
+    await _show_history(callback, page=1)
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +663,7 @@ async def input_note(message: types.Message, state: FSMContext):
         return
 
     note = message.text.strip()[:200]
-    ok = set_note(DB_PATH, mid, note, CHILD_ID)
+    ok = await _db(set_note, DB_PATH, mid, note, CHILD_ID)
 
     truncated = "" if len(message.text.strip()) <= 200 else " (обрезано до 200 символов)"
     await message.answer(
@@ -641,7 +679,10 @@ async def input_note(message: types.Message, state: FSMContext):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "edit_last")
 async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext):
-    last = get_last_measurement(DB_PATH, CHILD_ID)
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
+        return
+    last = await _db(get_last_measurement, DB_PATH, CHILD_ID)
     if not last:
         await respond(callback, "📭 Нет измерений для исправления.", kb=kb_back())
         return
@@ -688,8 +729,17 @@ def _format_history_lines(measurements: list, target: int) -> list:
 
 
 async def _show_history(callback: types.CallbackQuery, page: int = 1):
-    measurements, total, total_pages = get_measurements_paginated(DB_PATH, CHILD_ID, page=page, per_page=10)
-    target = get_effective_target()
+    if page < 1:
+        page = 1
+    measurements, total, total_pages = await _db(
+        get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
+    # A stale keyboard (page since deleted) may point past the last page —
+    # clamp instead of rendering an empty screen.
+    if page > total_pages:
+        page = total_pages
+        measurements, total, total_pages = await _db(
+            get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
+    target = await _db(get_effective_target)
     is_p = is_parent(callback.from_user.id)
 
     if not measurements:
@@ -710,9 +760,6 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data.startswith("edit_"))
 async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext):
-    # Skip if this is edit_last (handled elsewhere)
-    if callback.data == "edit_last":
-        return
     if not is_parent(callback.from_user.id):
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
@@ -721,7 +768,7 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext):
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    measurement = get_measurement_by_id(DB_PATH, mid)
+    measurement = await _db(get_measurement_by_id, DB_PATH, mid)
     if not measurement:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
         return
@@ -752,7 +799,7 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    ok = delete_measurement(DB_PATH, mid, CHILD_ID)
+    ok = await _db(delete_measurement, DB_PATH, mid, CHILD_ID)
 
     if ok:
         await callback.answer("✅ Запись удалена.", show_alert=True)
@@ -760,7 +807,7 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("❌ Не удалось удалить.", show_alert=True)
 
     await state.clear()
-    await _show_history_from_callback(callback)
+    await _show_history(callback, page=1)
 
 
 @router.callback_query(F.data.startswith("del_"))
@@ -773,7 +820,7 @@ async def cb_delete(callback: types.CallbackQuery, state: FSMContext):
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    row = get_measurement_by_id(DB_PATH, mid)
+    row = await _db(get_measurement_by_id, DB_PATH, mid)
 
     if not row:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
@@ -823,8 +870,8 @@ async def cb_settings(callback: types.CallbackQuery):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    target = get_effective_target()
-    measurements = get_all_measurements(DB_PATH, CHILD_ID, include_auto=True)
+    target = await _db(get_effective_target)
+    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
 
     await respond(callback,
         build_settings_text(target, len(measurements)),
@@ -861,7 +908,7 @@ async def cb_reminders(callback: types.CallbackQuery):
     if not is_parent(callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    hours = get_reminder_hours(DB_PATH)
+    hours = await _db(get_reminder_hours, DB_PATH)
     await respond(callback, build_reminders_text(hours), kb=kb_reminders())
 
 
@@ -898,7 +945,14 @@ async def input_reminder_hour(message: types.Message, state: FSMContext):
         await message.answer("Введите число 0–23:")
         return
 
-    set_setting(DB_PATH, f"reminder_{key}", str(hour))
+    hours = await _db(get_reminder_hours, DB_PATH)
+    hours[key] = hour
+    error = validate_reminder_hours(hours)
+    if error:
+        await message.answer(f"⚠️ {error}")
+        return
+
+    await _db(set_setting, DB_PATH, f"reminder_{key}", str(hour))
     await message.answer(f"✅ Час изменён: {hour:02d}:00")
 
     await state.clear()
@@ -906,7 +960,7 @@ async def input_reminder_hour(message: types.Message, state: FSMContext):
 
 
 async def _send_reminders_from_message(message: types.Message):
-    hours = get_reminder_hours(DB_PATH)
+    hours = await _db(get_reminder_hours, DB_PATH)
     await message.answer(
         build_reminders_text(hours),
         parse_mode="Markdown",
@@ -923,7 +977,7 @@ async def cb_change_target(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    current = get_effective_target()
+    current = await _db(get_effective_target)
     await respond(callback,
         f"🎯 Текущая цель: *{current}* л/мин\n\n"
         f"Введите новое значение (100–800):",
@@ -939,7 +993,7 @@ async def input_target(message: types.Message, state: FSMContext):
         await message.answer("Диапазон: 100–800 л/мин.", reply_markup=kb_back())
         return
 
-    set_setting(DB_PATH, "target_pef", str(new_val))
+    await _db(set_setting, DB_PATH, "target_pef", str(new_val))
     zone, _ = pef_zone(new_val, new_val)  # target is 100% of itself
 
     await message.answer(
@@ -953,8 +1007,8 @@ async def input_target(message: types.Message, state: FSMContext):
 
 
 async def _send_settings_from_message(message: types.Message):
-    target = get_effective_target()
-    measurements = get_all_measurements(DB_PATH, CHILD_ID, include_auto=True)
+    target = await _db(get_effective_target)
+    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
 
     await message.answer(
         build_settings_text(target, len(measurements)),
@@ -987,7 +1041,10 @@ def kb_export_periods(months: list) -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "export")
 async def cb_export(callback: types.CallbackQuery):
-    months = get_available_months(DB_PATH, CHILD_ID)
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    months = await _db(get_available_months, DB_PATH, CHILD_ID)
     if not months:
         await respond(callback, "📭 Нет данных для экспорта.", kb=kb_back())
         return
@@ -995,11 +1052,11 @@ async def cb_export(callback: types.CallbackQuery):
 
 
 async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, caption: str):
-    target = get_effective_target()
+    target = await _db(get_effective_target)
     if not rows:
         await callback.answer("📭 В выбранном периоде нет записей.", show_alert=True)
         return
-    content = build_csv_content(rows, target, include_summary=True)
+    content = await _db(build_csv_content, rows, target, True)
     await answer_callback(callback)
     await callback.message.answer_document(
         BufferedInputFile(content.encode("utf-8-sig"), filename=filename),
@@ -1012,7 +1069,11 @@ async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, ca
 
 @router.callback_query(F.data == "export_all")
 async def cb_export_all(callback: types.CallbackQuery):
-    rows = get_measurements_between(
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    rows = await _db(
+        get_measurements_between,
         DB_PATH, CHILD_ID, "2000-01-01", now_tz().strftime("%Y-%m-%d")
     )
     filename = f"peakflow_{CHILD_NAME}_{now_tz().strftime('%Y%m%d_%H%M')}.csv"
@@ -1021,6 +1082,9 @@ async def cb_export_all(callback: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith("csv_"))
 async def cb_export_month(callback: types.CallbackQuery):
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
     parsed = parse_csv_month(callback.data)
     if not parsed:
         await callback.answer("❌ Неверный период.", show_alert=True)
@@ -1028,8 +1092,8 @@ async def cb_export_month(callback: types.CallbackQuery):
     y, m = parsed
     # [first of month, first of next month) — last_day is the day before next month
     last_day = (datetime(y, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    rows = get_measurements_between(DB_PATH, CHILD_ID, f"{y:04d}-{m:02d}-01",
-                                    last_day.strftime("%Y-%m-%d"))
+    rows = await _db(get_measurements_between, DB_PATH, CHILD_ID,
+                     f"{y:04d}-{m:02d}-01", last_day.strftime("%Y-%m-%d"))
     # get_measurements_between includes auto (CSV shows them with 'auto' source column)
     filename = f"peakflow_{CHILD_NAME}_{y:04d}-{m:02d}.csv"
     await _send_csv(callback, rows, filename,
@@ -1048,23 +1112,26 @@ async def cb_backup(callback: types.CallbackQuery):
     stamp = now_tz().strftime("%Y%m%d_%H%M")
     dest = f"backup_{CHILD_NAME}_{stamp}.db"
     try:
-        backup_db(DB_PATH, dest)
+        await _db(backup_db, DB_PATH, dest)
     except Exception as e:
         logger.error("Ошибка бэкапа: %s", e)
         await callback.answer("❌ Не удалось создать бэкап.", show_alert=True)
         return
 
-    measurements = get_all_measurements(DB_PATH, CHILD_ID, include_auto=True)
+    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
     try:
-        with open(dest, "rb") as f:
-            await answer_callback(callback)
-            await callback.message.answer_document(
-                BufferedInputFile(f.read(), filename=f"peakflow_backup_{stamp}.db"),
-                caption=f"💾 Бэкап БД: {len(measurements)} замеров",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")]
-                ]),
-            )
+        def _read_backup():
+            with open(dest, "rb") as f:
+                return f.read()
+        data = await asyncio.to_thread(_read_backup)
+        await answer_callback(callback)
+        await callback.message.answer_document(
+            BufferedInputFile(data, filename=f"peakflow_backup_{stamp}.db"),
+            caption=f"💾 Бэкап БД: {len(measurements)} замеров",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")]
+            ]),
+        )
     except Exception as e:
         logger.error("Ошибка отправки бэкапа: %s", e)
         await callback.answer("❌ Не удалось отправить файл.", show_alert=True)
@@ -1074,34 +1141,6 @@ async def cb_backup(callback: types.CallbackQuery):
                 os.remove(dest)
             except OSError:
                 pass
-
-
-# ---------------------------------------------------------------------------
-# Helper: show history from callback (after edit)
-# ---------------------------------------------------------------------------
-async def _show_history_from_callback(callback: types.CallbackQuery):
-    measurements, total, total_pages = get_measurements_paginated(DB_PATH, CHILD_ID, page=1, per_page=10)
-    target = get_effective_target()
-    is_p = is_parent(callback.from_user.id)
-
-    if not measurements:
-        await callback.message.answer("📭 Нет измерений.", reply_markup=kb_back())
-        return
-
-    lines = []
-    for m in measurements:
-        zone, _ = pef_zone(m["pef_value"], target)
-        ts = m["measured_at"][5:16].replace("T", " ")
-        who = "👨‍👧" if is_parent(m.get("added_by", 0)) else "👶"
-        lines.append(f"{tod_emoji(m['time_of_day'])} {ts} → *{m['pef_value']}* {zone} {who}")
-
-    kb = kb_pagination(1, total_pages, is_p, measurements)
-
-    await callback.message.answer(
-        f"📋 История *{escape_md(CHILD_NAME)}*:\n\n" + "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=kb,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1153,40 +1192,43 @@ def _render_chart_png(rows: list, target: int, title: str) -> bytes:
     evening_v = [values[i] for i, d in enumerate(rows) if d["time_of_day"] == "evening"]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(dates, values, marker="o", linewidth=2, label="ПСВ", color="#2196F3", markersize=4, zorder=3)
+    try:
+        ax.plot(dates, values, marker="o", linewidth=2, label="ПСВ", color="#2196F3", markersize=4, zorder=3)
 
-    if morning_d:
-        ax.scatter(morning_d, morning_v, color="#FF9800", label="Утро", zorder=5, s=80, edgecolors="white", linewidth=1.5)
-    if evening_d:
-        ax.scatter(evening_d, evening_v, color="#9C27B0", label="Вечер", zorder=5, s=80, edgecolors="white", linewidth=1.5)
+        if morning_d:
+            ax.scatter(morning_d, morning_v, color="#FF9800", label="Утро", zorder=5, s=80, edgecolors="white", linewidth=1.5)
+        if evening_d:
+            ax.scatter(evening_d, evening_v, color="#9C27B0", label="Вечер", zorder=5, s=80, edgecolors="white", linewidth=1.5)
 
-    # Best / Worst
-    best_idx = values.index(max(values))
-    worst_idx = values.index(min(values))
-    ax.annotate(f"🏆 {max(values)}", (dates[best_idx], values[best_idx]),
-                textcoords="offset points", xytext=(0, 12), ha="center",
-                fontsize=9, fontweight="bold", color="green")
-    ax.annotate(f"⚠️ {min(values)}", (dates[worst_idx], values[worst_idx]),
-                textcoords="offset points", xytext=(0, -14), ha="center",
-                fontsize=9, fontweight="bold", color="red")
+        # Best / Worst
+        best_idx = values.index(max(values))
+        worst_idx = values.index(min(values))
+        ax.annotate(f"🏆 {max(values)}", (dates[best_idx], values[best_idx]),
+                    textcoords="offset points", xytext=(0, 12), ha="center",
+                    fontsize=9, fontweight="bold", color="green")
+        ax.annotate(f"⚠️ {min(values)}", (dates[worst_idx], values[worst_idx]),
+                    textcoords="offset points", xytext=(0, -14), ha="center",
+                    fontsize=9, fontweight="bold", color="red")
 
-    if target:
-        ax.axhline(y=target, color="green", linestyle="--", label=f"Норма ({target})", linewidth=1.5, zorder=2)
-        ax.axhline(y=int(target * ZONE_GREEN / 100), color="orange", linestyle=":", alpha=0.5, linewidth=1)
-        ax.axhline(y=int(target * ZONE_YELLOW / 100), color="yellow", linestyle=":", alpha=0.5, linewidth=1)
+        if target:
+            ax.axhline(y=target, color="green", linestyle="--", label=f"Норма ({target})", linewidth=1.5, zorder=2)
+            ax.axhline(y=int(target * ZONE_GREEN / 100), color="orange", linestyle=":", alpha=0.5, linewidth=1)
+            ax.axhline(y=int(target * ZONE_YELLOW / 100), color="yellow", linestyle=":", alpha=0.5, linewidth=1)
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.set_ylabel("ПСВ (л/мин)")
-    ax.set_title(f"Пикфлоуметрия — {title}")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, alpha=0.3)
-    fig.autofmt_xdate()
-    plt.tight_layout()
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.set_ylabel("ПСВ (л/мин)")
+        ax.set_title(f"Пикфлоуметрия — {title}")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.autofmt_xdate()
+        plt.tight_layout()
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120)
-    plt.close(fig)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120)
+    finally:
+        # Always release the figure, even if rendering raised.
+        plt.close(fig)
     return buf.getvalue()
 
 
@@ -1196,8 +1238,8 @@ async def _render_chart_png_async(rows: list, target: int, title: str) -> bytes:
 
 
 async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int):
-    target = get_effective_target()
-    rows = get_measurements_for_month(DB_PATH, CHILD_ID, year, month)
+    target = await _db(get_effective_target)
+    rows = await _db(get_measurements_for_month, DB_PATH, CHILD_ID, year, month)
 
     now = now_tz()
     can_next = (year, month) < (now.year, now.month)
@@ -1243,11 +1285,11 @@ async def cb_chart_download(callback: types.CallbackQuery):
         await callback.answer("❌ Неверный месяц.", show_alert=True)
         return
     year, month = parsed
-    rows = get_measurements_for_month(DB_PATH, CHILD_ID, year, month)
+    rows = await _db(get_measurements_for_month, DB_PATH, CHILD_ID, year, month)
     if len(rows) < 2:
         await callback.answer("В этом месяце меньше 2 измерений.", show_alert=True)
         return
-    target = get_effective_target()
+    target = await _db(get_effective_target)
     png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
     await answer_callback(callback)
     await callback.message.answer_document(
@@ -1262,8 +1304,11 @@ async def cb_chart_download(callback: types.CallbackQuery):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "summary")
 async def cb_summary(callback: types.CallbackQuery):
-    target = get_effective_target()
-    today = get_today_measurements(DB_PATH, CHILD_ID)
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    target = await _db(get_effective_target)
+    today = await _db(get_today_measurements, DB_PATH, CHILD_ID)
 
     morning = [m for m in today if m["time_of_day"] == "morning"]
     evening = [m for m in today if m["time_of_day"] == "evening"]
@@ -1283,7 +1328,7 @@ async def cb_summary(callback: types.CallbackQuery):
         e_str = "🌆 Вечер: ещё нет"
 
     # Stats
-    stats = get_stats(DB_PATH, CHILD_ID)
+    stats = await _db(get_stats, DB_PATH, CHILD_ID)
 
     m_avg = stats.get('morning_avg')
     e_avg = stats.get('evening_avg')
@@ -1304,12 +1349,15 @@ async def cb_summary(callback: types.CallbackQuery):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "weekly")
 async def cb_weekly(callback: types.CallbackQuery):
+    if not is_parent(callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
     await callback.answer()
     await _send_weekly_report(callback.message)
 
 
 async def _send_weekly_report(message=None):
-    this_week, prev_week = get_last_two_weeks(DB_PATH, CHILD_ID)
+    this_week, prev_week = await _db(get_last_two_weeks, DB_PATH, CHILD_ID)
 
     if not this_week:
         if message:
@@ -1364,8 +1412,8 @@ async def _send_weekly_report(message=None):
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "stats")
 async def cb_stats(callback: types.CallbackQuery):
-    stats = get_stats(DB_PATH, CHILD_ID)
-    target = get_effective_target()
+    stats = await _db(get_stats, DB_PATH, CHILD_ID)
+    target = await _db(get_effective_target)
 
     if stats.get("total", 0) == 0:
         await respond(callback, "📭 Нет измерений.", kb=kb_back())
@@ -1442,6 +1490,9 @@ async def catch_all(message: types.Message, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
+_scheduler_task = None
+
+
 def _user_display_name(user_id: int) -> str:
     if is_child(user_id):
         return CHILD_NAME
@@ -1450,8 +1501,21 @@ def _user_display_name(user_id: int) -> str:
     return "Кто-то"
 
 
+def _log_scheduler_crash(task: asyncio.Task):
+    """Surface unexpected scheduler failures instead of losing them silently."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Планировщик упал: %s", exc, exc_info=exc)
+
+
 async def on_startup():
-    asyncio.create_task(scheduler_loop())
+    global _scheduler_task
+    # Keep a strong reference: a bare create_task() result may be garbage
+    # collected, silently stopping the scheduler.
+    _scheduler_task = asyncio.create_task(scheduler_loop())
+    _scheduler_task.add_done_callback(_log_scheduler_crash)
     logger.info("Бот запущен, планировщик активен")
     await _setup_menu_button()
 
@@ -1477,10 +1541,10 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
     flag = f"child_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if was_reminder_sent(DB_PATH, today, flag):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
         return
-    if has_today_measurement(DB_PATH, CHILD_ID, tod, skip_auto=True):
-        mark_reminder_sent(DB_PATH, today, flag)
+    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
+        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
         return
     icon = "☀️" if tod == "morning" else "🌙"
     try:
@@ -1490,9 +1554,11 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
             f"{'утренний' if tod == 'morning' else 'вечерний'} замер 💨",
             parse_mode="Markdown",
         )
-    except Exception:
-        pass
-    mark_reminder_sent(DB_PATH, today, flag)
+    except Exception as e:
+        # Do not set the flag: retry on the next tick (the 2-minute window).
+        logger.error("Не удалось напомнить ребёнку (%s): %s", tod, e)
+        return
+    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
     logger.info("Напоминание ребёнку: %s", tod)
 
 
@@ -1503,17 +1569,17 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
     key = f"parent_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if was_reminder_sent(DB_PATH, today, flag):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
         return
-    if has_today_measurement(DB_PATH, CHILD_ID, tod, skip_auto=True):
-        mark_reminder_sent(DB_PATH, today, flag)
+    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
+        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
         return
 
     # Auto-carry: reuse last real value of this time of day
-    last = get_last_of_tod(DB_PATH, CHILD_ID, tod)
-    if last and not was_reminder_sent(DB_PATH, today, auto_flag):
-        add_measurement(DB_PATH, last["pef_value"], tod, CHILD_ID, 0, source="auto")
-        mark_reminder_sent(DB_PATH, today, auto_flag)
+    last = await _db(get_last_of_tod, DB_PATH, CHILD_ID, tod)
+    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID):
+        await _db(add_measurement, DB_PATH, last["pef_value"], tod, CHILD_ID, 0, source="auto")
+        await _db(mark_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID)
         logger.info("Авто-запись: %s = %d (%s)", tod, last["pef_value"], today)
 
     icon = "☀️" if tod == "morning" else "🌙"
@@ -1529,12 +1595,18 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
             f"Напомните, пожалуйста."
         )
 
+    delivered = False
     for pid in PARENT_IDS:
         try:
             await bot.send_message(pid, text, parse_mode="Markdown")
+            delivered = True
         except Exception:
             pass
-    mark_reminder_sent(DB_PATH, today, flag)
+    if not delivered:
+        # No parent received it — allow a retry on the next tick.
+        logger.error("Эскалация родителям (%s) не доставлена, повтор", tod)
+        return
+    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
     logger.info("Эскалация родителям: %s", tod)
 
 
@@ -1548,7 +1620,7 @@ async def scheduler_loop():
             hour = now.hour
             minute = now.minute
 
-            hours = get_reminder_hours(DB_PATH)
+            hours = await _db(get_reminder_hours, DB_PATH)
 
             # Child pings (08:00 / 20:00 by default)
             await _maybe_ping_child("morning", hours, hour, minute, today)
@@ -1560,21 +1632,28 @@ async def scheduler_loop():
 
             # Weekly report
             if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
-                if not was_reminder_sent(DB_PATH, today, "weekly"):
+                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", CHILD_ID):
                     text = await _send_weekly_report()
                     if text:
+                        delivered = False
                         for pid in PARENT_IDS:
                             try:
                                 await bot.send_message(pid, text, parse_mode="Markdown")
+                                delivered = True
                             except Exception:
                                 pass
-                        mark_reminder_sent(DB_PATH, today, "weekly")
-                        logger.info("Недельный отчёт отправлен")
+                        if delivered:
+                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", CHILD_ID)
+                            logger.info("Недельный отчёт отправлен")
+                        else:
+                            logger.error("Недельный отчёт не доставлен, повтор")
 
         except Exception as e:
             logger.error("Ошибка планировщика: %s", e)
 
-        await asyncio.sleep(60)
+        # Align the next tick to the minute boundary so the 2-minute reminder
+        # window cannot be skipped by drift.
+        await asyncio.sleep(seconds_until_next_minute(now_tz()))
 
 
 # ---------------------------------------------------------------------------
@@ -1604,7 +1683,10 @@ async def run_async() -> int:
             state["bot_ok"] = False
 
     if not WEBAPP_PORT:
-        await dp.start_polling(bot)
+        try:
+            await dp.start_polling(bot)
+        finally:
+            await bot.session.close()
         return 0
 
     polling = asyncio.create_task(_run_polling())
