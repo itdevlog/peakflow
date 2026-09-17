@@ -2191,7 +2191,7 @@ class TestFamiliesAndMembers:
     def test_default_family_constants(self):
         import database
         assert database.DEFAULT_FAMILY_ID == 1
-        assert database.SCHEMA_VERSION == 3
+        assert database.SCHEMA_VERSION == 4
 
 
 class TestMeasurementV2:
@@ -2284,7 +2284,7 @@ class TestMigrationV2:
         row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
         setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
         conn.close()
-        assert version == SCHEMA_VERSION == 3
+        assert version == SCHEMA_VERSION == 4
         assert row == (1, 111, 240)
         assert setting[0] == "300"
 
@@ -2466,9 +2466,9 @@ class TestFamilyIsolation:
 
 
 class TestInvites:
-    def test_schema_version_is_3(self):
+    def test_schema_version_is_4(self):
         import database
-        assert database.SCHEMA_VERSION == 3
+        assert database.SCHEMA_VERSION == 4
 
     def test_create_and_get_invite(self):
         from database import create_family, create_invite, get_invite
@@ -3857,6 +3857,66 @@ class TestFamilyManagement:
 
         d = asyncio.run(run())
         d.assert_called_once_with(TEST_DB, "TOK", 1)
+
+
+class TestActiveChild:
+    def test_schema_v4(self):
+        import database
+        assert database.SCHEMA_VERSION == 4
+
+    def test_active_child_column(self):
+        import sqlite3
+        from database import init_db
+        init_db(TEST_DB)
+        c = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in c.execute("PRAGMA table_info(members)")]
+        c.close()
+        assert "active_child_id" in cols
+
+    def test_set_active_child_validates_same_family(self):
+        from database import create_family_with_owner, add_member, set_active_child, get_member
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        f2 = create_family_with_owner(TEST_DB, 501, "B")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f2, "child", "Петя")
+        assert set_active_child(TEST_DB, 500, 700) is True
+        assert get_member(TEST_DB, 500)["active_child_id"] == 700
+        assert set_active_child(TEST_DB, 500, 701) is False  # чужой ребёнок
+        assert set_active_child(TEST_DB, 500, 999) is False
+
+    def test_resolve_active_child_for_child_member(self):
+        from database import create_family_with_owner, add_member, resolve_active_child, get_member
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 700)) == 700
+
+    def test_resolve_active_child_defaults_to_first(self):
+        from database import create_family_with_owner, add_member, resolve_active_child, get_member
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f1, "child", "Петя")
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) in (700, 701)
+
+    def test_resolve_active_child_none_without_children(self):
+        from database import create_family_with_owner, resolve_active_child, get_member
+        create_family_with_owner(TEST_DB, 500, "A")
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) is None
+
+    def test_resolve_active_child_respects_selection(self):
+        from database import (create_family_with_owner, add_member, set_active_child,
+                              resolve_active_child, get_member)
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f1, "child", "Петя")
+        set_active_child(TEST_DB, 500, 701)
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) == 701
+
+    def test_count_family_children(self):
+        from database import create_family_with_owner, add_member, count_family_children
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 222, f1, "parent", "Олег")
+        assert count_family_children(TEST_DB, f1) == 1
 
 
 if __name__ == "__main__":

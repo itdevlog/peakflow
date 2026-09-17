@@ -11,8 +11,8 @@ _TZ = timezone(timedelta(hours=TZ_OFFSET))
 
 DEFAULT_FAMILY_ID = 1
 
-# Версия схемы БД (PRAGMA user_version). 3 = мульти-тенант + invites.
-SCHEMA_VERSION = 3
+# Версия схемы БД (PRAGMA user_version). 4 = мульти-тенант + active child.
+SCHEMA_VERSION = 4
 
 
 def _now():
@@ -212,6 +212,13 @@ def _create_invites_v3(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_invites_family ON invites(family_id)")
 
 
+def _add_active_child_v4(conn):
+    try:
+        conn.execute("ALTER TABLE members ADD COLUMN active_child_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _needs_migration(probe) -> bool:
     """True when a non-empty DB does not yet have the v2 schema.
 
@@ -277,6 +284,7 @@ def init_db(db_path: str):
         _seed_default_family(c)
         _migrate_to_v2(c)
         _create_invites_v3(c)
+        _add_active_child_v4(c)
 
         # Default target PEF if not set
         c.execute(
@@ -810,6 +818,42 @@ def list_family_children(db_path: str, family_id: int) -> list:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def count_family_children(db_path: str, family_id: int) -> int:
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM members WHERE family_id = ? AND role = 'child'", (family_id,)
+    ).fetchone()
+    conn.close()
+    return row[0]
+
+
+def set_active_child(db_path: str, telegram_id: int, child_id: int) -> bool:
+    member = get_member(db_path, telegram_id)
+    if not member or member["role"] != "parent":
+        return False
+    child = get_member(db_path, child_id)
+    if not child or child["role"] != "child" or child["family_id"] != member["family_id"]:
+        return False
+    conn = get_connection(db_path)
+    conn.execute("UPDATE members SET active_child_id = ? WHERE telegram_id = ?", (child_id, telegram_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def resolve_active_child(db_path: str, member) -> Optional[int]:
+    if not member:
+        return None
+    if member["role"] == "child":
+        return member["telegram_id"]
+    children = list_family_children(db_path, member["family_id"])
+    ids = [c["telegram_id"] for c in children]
+    selected = member.get("active_child_id") if hasattr(member, "get") else None
+    if selected in ids:
+        return selected
+    return ids[0] if ids else None
 
 
 # ============================================================================
