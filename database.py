@@ -1,4 +1,5 @@
 import os
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -10,8 +11,8 @@ _TZ = timezone(timedelta(hours=TZ_OFFSET))
 
 DEFAULT_FAMILY_ID = 1
 
-# Версия схемы БД (PRAGMA user_version). 2 = мульти-тенант (families/members).
-SCHEMA_VERSION = 2
+# Версия схемы БД (PRAGMA user_version). 3 = мульти-тенант + invites.
+SCHEMA_VERSION = 3
 
 
 def _now():
@@ -198,6 +199,19 @@ def _migrate_to_v2(conn):
     _rebuild_reminders_v2(conn)
 
 
+def _create_invites_v3(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS invites (
+            token TEXT PRIMARY KEY,
+            family_id INTEGER NOT NULL REFERENCES families(id),
+            role TEXT NOT NULL CHECK(role IN ('parent', 'child')),
+            name TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_invites_family ON invites(family_id)")
+
+
 def _needs_migration(probe) -> bool:
     """True when a non-empty DB does not yet have the v2 schema.
 
@@ -262,6 +276,7 @@ def init_db(db_path: str):
         c.execute("BEGIN IMMEDIATE")
         _seed_default_family(c)
         _migrate_to_v2(c)
+        _create_invites_v3(c)
 
         # Default target PEF if not set
         c.execute(
@@ -795,6 +810,134 @@ def list_family_children(db_path: str, family_id: int) -> list:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ============================================================================
+# Invites (registration tokens)
+# ============================================================================
+def create_invite(db_path: str, family_id: int, role: str, name: str = "") -> str:
+    conn = get_connection(db_path)
+    try:
+        for _ in range(5):
+            token = secrets.token_urlsafe(8)
+            try:
+                conn.execute(
+                    "INSERT INTO invites (token, family_id, role, name) VALUES (?, ?, ?, ?)",
+                    (token, family_id, role, name)
+                )
+                conn.commit()
+                return token
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError("Не удалось создать уникальный invite-токен")
+    finally:
+        conn.close()
+
+
+def get_invite(db_path: str, token: str) -> Optional[dict]:
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM invites WHERE token = ?", (token,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_family_invite(db_path: str, family_id: int) -> Optional[dict]:
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT * FROM invites WHERE family_id = ? AND role = 'parent' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (family_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_child_cards(db_path: str, family_id: int) -> list:
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM invites WHERE family_id = ? AND role = 'child' ORDER BY created_at",
+        (family_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_invite(db_path: str, token: str, family_id: int = DEFAULT_FAMILY_ID) -> bool:
+    conn = get_connection(db_path)
+    cur = conn.execute(
+        "DELETE FROM invites WHERE token = ? AND family_id = ?", (token, family_id)
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def regenerate_family_invite(db_path: str, family_id: int) -> str:
+    conn = get_connection(db_path)
+    conn.execute("DELETE FROM invites WHERE family_id = ? AND role = 'parent'", (family_id,))
+    conn.commit()
+    conn.close()
+    return create_invite(db_path, family_id, "parent")
+
+
+# ============================================================================
+# Registration (atomic family creation / invite join)
+# ============================================================================
+def create_family_with_owner(db_path: str, telegram_id: int, name: str) -> int:
+    """Create a family with the caller as parent. Idempotent per telegram_id."""
+    existing = get_member(db_path, telegram_id)
+    if existing:
+        return existing["family_id"]
+    conn = get_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute("INSERT INTO families (name) VALUES (?)", (name,))
+        fid = cur.lastrowid
+        conn.execute(
+            "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', ?)",
+            (telegram_id, fid, name)
+        )
+        token = secrets.token_urlsafe(8)
+        conn.execute(
+            "INSERT INTO invites (token, family_id, role, name) VALUES (?, ?, 'parent', '')",
+            (token, fid)
+        )
+        conn.commit()
+        return fid
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def join_by_invite(db_path: str, token: str, telegram_id: int,
+                   name: Optional[str] = None) -> Optional[dict]:
+    """Join a family by invite token. Returns {family_id, role, name} or None."""
+    invite = get_invite(db_path, token)
+    if not invite:
+        return None
+    role = invite["role"]
+    member_name = name if name is not None else (
+        invite["name"] or ("Родитель" if role == "parent" else "Ребёнок")
+    )
+    conn = get_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
+            "role = excluded.role, name = excluded.name",
+            (telegram_id, invite["family_id"], role, member_name)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"family_id": invite["family_id"], "role": role, "name": member_name}
 
 
 # ============================================================================

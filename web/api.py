@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from database import (
+    DEFAULT_FAMILY_ID,
     add_or_replace_measurement,
     backup_db,
     delete_measurement,
@@ -28,6 +30,7 @@ from database import (
     get_reminder_hours,    get_stats,
     get_today_measurements,
     get_effective_target as _db_effective_target,
+    get_member,
     set_note,
     set_setting,
     validate_reminder_hours,
@@ -150,13 +153,31 @@ def create_app(services: dict) -> FastAPI:
         if not user:
             raise HTTPException(403, "Нет доступа")
         uid = user.get("id")
-        if uid == getattr(config, "CHILD_ID", 0):
-            role = "child"
-        elif uid in (getattr(config, "PARENT_IDS", []) or []):
-            role = "parent"
+        try:
+            member = get_member(config.DB_PATH, uid)
+        except sqlite3.OperationalError as e:
+            # Uninitialized/locked DB: behave as "not a member" (403 via fallback)
+            # instead of leaking a 500. Narrow to OperationalError so real
+            # corruption/IO faults are not silently masked.
+            logger.warning("Не удалось прочитать участника из БД: %s", e)
+            member = None
+        if member:
+            role = member["role"]
+            family_id = member["family_id"]
         else:
-            raise HTTPException(403, "Нет доступа")
-        return {"user": user, "role": role}
+            # Fallback for family #1 before its members are read (defensive).
+            if uid == getattr(config, "CHILD_ID", 0):
+                role, family_id = "child", 1
+            elif uid in (getattr(config, "PARENT_IDS", []) or []):
+                role, family_id = "parent", 1
+            else:
+                raise HTTPException(403, "Нет доступа")
+        # Interim gate until SP2C threads the active child/family through every
+        # query: all data access still targets family #1's global CHILD_ID, so
+        # members of any other family must not reach it.
+        if member and member["family_id"] != DEFAULT_FAMILY_ID:
+            raise HTTPException(403, "Дневник для новых семей появится позже")
+        return {"user": user, "role": role, "family_id": family_id, "member": member}
 
     def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
         return _resolve_user(x_telegram_init_data)

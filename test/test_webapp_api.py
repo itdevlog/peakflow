@@ -3,10 +3,12 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import time
 from types import SimpleNamespace
 from urllib.parse import quote
 
+import pytest
 from fastapi.testclient import TestClient
 
 from database import add_measurement, init_db
@@ -51,6 +53,22 @@ def _setup_db():
         if os.path.exists(TEST_DB + ext):
             os.remove(TEST_DB + ext)
     init_db(TEST_DB)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_schema():
+    """Every test in this module gets a schema-initialized DB, independent of
+    execution order (a standalone run must not fail on a missing members table)."""
+    init_db(TEST_DB)
+    yield
+
+
+def test_api_stranger_forbidden_when_db_uninitialized(tmp_path):
+    """An uninitialized DB must yield 403, not a 500 from a failed lookup."""
+    cfg = _config()
+    cfg.DB_PATH = str(tmp_path / "empty.db")
+    sqlite3.connect(cfg.DB_PATH).close()  # valid file, no members table
+    assert _client(cfg).get("/api/me", headers=_auth(999)).status_code == 403
 
 
 def test_healthz_ok():
@@ -193,3 +211,33 @@ def test_static_index_has_settings_screen():
     assert 'id="screen-settings"' in r.text
     assert 'data-screen="settings"' in r.text
     assert 'id="tab-settings" hidden' in r.text
+
+
+class TestWebRolesFromDb:
+    def test_member_of_new_family_forbidden_until_2c(self):
+        """F1 interim gate: a non-family-#1 member has no Mini App access."""
+        from database import create_family_with_owner
+        _setup_db()
+        create_family_with_owner(TEST_DB, 999, "Новые")
+        r = _client().get("/api/me", headers=_auth(999))
+        assert r.status_code == 403
+
+    def test_family_one_member_still_allowed(self):
+        """Family #1 members resolved from the DB are unaffected by the gate."""
+        from database import add_member
+        _setup_db()
+        add_member(TEST_DB, 555, 1, "parent", "Мама")
+        r = _client().get("/api/me", headers=_auth(555))
+        assert r.status_code == 200
+        assert r.json()["role"] == "parent"
+
+    def test_env_fallback_still_allowed(self):
+        """An .env-only family #1 user (no members row) keeps working."""
+        _setup_db()
+        r = _client().get("/api/me", headers=_auth(CHILD_ID))
+        assert r.status_code == 200
+
+    def test_stranger_forbidden(self):
+        _setup_db()
+        r = _client().get("/api/me", headers=_auth(888))
+        assert r.status_code == 403
