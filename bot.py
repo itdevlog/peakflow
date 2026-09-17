@@ -48,6 +48,9 @@ from database import (
     get_previous_of_tod,
     get_measurement_by_id,
     get_member,
+    create_family_with_owner,
+    join_by_invite,
+    get_family_invite,
 )
 
 import config as app_config
@@ -166,6 +169,12 @@ class Measurement(StatesGroup):
     # Пошаговый inline-ввод ПСВ (сотни → десятки)
     pef_input_hundreds = State()
     pef_input_tens = State()
+
+
+class Registration(StatesGroup):
+    entering_family_name = State()
+    entering_invite_code = State()
+    adding_child_name = State()
 
 
 def get_effective_target() -> int:
@@ -382,20 +391,134 @@ async def send_main_menu(message_or_callback, user_id: int, member=None):
 # ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
+def kb_registration() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Создать семью", callback_data="reg_create")],
+        [InlineKeyboardButton(text="🔑 Войти по коду", callback_data="reg_join")],
+    ])
+
+
+async def _show_registration(message_or_callback, extra_text: str = ""):
+    prefix = f"{extra_text}\n\n" if extra_text else ""
+    await message_or_callback.answer(
+        f"{prefix}👋 Добро пожаловать в Пикфлоуметр!\n\n"
+        f"Создайте семью или войдите по коду приглашения.",
+        reply_markup=kb_registration(),
+    )
+
+
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    if _role(member, uid) == "unknown":
-        await message.answer(
-            "⚠️ Этот бот только для семьи. Обратитесь к администратору."
-        )
+    role = _role(member, uid)
+
+    # Deep-link: /start <token>
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 2 and parts[1].strip():
+        if role != "unknown":
+            # Already registered: a token must never move a member to another
+            # family (controller ruling, Task 2 review).
+            await message.answer("ℹ️ Вы уже в семье.")
+            await send_main_menu(message, uid, member=member)
+            await state.clear()
+            return
+        token = parts[1].strip()
+        result = await _db(join_by_invite, DB_PATH, token, uid)
+        if result:
+            who = "👨‍👧 Родитель" if result["role"] == "parent" else f"👶 {escape_md(result['name'])}"
+            await message.answer(f"✅ Вы вошли в семью как *{who}*", parse_mode="Markdown")
+            await state.clear()
+            member = await _db(get_member, DB_PATH, uid)
+            await send_main_menu(message, uid, member=member)
+            logger.info("Пользователь %d вошёл по deep-link как %s", uid, result["role"])
+            return
+        await message.answer("❌ Код не найден. Попробуйте ещё раз.")
+        # fall through to the registration screen
+
+    if role == "unknown":
+        await _show_registration(message)
         return
 
-    who = "👨‍👧 Родитель" if _role(member, uid) == "parent" else f"👶 {escape_md(CHILD_NAME)}"
+    who = "👨‍👧 Родитель" if role == "parent" else f"👶 {escape_md(CHILD_NAME)}"
     await message.answer(f"✅ Привет! Вы вошли как *{who}*", parse_mode="Markdown")
     await send_main_menu(message, uid, member=member)
     await state.clear()
     logger.info("Пользователь %d (%s) вошёл в бот", uid, who)
+
+
+# ---------------------------------------------------------------------------
+# Registration — create family / join by invite code
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "reg_create")
+async def cb_reg_create(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if _role(member, callback.from_user.id) != "unknown":
+        await callback.answer("ℹ️ Вы уже в семье.", show_alert=True)
+        return
+    await state.set_state(Registration.entering_family_name)
+    await answer_callback(callback)
+    await callback.message.answer(
+        "🏠 Введите название семьи:",
+        reply_markup=kb_back(),
+    )
+
+
+@router.callback_query(F.data == "reg_join")
+async def cb_reg_join(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if _role(member, callback.from_user.id) != "unknown":
+        await callback.answer("ℹ️ Вы уже в семье.", show_alert=True)
+        return
+    await state.set_state(Registration.entering_invite_code)
+    await answer_callback(callback)
+    await callback.message.answer(
+        "🔑 Введите код приглашения:",
+        reply_markup=kb_back(),
+    )
+
+
+@router.message(Registration.entering_family_name, F.text)
+async def input_family_name(message: types.Message, state: FSMContext, member=None):
+    name = (message.text or "").strip()[:100]
+    if not name:
+        await message.answer("Введите название семьи:", reply_markup=kb_back())
+        return
+
+    family_id = await _db(create_family_with_owner, DB_PATH, message.from_user.id, name)
+    invite = await _db(get_family_invite, DB_PATH, family_id)
+    token = invite["token"] if invite else ""
+
+    await message.answer(
+        f"✅ Семья «{escape_md(name)}» создана.\n\n"
+        f"🔑 Код для приглашения родителя:\n`{escape_md(token)}`",
+        parse_mode="Markdown",
+    )
+    await state.clear()
+    member = await _db(get_member, DB_PATH, message.from_user.id)
+    await send_main_menu(message, message.from_user.id, member=member)
+    logger.info("Пользователь %d создал семью %d", message.from_user.id, family_id)
+
+
+@router.message(Registration.entering_invite_code, F.text)
+async def input_invite_code(message: types.Message, state: FSMContext, member=None):
+    uid = message.from_user.id
+    if _role(member, uid) != "unknown":
+        # Already registered: never reassign to another family.
+        await message.answer("ℹ️ Вы уже в семье.")
+        await state.clear()
+        await send_main_menu(message, uid, member=member)
+        return
+
+    token = (message.text or "").strip()
+    result = await _db(join_by_invite, DB_PATH, token, uid)
+    if not result:
+        await message.answer("❌ Код не найден. Попробуйте ещё раз:", reply_markup=kb_back())
+        return
+
+    who = "👨‍👧 Родитель" if result["role"] == "parent" else f"👶 {escape_md(result['name'])}"
+    await message.answer(f"✅ Вы вошли в семью как *{who}*", parse_mode="Markdown")
+    await state.clear()
+    member = await _db(get_member, DB_PATH, uid)
+    await send_main_menu(message, uid, member=member)
+    logger.info("Пользователь %d вошёл по коду как %s", uid, result["role"])
 
 
 # ---------------------------------------------------------------------------
@@ -1500,22 +1623,31 @@ _FSM_HINTS = {
         "Выберите значение кнопками ниже или отправьте /cancel для отмены."
     ),
     "Measurement:editing_target_pef": "Введите целое число 100–800 или /cancel.",
+    "Registration:entering_family_name": (
+        "Введите название семьи или отправьте /cancel для отмены."
+    ),
+    "Registration:entering_invite_code": (
+        "Введите код приглашения или отправьте /cancel для отмены."
+    ),
+    "Registration:adding_child_name": (
+        "Введите имя ребёнка или отправьте /cancel для отмены."
+    ),
 }
 
 
 @router.message(F.text)
 async def catch_all(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    if _role(member, uid) == "unknown":
-        await message.answer(
-            "⚠️ Этот бот только для семьи. Обратитесь к администратору."
-        )
-        return
     current = await state.get_state()
     if current:
         hint = _FSM_HINTS.get(current)
         if hint:
             await message.answer(hint, reply_markup=kb_back())
+        return
+    if _role(member, uid) == "unknown":
+        await message.answer(
+            "⚠️ Этот бот только для семьи. Обратитесь к администратору."
+        )
         return
     await send_main_menu(message, uid, member=member)
 

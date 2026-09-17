@@ -2739,5 +2739,245 @@ class TestHandlerRolesFromDb:
             "input_note must forward member to send_main_menu"
 
 
+class TestRegistrationFlow:
+    """Task 5 (SP3B): self-service registration and invite deep-links.
+
+    An unknown user must see the registration screen; an already-registered
+    user must never be silently moved to another family by an invite token —
+    neither through the deep-link nor through the code-entry FSM.
+    """
+
+    def _make_state(self, state_name=None, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        st = MagicMock()
+        st._data = dict(data or {})
+        st._state = state_name
+
+        async def update_data(**kw):
+            st._data.update(kw)
+
+        async def get_data():
+            return dict(st._data)
+
+        async def get_state():
+            return st._state
+
+        async def set_state(s):
+            st._state = s
+
+        st.update_data = update_data
+        st.get_data = get_data
+        st.get_state = get_state
+        st.set_state = set_state
+        st.clear = AsyncMock()
+        return st
+
+    def _msg(self, uid, text):
+        from unittest.mock import AsyncMock, MagicMock
+        msg = MagicMock()
+        msg.from_user.id = uid
+        msg.text = text
+        msg.answer = AsyncMock()
+        return msg
+
+    @staticmethod
+    def _sent(msg):
+        return " ".join(str(c.args[0]) for c in msg.answer.await_args_list if c.args)
+
+    def test_unknown_user_sees_registration(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        msg = self._msg(999, "/start")
+        state = self._make_state()
+
+        with patch.object(bot, "is_parent", return_value=False), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cmd_start(msg, state, member=None))
+
+        sent = self._sent(msg)
+        assert "семью" in sent.lower() or "код" in sent.lower()
+
+    def test_deep_link_joins(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "/start TOKEN123")
+        state = self._make_state()
+
+        with patch.object(bot, "join_by_invite",
+                          return_value={"family_id": 2, "role": "child", "name": "Маша"}) as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.cmd_start(msg, state, member=None))
+        m.assert_called_once_with(bot.DB_PATH, "TOKEN123", 700)
+
+    def test_deep_link_does_not_move_existing_member(self):
+        """A registered user following a deep-link must not be reassigned."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "/start TOKEN123")
+        state = self._make_state()
+
+        with patch.object(bot, "join_by_invite") as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cmd_start(
+                msg, state, member={"role": "child", "family_id": 2}))
+
+        m.assert_not_called()
+        menu.assert_awaited()
+        assert "уже в семь" in self._sent(msg).lower()
+
+    def test_deep_link_unknown_token_shows_error_and_registration(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "/start BADTOKEN")
+        state = self._make_state()
+
+        with patch.object(bot, "join_by_invite", return_value=None), \
+             patch.object(bot, "is_parent", return_value=False), \
+             patch.object(bot, "is_child", return_value=False), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.cmd_start(msg, state, member=None))
+
+        sent = self._sent(msg).lower()
+        assert "не найден" in sent or "найд" in sent
+        assert "семью" in sent or "код" in sent
+
+    def test_deep_link_forwards_fresh_member_to_menu(self):
+        """After joining, the menu must reflect the DB role (new-family parent)."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "/start TOKEN123")
+        state = self._make_state()
+        calls = []
+
+        async def fake_menu(message_or_callback, user_id, member=None):
+            calls.append(member)
+
+        with patch.object(bot, "join_by_invite",
+                          return_value={"family_id": 2, "role": "parent", "name": "Мама"}), \
+             patch.object(bot, "get_member",
+                          return_value={"role": "parent", "family_id": 2}), \
+             patch.object(bot, "send_main_menu", side_effect=fake_menu):
+            asyncio.run(bot.cmd_start(msg, state, member=None))
+
+        assert calls == [{"role": "parent", "family_id": 2}], \
+            "cmd_start must re-read the member after joining the family"
+
+    def test_input_invite_code_does_not_move_existing_member(self):
+        """The code-entry path must refuse to reassign a registered user."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "TOKEN123")
+        state = self._make_state("Registration:entering_invite_code")
+
+        with patch.object(bot, "join_by_invite") as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.input_invite_code(
+                msg, state, member={"role": "parent", "family_id": 2}))
+
+        m.assert_not_called()
+        menu.assert_awaited()
+        assert "уже в семь" in self._sent(msg).lower()
+
+    def test_input_invite_code_joins_unknown_user(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "TOKEN123")
+        state = self._make_state("Registration:entering_invite_code")
+
+        with patch.object(bot, "join_by_invite",
+                          return_value={"family_id": 2, "role": "child", "name": "Маша"}) as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.input_invite_code(msg, state, member=None))
+
+        m.assert_called_once_with(bot.DB_PATH, "TOKEN123", 700)
+        state.clear.assert_awaited()
+
+    def test_input_invite_code_unknown_token_keeps_retrying(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "NOPE")
+        state = self._make_state("Registration:entering_invite_code")
+
+        with patch.object(bot, "join_by_invite", return_value=None), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.input_invite_code(msg, state, member=None))
+
+        state.clear.assert_not_awaited()
+        menu.assert_not_awaited()
+        assert "не найден" in self._sent(msg).lower()
+
+    def test_input_family_name_creates_family_and_shows_invite(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._msg(700, "Ивановы")
+        state = self._make_state("Registration:entering_family_name")
+
+        with patch.object(bot, "create_family_with_owner", return_value=5) as m, \
+             patch.object(bot, "get_family_invite",
+                          return_value={"token": "PARENTTOK"}), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot.input_family_name(msg, state, member=None))
+
+        m.assert_called_once_with(bot.DB_PATH, 700, "Ивановы")
+        state.clear.assert_awaited()
+        assert "PARENTTOK" in self._sent(msg)
+
+    def test_input_family_name_blank_prompts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        msg = self._msg(700, "   ")
+        state = self._make_state("Registration:entering_family_name")
+
+        with patch.object(bot, "create_family_with_owner") as m:
+            asyncio.run(bot.input_family_name(msg, state, member=None))
+
+        m.assert_not_called()
+        state.clear.assert_not_awaited()
+        assert "название" in self._sent(msg).lower()
+
+    def test_registration_states_have_hints(self):
+        import bot
+        for s in ("Registration:entering_family_name",
+                  "Registration:entering_invite_code",
+                  "Registration:adding_child_name"):
+            assert s in bot._FSM_HINTS
+
+    def test_unknown_text_during_registration_hints(self):
+        """Unknown text mid-registration must get a hint, not the no-access wall."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        msg = self._msg(700, "привет")
+        state = self._make_state("Registration:entering_invite_code")
+
+        with patch.object(bot, "is_parent", return_value=False), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.catch_all(msg, state, member=None))
+
+        msg.answer.assert_called()
+        assert "cancel" in self._sent(msg).lower() or "код" in self._sent(msg).lower()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
