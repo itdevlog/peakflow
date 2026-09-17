@@ -214,12 +214,28 @@ def test_static_index_has_settings_screen():
 
 
 class TestWebRolesFromDb:
-    def test_member_of_new_family_gets_role_from_db(self):
+    def test_member_of_new_family_forbidden_until_2c(self):
+        """F1 interim gate: a non-family-#1 member has no Mini App access."""
         from database import create_family_with_owner
         _setup_db()
         create_family_with_owner(TEST_DB, 999, "Новые")
-        body = _client().get("/api/me", headers=_auth(999)).json()
-        assert body["role"] == "parent"
+        r = _client().get("/api/me", headers=_auth(999))
+        assert r.status_code == 403
+
+    def test_family_one_member_still_allowed(self):
+        """Family #1 members resolved from the DB are unaffected by the gate."""
+        from database import add_member
+        _setup_db()
+        add_member(TEST_DB, 555, 1, "parent", "Мама")
+        r = _client().get("/api/me", headers=_auth(555))
+        assert r.status_code == 200
+        assert r.json()["role"] == "parent"
+
+    def test_env_fallback_still_allowed(self):
+        """An .env-only family #1 user (no members row) keeps working."""
+        _setup_db()
+        r = _client().get("/api/me", headers=_auth(CHILD_ID))
+        assert r.status_code == 200
 
     def test_stranger_forbidden(self):
         _setup_db()

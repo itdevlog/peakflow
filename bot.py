@@ -56,6 +56,7 @@ from database import (
     list_child_cards,
     create_invite,
     delete_invite,
+    DEFAULT_FAMILY_ID,
 )
 
 import config as app_config
@@ -157,12 +158,43 @@ def _family_deny_text(member) -> str:
 
 
 class MemberMiddleware(BaseMiddleware):
-    """Inject the caller's member row (role, family_id) from the DB."""
+    """Inject the caller's member row (role, family_id) from the DB.
+
+    Interim gate until SP2C threads the active child/family through every
+    handler: all data access still targets family #1's global ``CHILD_ID``, so
+    members of any other family are denied everything except registration.
+    """
+
+    REG_SOON_MESSAGE = (
+        "🚧 Дневник для нескольких семей появится в следующем обновлении. "
+        "Регистрация уже сохранена."
+    )
+    REG_SOON_CALLBACK = "🚧 Дневник для новых семей появится позже"
+    _REG_CALLBACKS = {"reg_create", "reg_join"}
+
+    @classmethod
+    def _is_registration(cls, event) -> bool:
+        if isinstance(event, types.CallbackQuery):
+            return event.data in cls._REG_CALLBACKS
+        text = getattr(event, "text", None) or ""
+        return text.startswith("/start") or text.startswith("/cancel")
+
+    @classmethod
+    async def _deny(cls, event) -> None:
+        if isinstance(event, types.CallbackQuery):
+            await event.answer(cls.REG_SOON_CALLBACK, show_alert=True)
+        else:
+            await event.answer(cls.REG_SOON_MESSAGE)
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         uid = getattr(user, "id", None)
-        data["member"] = await _db(get_member, DB_PATH, uid) if uid else None
+        member = await _db(get_member, DB_PATH, uid) if uid else None
+        data["member"] = member
+        if member and member["family_id"] != DEFAULT_FAMILY_ID:
+            if not self._is_registration(event):
+                await self._deny(event)
+                return
         return await handler(event, data)
 
 
@@ -1473,7 +1505,7 @@ async def cb_del_child(callback: types.CallbackQuery, member=None):
     if not token:
         await callback.answer("❌ Некорректная карточка.", show_alert=True)
         return
-    ok = await _db(delete_invite, DB_PATH, token)
+    ok = await _db(delete_invite, DB_PATH, token, member["family_id"])
     if ok:
         await callback.answer("✅ Карточка удалена.", show_alert=True)
     else:

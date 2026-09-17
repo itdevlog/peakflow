@@ -862,9 +862,11 @@ def list_child_cards(db_path: str, family_id: int) -> list:
     return [dict(r) for r in rows]
 
 
-def delete_invite(db_path: str, token: str) -> bool:
+def delete_invite(db_path: str, token: str, family_id: int = DEFAULT_FAMILY_ID) -> bool:
     conn = get_connection(db_path)
-    cur = conn.execute("DELETE FROM invites WHERE token = ?", (token,))
+    cur = conn.execute(
+        "DELETE FROM invites WHERE token = ? AND family_id = ?", (token, family_id)
+    )
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()

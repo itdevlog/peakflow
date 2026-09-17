@@ -2495,9 +2495,20 @@ class TestInvites:
         from database import create_family, create_invite, get_invite, delete_invite
         fid = create_family(TEST_DB, "Семья")
         token = create_invite(TEST_DB, fid, "parent")
-        assert delete_invite(TEST_DB, token) is True
+        assert delete_invite(TEST_DB, token, fid) is True
         assert get_invite(TEST_DB, token) is None
-        assert delete_invite(TEST_DB, token) is False
+        assert delete_invite(TEST_DB, token, fid) is False
+
+    def test_delete_invite_scoped_to_family(self):
+        """F2: a token cannot be deleted through a different family's scope."""
+        from database import create_family, create_invite, get_invite, delete_invite
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        token = create_invite(TEST_DB, f2, "child", "Маша")
+        assert delete_invite(TEST_DB, token, f1) is False
+        assert get_invite(TEST_DB, token) is not None
+        assert delete_invite(TEST_DB, token, f2) is True
+        assert get_invite(TEST_DB, token) is None
 
     def test_regenerate_family_invite_replaces(self):
         from database import (create_family, create_invite, get_family_invite,
@@ -2611,6 +2622,90 @@ class TestMemberMiddleware:
         event.from_user = None
         asyncio.run(bot.MemberMiddleware()(handler, event, {}))
         assert captured["member"] is None
+
+
+class TestMemberGateNonFamilyOne:
+    """F1 interim gate: non-family-#1 members have no data access.
+
+    Only registration survives; every other message/callback must be answered
+    by the middleware and never reach its handler. Family #1 and the
+    .env-fallback (member=None) must be untouched.
+    """
+
+    @staticmethod
+    def _run(event):
+        import asyncio
+        import bot
+        called = []
+
+        async def handler(ev, data):
+            called.append(True)
+            return "ok"
+
+        asyncio.run(bot.MemberMiddleware()(handler, event, {}))
+        return called
+
+    @staticmethod
+    def _message(uid, text):
+        from unittest.mock import AsyncMock, MagicMock
+        msg = MagicMock()
+        msg.from_user.id = uid
+        msg.text = text
+        msg.answer = AsyncMock()
+        return msg
+
+    @staticmethod
+    def _callback(uid, data):
+        from aiogram import types
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock(spec=types.CallbackQuery)
+        # spec() hides pydantic fields (from_user/data) from dir(); lift the
+        # restriction so the mock still behaves like a CallbackQuery.
+        cb._mock_methods = None
+        cb.from_user.id = uid
+        cb.data = data
+        cb.answer = AsyncMock()
+        return cb
+
+    def _patch_member(self, family_id):
+        from unittest.mock import patch
+        import bot
+        return patch.object(bot, "get_member",
+                            return_value={"role": "parent", "family_id": family_id})
+
+    def test_new_family_message_denied_and_handler_skipped(self):
+        msg = self._message(999, "status")
+        with self._patch_member(2):
+            assert self._run(msg) == []
+        msg.answer.assert_awaited_once()
+        assert "следующем обновлении" in msg.answer.await_args.args[0]
+
+    def test_new_family_callback_denied_and_handler_skipped(self):
+        cb = self._callback(999, "settings")
+        with self._patch_member(2):
+            assert self._run(cb) == []
+        cb.answer.assert_awaited_once()
+        assert cb.answer.await_args.kwargs.get("show_alert") is True
+
+    def test_new_family_start_and_cancel_pass_through(self):
+        for text in ("/start", "/start TOK", "/cancel"):
+            with self._patch_member(2):
+                assert self._run(self._message(999, text)) == [True], text
+
+    def test_new_family_registration_callbacks_pass_through(self):
+        for data in ("reg_create", "reg_join"):
+            with self._patch_member(2):
+                assert self._run(self._callback(999, data)) == [True], data
+
+    def test_family_one_member_still_reaches_handler(self):
+        with self._patch_member(1):
+            assert self._run(self._message(111, "status")) == [True]
+
+    def test_member_none_still_reaches_handler(self):
+        from unittest.mock import patch
+        import bot
+        with patch.object(bot, "get_member", return_value=None):
+            assert self._run(self._message(111, "status")) == [True]
 
 
 class TestHandlerRolesFromDb:
@@ -3260,7 +3355,7 @@ class TestFamilyManagement:
              patch.object(bot, "list_child_cards", return_value=[]):
             asyncio.run(bot.cb_del_child(cb, member={"role": "parent", "family_id": 2}))
 
-        d.assert_called_once_with(bot.DB_PATH, "TOK")
+        d.assert_called_once_with(bot.DB_PATH, "TOK", 2)
         cb.answer.assert_awaited()
 
     def test_del_child_malformed_token_alerts(self):
@@ -3286,6 +3381,27 @@ class TestFamilyManagement:
             asyncio.run(bot.cb_del_child(cb, member={"role": "child", "family_id": 2}))
 
         d.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_del_child_cannot_delete_other_family_card(self):
+        """F2: a family-A parent cannot delete a family-B child card."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+        from database import create_family, create_invite, get_invite, list_child_cards
+
+        family_a = create_family(TEST_DB, "A")
+        family_b = create_family(TEST_DB, "B")
+        token_b = create_invite(TEST_DB, family_b, "child", "Маша")
+
+        cb = self._cb(500, f"del_child_{token_b}")
+        with patch.object(bot, "DB_PATH", TEST_DB), \
+             patch.object(bot, "respond"):
+            asyncio.run(bot.cb_del_child(
+                cb, member={"role": "parent", "family_id": family_a}))
+
+        assert get_invite(TEST_DB, token_b) is not None
+        assert len(list_child_cards(TEST_DB, family_b)) == 1
         cb.answer.assert_awaited()
 
     def test_members_no_member_env_parent_prompts(self):
@@ -3494,7 +3610,7 @@ class TestFamilyManagement:
             b.session = AsyncMock(return_value=None)
             with patch.object(bot, "DB_PATH", TEST_DB), \
                  patch.object(bot, "get_member",
-                              MagicMock(return_value={"role": "parent", "family_id": 2})), \
+                              MagicMock(return_value={"role": "parent", "family_id": 1})), \
                  patch.object(bot, "delete_invite",
                               MagicMock(return_value=True)) as d, \
                  patch.object(bot, "list_child_cards", MagicMock(return_value=[])):
@@ -3502,7 +3618,7 @@ class TestFamilyManagement:
             return d
 
         d = asyncio.run(run())
-        d.assert_called_once_with(TEST_DB, "TOK")
+        d.assert_called_once_with(TEST_DB, "TOK", 1)
 
 
 if __name__ == "__main__":

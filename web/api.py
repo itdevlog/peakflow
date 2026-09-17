@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from database import (
+    DEFAULT_FAMILY_ID,
     add_or_replace_measurement,
     backup_db,
     delete_measurement,
@@ -154,9 +155,11 @@ def create_app(services: dict) -> FastAPI:
         uid = user.get("id")
         try:
             member = get_member(config.DB_PATH, uid)
-        except sqlite3.DatabaseError:
-            # Uninitialized/edge DB: behave as "not a member" (403 via fallback)
-            # instead of leaking a 500.
+        except sqlite3.OperationalError as e:
+            # Uninitialized/locked DB: behave as "not a member" (403 via fallback)
+            # instead of leaking a 500. Narrow to OperationalError so real
+            # corruption/IO faults are not silently masked.
+            logger.warning("Не удалось прочитать участника из БД: %s", e)
             member = None
         if member:
             role = member["role"]
@@ -169,6 +172,11 @@ def create_app(services: dict) -> FastAPI:
                 role, family_id = "parent", 1
             else:
                 raise HTTPException(403, "Нет доступа")
+        # Interim gate until SP2C threads the active child/family through every
+        # query: all data access still targets family #1's global CHILD_ID, so
+        # members of any other family must not reach it.
+        if member and member["family_id"] != DEFAULT_FAMILY_ID:
+            raise HTTPException(403, "Дневник для новых семей появится позже")
         return {"user": user, "role": role, "family_id": family_id, "member": member}
 
     def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
