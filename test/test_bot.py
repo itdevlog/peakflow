@@ -2515,5 +2515,54 @@ class TestInvites:
         assert get_family_invite(TEST_DB, fid) is None
 
 
+class TestRegistrationAccessors:
+    def test_create_family_with_owner(self):
+        from database import create_family_with_owner, get_member, get_family_invite
+        fid = create_family_with_owner(TEST_DB, 500, "Ивановы")
+        m = get_member(TEST_DB, 500)
+        assert m["family_id"] == fid and m["role"] == "parent" and m["name"] == "Ивановы"
+        assert get_family_invite(TEST_DB, fid) is not None
+
+    def test_create_family_idempotent(self):
+        from database import create_family_with_owner, get_member
+        fid1 = create_family_with_owner(TEST_DB, 500, "Ивановы")
+        fid2 = create_family_with_owner(TEST_DB, 500, "Другое")
+        assert fid1 == fid2
+        assert get_member(TEST_DB, 500)["family_id"] == fid1
+
+    def test_join_parent_invite(self):
+        from database import create_family_with_owner, get_family_invite, join_by_invite, get_member
+        fid = create_family_with_owner(TEST_DB, 500, "Ивановы")
+        token = get_family_invite(TEST_DB, fid)["token"]
+        res = join_by_invite(TEST_DB, token, 600)
+        assert res == {"family_id": fid, "role": "parent", "name": "Родитель"}
+        assert get_member(TEST_DB, 600)["role"] == "parent"
+
+    def test_join_child_card_uses_card_name(self):
+        from database import (create_family_with_owner, create_invite,
+                              join_by_invite, get_member, get_family)
+        fid = create_family_with_owner(TEST_DB, 500, "Ивановы")
+        token = create_invite(TEST_DB, fid, "child", "Маша")
+        res = join_by_invite(TEST_DB, token, 700)
+        assert res["role"] == "child" and res["name"] == "Маша"
+        assert get_member(TEST_DB, 700)["name"] == "Маша"
+
+    def test_join_unknown_token_returns_none(self):
+        from database import join_by_invite
+        assert join_by_invite(TEST_DB, "nope", 700) is None
+
+    def test_join_is_idempotent(self):
+        from database import create_family_with_owner, get_family_invite, join_by_invite, get_member
+        fid = create_family_with_owner(TEST_DB, 500, "Ивановы")
+        token = get_family_invite(TEST_DB, fid)["token"]
+        join_by_invite(TEST_DB, token, 600)
+        join_by_invite(TEST_DB, token, 600)
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        n = conn.execute("SELECT COUNT(*) FROM members WHERE telegram_id = 600").fetchone()[0]
+        conn.close()
+        assert n == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

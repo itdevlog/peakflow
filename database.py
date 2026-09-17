@@ -880,6 +880,65 @@ def regenerate_family_invite(db_path: str, family_id: int) -> str:
 
 
 # ============================================================================
+# Registration (atomic family creation / invite join)
+# ============================================================================
+def create_family_with_owner(db_path: str, telegram_id: int, name: str) -> int:
+    """Create a family with the caller as parent. Idempotent per telegram_id."""
+    existing = get_member(db_path, telegram_id)
+    if existing:
+        return existing["family_id"]
+    conn = get_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute("INSERT INTO families (name) VALUES (?)", (name,))
+        fid = cur.lastrowid
+        conn.execute(
+            "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', ?)",
+            (telegram_id, fid, name)
+        )
+        token = secrets.token_urlsafe(8)
+        conn.execute(
+            "INSERT INTO invites (token, family_id, role, name) VALUES (?, ?, 'parent', '')",
+            (token, fid)
+        )
+        conn.commit()
+        return fid
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def join_by_invite(db_path: str, token: str, telegram_id: int,
+                   name: Optional[str] = None) -> Optional[dict]:
+    """Join a family by invite token. Returns {family_id, role, name} or None."""
+    invite = get_invite(db_path, token)
+    if not invite:
+        return None
+    role = invite["role"]
+    member_name = name if name is not None else (
+        invite["name"] or ("Родитель" if role == "parent" else "Ребёнок")
+    )
+    conn = get_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
+            "role = excluded.role, name = excluded.name",
+            (telegram_id, invite["family_id"], role, member_name)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"family_id": invite["family_id"], "role": role, "name": member_name}
+
+
+# ============================================================================
 # Reminder hours (configurable via settings)
 # ============================================================================
 REMINDER_HOURS_DEFAULT = {
