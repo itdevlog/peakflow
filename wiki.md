@@ -1,7 +1,8 @@
 # 📖 Wiki — Telegram-бот «Пикфлоуметр» (PeakFlow Bot)
 
 > Полная документация логики работы бота по фактическому коду (`bot.py`, `config.py`, `database.py`).
-> Бот для семьи **1 ребёнок + 2 родителя**: учёт пиковой скорости выдоха (ПСВ/PEF, л/мин) по пикфлоуметру.
+> Мульти-семейный (тенантный) сервис: родители + один или несколько детей; у каждого
+> родителя — свой **активный ребёнок**, все данные изолированы по семье.
 
 ---
 
@@ -127,8 +128,8 @@ peakflow/
 
 | Роль | Как определяется | Возможности |
 |------|------------------|-------------|
-| 👶 Ребёнок | `member["role"] == "child"` | «💨 Измерение», свой график и статистика |
-| 👨‍👧 Родитель | `member["role"] == "parent"` | Всё: измерение, история, график, сводка, неделя, настройки, участники/дети, редактирование/удаление записей, экспорт |
+| 👶 Ребёнок | `member["role"] == "child"` | «💨 Измерение», свой график и статистика; активный ребёнок = он сам |
+| 👨‍👧 Родитель | `member["role"] == "parent"` | Всё: измерение, история, график, сводка, неделя, настройки, участники/дети, выбор активного ребёнка, редактирование/удаление записей, экспорт |
 | Неизвестный | нет строки `members` и нет в `.env` | экран регистрации на `/start` |
 
 **Инфраструктура:**
@@ -139,6 +140,15 @@ peakflow/
   на `.env`. `_is_parent_member(member, uid)` заменяет `is_parent(uid)` в проверках.
 - `_can_manage_family(member, uid)` — строгая проверка для экранов семьи: требует
   реальную строку `member` с ролью `parent` (не env-fallback).
+
+**Тенант-контекст** (все data-вызовы идут только через него):
+
+| Хелпер | Возвращает | Правило |
+|--------|-----------|---------|
+| `_ctx(member)` | `(family_id, child_id)` | `member=None` → семья №1 из `.env`; родитель → `resolve_active_child`, ребёнок → сам |
+| `_child_name(member, child_id, child_name=None)` | имя активного ребёнка | `member=None` → env `CHILD_NAME`; иначе имя из `members`, fallback «Ребёнок» |
+| `_family_parents(member, family_id)` | `list[int]` | Получатели уведомлений — родители семьи (`list_family_parents`); fallback — env `PARENT_IDS` |
+| `_no_child_reply(target, member)` | — | Подсказка «добавьте ребёнка в разделе „Дети“», если у семьи нет детей |
 
 Проверки прав в хендлерах:
 
@@ -158,7 +168,23 @@ peakflow/
   семью** — и при вводе кода, и при deep-link `/start <token>`.
 - «⚙️ Настройки» → «👨‍👩‍👧 Участники» (invite-код, перегенерация) и «🧒 Дети»
   (карточки детей: добавить/удалить, каждая с токеном).
-- Мини-App: `_resolve_user` берёт роль и `family_id` из `members`; неизвестный → 403.
+- Мини-App: `_resolve_user` берёт роль, `family_id`, `active_child_id` и список детей
+  из `members`; неизвестный → 403. Временный gate 2B (только семья №1) снят.
+
+### 4b. Активный ребёнок (v4)
+
+- Родитель хранит выбор в `members.active_child_id`; `resolve_active_child` проверяет,
+  что выбранный ребёнок принадлежит семье, иначе берёт первого ребёнка; у ребёнка
+  активный = он сам.
+- Бот: при `count_family_children(family_id) > 1` в главном меню появляется кнопка
+  «🧒 Ребёнок» (`pick_child`); список детей с отметкой «✅» текущего
+  (`set_child_<telegram_id>`) → `set_active_child`. В разделе «🧒 Дети» активный
+  тоже помечается.
+- Mini App: селектор в шапке при >1 ребёнке (только родитель), `PUT /api/active-child`;
+  при 0 детей — подсказка «Добавьте ребёнка в боте».
+- Ребёнок не может выбрать активного ребёнка (запись доступна только родителю).
+- Если у семьи нет детей (`child_id is None`) — data-экраны показывают подсказку,
+  данные пустые (`/api/status` `today=[]`, статистика 0).
 
 ---
 
@@ -166,9 +192,10 @@ peakflow/
 
 Подключение (`database.py: get_connection`): `sqlite3.connect` + `row_factory=Row` + `PRAGMA journal_mode=WAL` — **новое соединение на каждый запрос**.
 
-Схема — **v3 (мульти-тенант + регистрация)**: `SCHEMA_VERSION = 3`, `DEFAULT_FAMILY_ID = 1`.
-Данные изолированы по семье; замеры принадлежат паре `(family_id, child_id)`;
-таблица `invites` хранит приглашения (родительские и карточки детей).
+Схема — **v4 (мульти-тенант + регистрация + активный ребёнок)**: `SCHEMA_VERSION = 4`,
+`DEFAULT_FAMILY_ID = 1`. Данные изолированы по семье; замеры принадлежат паре
+`(family_id, child_id)`; таблица `invites` хранит приглашения (родительские и карточки
+детей); `members.active_child_id` — выбранный родителем ребёнок.
 
 ### Правило tenant-aware доступа
 
@@ -178,13 +205,14 @@ peakflow/
 остаются валидными (single-family режим). Исключение — `mark_reminder_sent` /
 `was_reminder_sent`: там `child_id` **обязателен** (входит в ключ
 `reminders_sent(child_id, date)`), поэтому напоминания scoped по ребёнку.
+`backup_family_db` — family-scoped бэкап (см. ниже).
 
-### Таблицы `families` и `members` (v2)
+### Таблицы `families` и `members` (v2, `active_child_id` — v4)
 
 | Таблица | Поля |
 |---------|------|
 | `families` | `id` (PK), `name`, `created_at`; семья №1 — `DEFAULT_FAMILY_ID` |
-| `members` | `telegram_id` (PK), `family_id` (FK), `role` CHECK `parent`/`child`, `name`, `created_at`; индекс `idx_members_family` |
+| `members` | `telegram_id` (PK), `family_id` (FK), `role` CHECK `parent`/`child`, `name`, `active_child_id` (v4, NULL → первый ребёнок), `created_at`; индекс `idx_members_family` |
 
 ### Таблица `measurements`
 
@@ -221,9 +249,10 @@ peakflow/
 ### Миграции в `init_db()`
 
 - `CREATE TABLE IF NOT EXISTS` для `families`, `members` и `measurements` v2.
-- **Версия схемы:** `PRAGMA user_version` = `SCHEMA_VERSION` (2).
+- **Версия схемы:** `PRAGMA user_version` = `SCHEMA_VERSION` (4).
 - **Бэкап:** на непустой v1-БД перед миграцией `backup_db` пишет `<db>.v1.bak`; при ошибке бэкапа миграция прерывается.
 - **Миграция v1→v2:** `measurements.user_id` → `child_id` + `family_id=1`; `settings` и `reminders_sent` перестраиваются паттерном new→copy→drop→rename (SQLite не меняет PK через `ALTER`), данные переносятся в семью №1 / `CHILD_ID`. Всё в одной транзакции, идемпотентно.
+- **Миграция v3→v4 (`_add_active_child_v4`):** `ALTER TABLE members ADD COLUMN active_child_id INTEGER` в try/except — идемпотентно.
 - **Сидинг семьи №1:** из конфига `.env` (`CHILD_ID`/`PARENT_IDS`/`CHILD_NAME`) — **конфиг авторитетен** для перечисленных в нём ID; legacy-таблица `users` лишь добивает ID, которых нет в конфиге (`INSERT OR IGNORE`).
 - Legacy-таблицы (`users`, `parent_child_links`) не удаляются, кодом после миграции не читаются.
 
@@ -234,7 +263,7 @@ peakflow/
 
 | Функция | Возвращает / делает |
 |---------|---------------------|
-| `init_db(path)` | Схема v2, миграция, бэкап `*.v1.bak`, сидинг семьи №1, дефолт `target_pef`, индекс `idx_meas_family_child_time` |
+| `init_db(path)` | Схема v4, миграции (v1→v2, invites v3, active_child v4), бэкап `*.v1.bak`, сидинг семьи №1, дефолт `target_pef`, индекс `idx_meas_family_child_time` |
 | `add_measurement(db, pef, tod, child_id, by, source, family_id)` | INSERT; возвращает `id` |
 | `add_or_replace_measurement(db, pef, tod, child_id, by, force, source, family_id)` | Атомарно (`BEGIN IMMEDIATE`) вставка/замена авто-записи; `(id, status)` `ok`/`exists` |
 | `edit_measurement(db, mid, val, child_id, family_id)` | UPDATE по `id`+`child_id`+`family_id`; bool |
@@ -254,6 +283,10 @@ peakflow/
 | `get_effective_target(db, fallback, family_id)` | Целевая ПСВ из `settings` → fallback → 300 |
 | `get_reminder_hours(db, family_id)` | Часы напоминаний (`REMINDER_HOURS_DEFAULT` + `reminder_*` из settings) |
 | `create_family` / `get_family` / `add_member` / `get_member` / `list_family_children` | Доступоры мульти-тенанта |
+| `list_family_parents(db, family_id)` | Родители семьи (получатели уведомлений) |
+| `count_family_children(db, family_id)` | Число детей семьи |
+| `set_active_child(db, telegram_id, child_id)` / `resolve_active_child(db, member)` | Выбор/резолв активного ребёнка (ребёнок → сам, родитель → выбранный/первый, нет детей → None); `set` валидирует роль и семью |
+| `backup_family_db(db, dest, family_id)` | Family-scoped `.backup`: вся схема, но только строки одной семьи (families/members/measurements/settings/invites/reminders_sent) — не утекают данные других семей |
 
 ---
 
@@ -596,6 +629,11 @@ loop каждые 60 секунд:
     исключения ловятся и логируются (цикл не умирает)
 ```
 
+> **Ограничение (SP3C):** планировщик работает только для **семьи №1** из `.env`
+> (`_ctx(None)`/`_child_name(None, child_id)`): напоминания ребёнку, эскалация
+> родителям и недельный отчёт не обходят зарегистрированные семьи. Мульти-семейный
+> обход — вне scope SP3C (2D/Фаза 3).
+
 Дедубликация — по таблице `reminders_sent` (один флаг на дату на тип события). Двухминутное окно `is_reminder_minute()` компенсирует дрейф `sleep(60)`: точный тик 10:00:00 не гарантирован, но любой тик в первые 2 минуты часа сработает; повторные срабатывания подавляются флагами.
 
 ---
@@ -632,6 +670,8 @@ loop каждые 60 секунд:
 | `settings` | `cb_settings` | родитель | Экран настроек |
 | `change_target` | `cb_change_target` | родитель | Ввод новой цели (FSM-текст) |
 | `export` | `cb_export` | все (кнопка — в настройках) | CSV-документ |
+| `pick_child` | `cb_pick_child` | родитель | Список детей семьи (отметка ✅ активного) |
+| `set_child_<id>` | `cb_set_child` | родитель | Сделать ребёнка активным → главное меню |
 | `noop` | `cb_noop` | все | Пустой ACK (кнопка «N/M») |
 
 Регистрация идёт в порядке следования в коде; для `del_`/`del_confirm_` порядок критичен.
@@ -728,10 +768,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 330 тестов
+python -m pytest test/ -v         # 412 тестов
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД, миграция v1→v2 и изоляция семей, а также Mini App (auth initData, чтение, запись, настройки, экспорт, бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v4), миграции, изоляция семей, выбор активного ребёнка в боте и Mini App, а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
@@ -745,15 +785,16 @@ aiogram (отдельного сервиса/порта процессов не�
 
 | Модуль | Что делает |
 |--------|-----------|
-| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/summary`, `/history`, `/chart`, `/stats`, `/weekly`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`) |
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`) |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
 #### Mini App (SP2a): чтение
 
 - `web/auth.py` — проверка HMAC-подписи Telegram `initData` (заголовок
-  `X-Telegram-Init-Data`); доступ только у `CHILD_ID` и `PARENT_IDS`, иначе 403.
-- `web/api.py` — read-only эндпоинты: `/api/me`, `/api/status`, `/api/summary`,
-  `/api/history`, `/api/chart`, `/api/stats`, `/api/weekly`.
+  `X-Telegram-Init-Data`); доступ по строке `members` (env `CHILD_ID`/`PARENT_IDS` —
+  fallback семьи №1), иначе 403.
+- `web/api.py` — read-only эндпоинты: `/api/me`, `/api/status`,
+  `/api/history`, `/api/chart`, `/api/stats`.
 - `web/static/` — `index.html`, `app.js` (vanilla JS + Telegram WebApp SDK,
   интерактивный график на `<canvas>`), `style.css`.
 - Кнопка «💨 Дневник» ставится в `bot._setup_menu_button()`, если задан
@@ -773,12 +814,28 @@ aiogram (отдельного сервиса/порта процессов не�
 - `GET/PUT /api/settings`, `PUT /api/settings/target` (100–800),
   `PUT /api/settings/reminders` (часы 0–23).
 - `GET /api/export/periods`, `GET /api/export/csv?period=all|YYYY-MM`
-  (UTF-8 BOM, те же колонки, что в боте), `GET /api/backup` (согласованный
-  `sqlite3.backup`, файл удаляется после отдачи).
+  (UTF-8 BOM, те же колонки, что в боте), `GET /api/backup` (`backup_family_db` —
+  family-scoped бэкап, файл удаляется после отдачи).
 - `report.py` — общие чистые хелперы (`pef_zone`, `pct_of`, `month_title`,
   `parse_month`, `build_csv_content`, `display_name`); `bot.py` ре-экспортирует
   их для совместимости.
 - Фронтенд: таб «⚙️ Настройки» (скрыт у ребёнка), скачивание через fetch+blob.
+
+#### Mini App (SP3C): активный ребёнок и tenant-aware данные
+
+- `_resolve_user` берёт роль, `family_id`, `active_child_id` (`resolve_active_child`)
+  и `children` (`list_family_children`) из `members`; временный gate 2B снят —
+  семьи ≠ №1 обслуживаются. `member=None` → семья №1 из `.env`.
+- `/api/me` отдаёт `children` и `active_child_id`; `GET /api/children` — список детей
+  семьи; `PUT /api/active-child` (`{child_id}`, только родитель) → `set_active_child`,
+  иначе 404.
+- Все data-эндпоинты (`/api/status`, `/api/history`, `/api/chart`, `/api/stats`,
+  `/api/settings`, `/api/export/*`, `/api/backup`) вызывают функции БД с
+  `family_id`/`active_child_id`; без детей — пустые данные / 409 при добавлении.
+- `web/notify.py` шлёт уведомления родителям семьи и с именем активного ребёнка.
+- Фронтенд (`app.js`): из `/api/me` сохраняются `state.children`/`state.activeChildId`;
+  при >1 ребёнке (родитель) в шапке `<select>`, смена → `PUT /api/active-child` →
+  перезагрузка текущего экрана; при 0 детей — подсказка «Добавьте ребёнка в боте».
 
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `127.0.0.1`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
