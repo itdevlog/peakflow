@@ -4,8 +4,10 @@ import hmac
 import json
 import os
 import sqlite3
+import tempfile
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import quote
 
 import pytest
@@ -214,13 +216,14 @@ def test_static_index_has_settings_screen():
 
 
 class TestWebRolesFromDb:
-    def test_member_of_new_family_forbidden_until_2c(self):
-        """F1 interim gate: a non-family-#1 member has no Mini App access."""
+    def test_member_of_new_family_gets_role_from_db(self):
+        """SP3C: the family-#1 gate is gone; family #2 members are served."""
         from database import create_family_with_owner
         _setup_db()
         create_family_with_owner(TEST_DB, 999, "Новые")
         r = _client().get("/api/me", headers=_auth(999))
-        assert r.status_code == 403
+        assert r.status_code == 200
+        assert r.json()["role"] == "parent"
 
     def test_family_one_member_still_allowed(self):
         """Family #1 members resolved from the DB are unaffected by the gate."""
@@ -241,3 +244,156 @@ class TestWebRolesFromDb:
         _setup_db()
         r = _client().get("/api/me", headers=_auth(888))
         assert r.status_code == 403
+
+
+def _family_two(owner=999, child=700, name="Маша"):
+    """Create family #2 with one child; returns its family id."""
+    from database import add_member, create_family_with_owner
+    fid = create_family_with_owner(TEST_DB, owner, "Новые")
+    add_member(TEST_DB, child, fid, "child", name)
+    return fid
+
+
+class TestWebTenantScoping:
+    """SP3C: Mini App data must follow the caller's family and active child."""
+
+    def test_children_endpoint_lists_family_children(self):
+        _setup_db()
+        _family_two()
+        body = _client().get("/api/children", headers=_auth(999)).json()
+        assert [c["telegram_id"] for c in body["children"]] == [700]
+        assert body["active_child_id"] == 700
+
+    def test_me_exposes_children_and_active_child(self):
+        _setup_db()
+        _family_two()
+        body = _client().get("/api/me", headers=_auth(999)).json()
+        assert body["role"] == "parent"
+        assert body["active_child_id"] == 700
+        assert [c["telegram_id"] for c in body["children"]] == [700]
+        assert body["child_name"] == "Маша"
+
+    def test_children_isolated_from_family_one(self):
+        _setup_db()
+        _family_two()
+        body = _client().get("/api/children", headers=_auth(999)).json()
+        assert all(c["family_id"] != 1 for c in body["children"])
+
+    def test_status_scoped_to_active_child(self):
+        from database import add_measurement
+        _setup_db()
+        fid = _family_two()
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        add_measurement(TEST_DB, 210, "morning", 700, 700, family_id=fid)
+        body = _client().get("/api/status", headers=_auth(999)).json()
+        assert body["today"], "family #2 must see its own measurement"
+        assert all(m["child_id"] == 700 for m in body["today"])
+        assert body["last"]["child_id"] == 700
+
+    def test_history_scoped_to_active_child(self):
+        from database import add_measurement
+        _setup_db()
+        fid = _family_two()
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        add_measurement(TEST_DB, 210, "morning", 700, 700, family_id=fid)
+        add_measurement(TEST_DB, 220, "evening", 700, 700, family_id=fid)
+        body = _client().get("/api/history?page=1&per_page=50", headers=_auth(999)).json()
+        assert body["total"] == 2
+        assert all(it["child_id"] == 700 for it in body["items"])
+
+    def test_stats_scoped_to_active_child(self):
+        from database import add_measurement
+        _setup_db()
+        fid = _family_two()
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        add_measurement(TEST_DB, 210, "morning", 700, 700, family_id=fid)
+        body = _client().get("/api/stats", headers=_auth(999)).json()
+        assert body["total"] == 1
+        assert body["avg"] == 210
+
+    def test_settings_scoped_to_active_child(self):
+        from database import add_measurement
+        _setup_db()
+        fid = _family_two()
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        add_measurement(TEST_DB, 210, "morning", 700, 700, family_id=fid)
+        body = _client().get("/api/settings", headers=_auth(999)).json()
+        assert body["total"] == 1
+        assert body["child_name"] == "Маша"
+
+    def test_active_child_switch_changes_data(self):
+        from database import add_member, add_measurement
+        _setup_db()
+        fid = _family_two()
+        add_member(TEST_DB, 701, fid, "child", "Петя")
+        add_measurement(TEST_DB, 210, "morning", 700, 700, family_id=fid)
+        add_measurement(TEST_DB, 230, "morning", 701, 701, family_id=fid)
+        c = _client()
+        body = c.get("/api/status", headers=_auth(999)).json()
+        assert all(m["child_id"] == 700 for m in body["today"])
+        r = c.put("/api/active-child", json={"child_id": 701}, headers=_auth(999))
+        assert r.status_code == 200, r.text
+        body = c.get("/api/status", headers=_auth(999)).json()
+        assert all(m["child_id"] == 701 for m in body["today"])
+
+    def test_active_child_switch_parent_only(self):
+        _setup_db()
+        _family_two()
+        r = _client().put("/api/active-child", json={"child_id": 700}, headers=_auth(700))
+        assert r.status_code == 403
+
+    def test_active_child_rejects_foreign_child(self):
+        _setup_db()
+        _family_two()
+        r = _client().put("/api/active-child", json={"child_id": 111}, headers=_auth(999))
+        assert r.status_code == 404
+
+    def test_backup_contains_only_active_family(self):
+        from database import add_measurement
+        _setup_db()
+        fid = _family_two()
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        add_measurement(TEST_DB, 210, "morning", 700, 700, family_id=fid)
+        r = _client().get("/api/backup", headers=_auth(999))
+        assert r.status_code == 200, r.text
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with open(path, "wb") as f:
+                f.write(r.content)
+            conn = sqlite3.connect(path)
+            try:
+                fams = [row[0] for row in conn.execute("SELECT id FROM families")]
+                meas = [row[0] for row in conn.execute("SELECT family_id FROM measurements")]
+            finally:
+                conn.close()
+        finally:
+            os.remove(path)
+        assert fams == [fid]
+        assert meas == [fid]
+
+    def test_add_notifies_only_family_parents(self):
+        from database import add_member
+        _setup_db()
+        fid = _family_two()
+        add_member(TEST_DB, 998, fid, "parent", "Папа")
+        bot = SimpleNamespace(send_message=AsyncMock())
+        client = TestClient(create_app({"config": _config(), "bot": bot}))
+        r = client.post("/api/measurements", json={"pef": 210}, headers=_auth(700))
+        assert r.status_code == 200, r.text
+        sent = sorted(call.args[0] for call in bot.send_message.await_args_list)
+        assert sent == [998, 999]
+
+    def test_no_children_yields_empty_data(self):
+        from database import create_family_with_owner
+        _setup_db()
+        fid = create_family_with_owner(TEST_DB, 999, "Новые")
+        assert fid != 1
+        c = _client()
+        me = c.get("/api/me", headers=_auth(999)).json()
+        assert me["active_child_id"] is None
+        assert me["children"] == []
+        assert c.get("/api/status", headers=_auth(999)).json()["today"] == []
+        assert c.get("/api/stats", headers=_auth(999)).json()["total"] == 0
+        assert c.get("/api/history", headers=_auth(999)).json()["total"] == 0
+
