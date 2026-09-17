@@ -475,7 +475,29 @@ async def cb_reg_join(callback: types.CallbackQuery, state: FSMContext, member=N
     )
 
 
-@router.message(Registration.entering_family_name, F.text)
+# ---------------------------------------------------------------------------
+# /cancel — exit any FSM state
+# ---------------------------------------------------------------------------
+@router.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext, member=None):
+    uid = message.from_user.id
+    current = await state.get_state()
+    # Always clear the FSM state first: an unknown user (mid-registration) must
+    # be able to escape a text state with /cancel.
+    await state.clear()
+    if current:
+        await message.answer("❌ Действие отменено.")
+    if _role(member, uid) == "unknown":
+        await _show_registration(message)
+        return
+    await send_main_menu(message, uid, member=member)
+
+
+# ---------------------------------------------------------------------------
+# Registration text input — registered AFTER cmd_cancel so commands such as
+# /cancel win the routing (bare F.text would otherwise swallow them).
+# ---------------------------------------------------------------------------
+@router.message(Registration.entering_family_name, F.text, ~F.text.startswith("/"))
 async def input_family_name(message: types.Message, state: FSMContext, member=None):
     name = (message.text or "").strip()[:100]
     if not name:
@@ -497,7 +519,7 @@ async def input_family_name(message: types.Message, state: FSMContext, member=No
     logger.info("Пользователь %d создал семью %d", message.from_user.id, family_id)
 
 
-@router.message(Registration.entering_invite_code, F.text)
+@router.message(Registration.entering_invite_code, F.text, ~F.text.startswith("/"))
 async def input_invite_code(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
     if _role(member, uid) != "unknown":
@@ -519,21 +541,6 @@ async def input_invite_code(message: types.Message, state: FSMContext, member=No
     member = await _db(get_member, DB_PATH, uid)
     await send_main_menu(message, uid, member=member)
     logger.info("Пользователь %d вошёл по коду как %s", uid, result["role"])
-
-
-# ---------------------------------------------------------------------------
-# /cancel — exit any FSM state
-# ---------------------------------------------------------------------------
-@router.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext, member=None):
-    uid = message.from_user.id
-    if _role(member, uid) == "unknown":
-        return
-    current = await state.get_state()
-    await state.clear()
-    if current:
-        await message.answer("❌ Действие отменено.")
-    await send_main_menu(message, uid, member=member)
 
 
 # ---------------------------------------------------------------------------

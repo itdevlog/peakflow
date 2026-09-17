@@ -2979,5 +2979,64 @@ class TestRegistrationFlow:
         assert "cancel" in self._sent(msg).lower() or "код" in self._sent(msg).lower()
 
 
+class TestRegistrationCancelRouting:
+    """Regression: /cancel must reach cmd_cancel during registration states.
+
+    Routed through the REAL aiogram Dispatcher/Router (``dp.feed_update`` with a
+    mocked ``Bot`` session), so the routing order — not just a direct handler
+    call — is exercised. Previously the bare-``F.text`` registration handlers
+    were registered before ``cmd_cancel`` and swallowed the command, creating a
+    junk family named "/cancel".
+    """
+
+    def _update(self, uid, text):
+        from datetime import datetime, timezone
+        from aiogram.types import Update, Message, User, Chat
+
+        return Update(update_id=1, message=Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=uid, type="private"),
+            from_user=User(id=uid, is_bot=False, first_name="T"),
+            text=text,
+        ))
+
+    def _feed(self, state_name, text="/cancel"):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+        from aiogram import Bot
+        from aiogram.fsm.storage.base import StorageKey
+
+        async def run():
+            b = Bot(token="123456:TESTTOKEN", session=AsyncMock())
+            b.session = AsyncMock(return_value=None)
+            key = StorageKey(bot_id=b.id, chat_id=700, user_id=700)
+            await bot.dp.storage.set_state(key, state_name)
+            with patch.object(bot, "DB_PATH", TEST_DB):
+                await bot.dp.feed_update(b, self._update(700, text))
+            return await bot.dp.storage.get_state(key)
+
+        return asyncio.run(run())
+
+    def test_cancel_in_family_name_does_not_create_family(self):
+        import bot
+        from unittest.mock import patch
+
+        with patch.object(bot, "create_family_with_owner") as create:
+            state = self._feed("Registration:entering_family_name")
+        create.assert_not_called()
+        assert state is None
+
+    def test_cancel_in_invite_code_does_not_join(self):
+        import bot
+        from unittest.mock import patch
+
+        with patch.object(bot, "join_by_invite") as join:
+            state = self._feed("Registration:entering_invite_code")
+        join.assert_not_called()
+        assert state is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
