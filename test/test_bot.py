@@ -2315,19 +2315,49 @@ class TestMigrationV2:
         assert get_member(TEST_DB, 35641953)["role"] == "parent"
         assert get_member(TEST_DB, 704630847)["role"] == "parent"
 
-    def test_migration_legacy_role_wins_on_conflict(self, monkeypatch):
-        """When config ids collide with legacy users, legacy role/name wins."""
+    def test_migration_config_role_wins_over_stale_legacy(self, monkeypatch):
+        """Config lists an ID as parent; stale legacy users calls it child.
+
+        Config (env) is authoritative for every ID it lists, because legacy
+        `users` can be stale (prod: 35641953 owns 126 measurements but is
+        recorded as a child).
+        """
         import config
         from database import init_db, get_member
         self._make_v1_db()
-        # 111/222 already exist as legacy child/parent with a real name.
-        monkeypatch.setattr(config, "CHILD_ID", 111)
-        monkeypatch.setattr(config, "PARENT_IDS", [222])
-        monkeypatch.setattr(config, "CHILD_NAME", "НовоеИмя")
+        # Add the stale legacy row: 35641953 marked as child.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO users (user_id, first_name, role) VALUES (35641953, 'Матвей', 'child')"
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(config, "CHILD_ID", 1727847144)
+        monkeypatch.setattr(config, "PARENT_IDS", [35641953, 704630847])
+        monkeypatch.setattr(config, "CHILD_NAME", "Motya")
         init_db(TEST_DB)
-        assert get_member(TEST_DB, 111)["role"] == "child"
-        assert get_member(TEST_DB, 111)["name"] == "Маша"
-        assert get_member(TEST_DB, 222)["role"] == "parent"
+        assert get_member(TEST_DB, 35641953)["role"] == "parent"
+        assert get_member(TEST_DB, 704630847)["role"] == "parent"
+        assert get_member(TEST_DB, 1727847144)["role"] == "child"
+
+    def test_migration_legacy_only_member_kept(self, monkeypatch):
+        """A legacy member absent from config is seeded with its legacy role."""
+        import config
+        from database import init_db, get_member
+        self._make_v1_db()
+        # 333 is legacy-only and not listed in config.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO users (user_id, first_name, role) VALUES (333, 'Бабушка', 'parent')"
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(config, "CHILD_ID", 1727847144)
+        monkeypatch.setattr(config, "PARENT_IDS", [35641953])
+        monkeypatch.setattr(config, "CHILD_NAME", "Motya")
+        init_db(TEST_DB)
+        assert get_member(TEST_DB, 333)["role"] == "parent"
+        assert get_member(TEST_DB, 333)["name"] == "Бабушка"
 
     def test_migration_is_idempotent(self):
         from database import init_db

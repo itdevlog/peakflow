@@ -125,13 +125,14 @@ def _rebuild_reminders_v2(conn):
 
 
 def _seed_default_family(conn):
-    """Create family #1 and seed members from legacy users *and* config.
+    """Create family #1 and seed members from config *and* legacy users.
 
-    The legacy ``users`` rows and the ``.env`` config (``CHILD_ID`` /
-    ``PARENT_IDS``) are unioned: legacy members are inserted first so their
-    roles/names win, then config members fill any gaps via INSERT OR IGNORE.
-    This matters in prod, where the active child owns most measurements but is
-    absent from the legacy ``users`` table.
+    Config (``.env``: ``CHILD_ID`` / ``PARENT_IDS`` / ``CHILD_NAME``) is
+    authoritative for every ID it lists, because legacy ``users`` can be stale
+    (prod: 35641953 owns 126 measurements yet is recorded there as a child).
+    So config members are upserted first, then legacy ``users`` rows fill only
+    the IDs config did not already cover (``INSERT OR IGNORE``). Idempotent:
+    returns early when family #1 already exists.
     """
     existing = conn.execute(
         "SELECT id FROM families WHERE id = ?", (DEFAULT_FAMILY_ID,)
@@ -142,7 +143,28 @@ def _seed_default_family(conn):
         "INSERT INTO families (id, name) VALUES (?, ?)", (DEFAULT_FAMILY_ID, "Семья")
     )
 
-    # 1. Legacy users first — authoritative on conflict.
+    # 1. Config members first — authoritative on conflict.
+    import config
+    child_id = getattr(config, "CHILD_ID", 0)
+    parent_ids = getattr(config, "PARENT_IDS", []) or []
+    child_name = getattr(config, "CHILD_NAME", "Ребёнок")
+    if child_id:
+        conn.execute(
+            "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'child', ?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
+            "role = excluded.role, name = excluded.name",
+            (child_id, DEFAULT_FAMILY_ID, child_name)
+        )
+    for pid in parent_ids:
+        if pid:
+            conn.execute(
+                "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', 'Родитель') "
+                "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
+                "role = excluded.role, name = excluded.name",
+                (pid, DEFAULT_FAMILY_ID)
+            )
+
+    # 2. Legacy users fill gaps only (config already inserted above).
     cols = _table_columns(conn, "users")
     if "user_id" in cols:
         # Materialise first: `conn` may be a cursor, and reusing it for INSERT
@@ -158,23 +180,6 @@ def _seed_default_family(conn):
             conn.execute(
                 "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?)",
                 (r["user_id"], DEFAULT_FAMILY_ID, role, name)
-            )
-
-    # 2. Config members fill the gaps (INSERT OR IGNORE keeps legacy rows).
-    import config
-    child_id = getattr(config, "CHILD_ID", 0)
-    parent_ids = getattr(config, "PARENT_IDS", []) or []
-    child_name = getattr(config, "CHILD_NAME", "Ребёнок")
-    if child_id:
-        conn.execute(
-            "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'child', ?)",
-            (child_id, DEFAULT_FAMILY_ID, child_name)
-        )
-    for pid in parent_ids:
-        if pid:
-            conn.execute(
-                "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', 'Родитель')",
-                (pid, DEFAULT_FAMILY_ID)
             )
 
 
