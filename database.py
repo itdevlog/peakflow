@@ -7,8 +7,10 @@ from config import TZ_OFFSET
 # Часовой пояс — единый источник (config.py читает TZ_OFFSET из .env)
 _TZ = timezone(timedelta(hours=TZ_OFFSET))
 
-# Версия схемы БД (PRAGMA user_version). 1 = базовая схема + source/note/flags.
-SCHEMA_VERSION = 1
+DEFAULT_FAMILY_ID = 1
+
+# Версия схемы БД (PRAGMA user_version). 2 = мульти-тенант (families/members).
+SCHEMA_VERSION = 2
 
 
 def _now():
@@ -100,6 +102,24 @@ def init_db(db_path: str):
         CREATE INDEX IF NOT EXISTS idx_meas_user_time
         ON measurements(user_id, measured_at)
     """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS families (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS members (
+            telegram_id INTEGER PRIMARY KEY,
+            family_id INTEGER NOT NULL REFERENCES families(id),
+            role TEXT NOT NULL CHECK(role IN ('parent', 'child')),
+            name TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_members_family ON members(family_id)")
 
     # Record schema version (idempotent migrations above are v1).
     c.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -534,6 +554,56 @@ def get_effective_target(db_path: str, fallback: int) -> int:
         return val if val > 0 else (fallback or 300)
     except (TypeError, ValueError):
         return fallback or 300
+
+
+# ============================================================================
+# Families / members (multi-tenant)
+# ============================================================================
+def create_family(db_path: str, name: str) -> int:
+    conn = get_connection(db_path)
+    cur = conn.execute("INSERT INTO families (name) VALUES (?)", (name,))
+    fid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return fid
+
+
+def get_family(db_path: str, family_id: int) -> Optional[dict]:
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM families WHERE id = ?", (family_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def add_member(db_path: str, telegram_id: int, family_id: int, role: str, name: str) -> None:
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(telegram_id) DO UPDATE SET family_id = excluded.family_id, "
+        "role = excluded.role, name = excluded.name",
+        (telegram_id, family_id, role, name)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_member(db_path: str, telegram_id: int) -> Optional[dict]:
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT * FROM members WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_family_children(db_path: str, family_id: int) -> list:
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM members WHERE family_id = ? AND role = 'child' ORDER BY telegram_id",
+        (family_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ============================================================================

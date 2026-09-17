@@ -2073,5 +2073,43 @@ class TestEventLoopOffload:
         assert seen["thread"] != main_thread, "render must run in a worker thread"
 
 
+class TestFamiliesAndMembers:
+    def test_create_and_get_family(self):
+        from database import create_family, get_family
+        fid = create_family(TEST_DB, "Ивановы")
+        fam = get_family(TEST_DB, fid)
+        assert fam["name"] == "Ивановы"
+        assert get_family(TEST_DB, 99999) is None
+
+    def test_add_and_get_member(self):
+        from database import create_family, add_member, get_member
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 222, fid, "parent", "Олег")
+        m = get_member(TEST_DB, 222)
+        assert m["family_id"] == fid and m["role"] == "parent" and m["name"] == "Олег"
+        assert get_member(TEST_DB, 555) is None
+
+    def test_add_member_is_upsert(self):
+        from database import create_family, add_member, get_member
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 222, fid, "parent", "Олег")
+        add_member(TEST_DB, 222, fid, "parent", "Олег Петров")
+        assert get_member(TEST_DB, 222)["name"] == "Олег Петров"
+
+    def test_list_family_children(self):
+        from database import create_family, add_member, list_family_children
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 111, fid, "child", "Маша")
+        add_member(TEST_DB, 222, fid, "parent", "Олег")
+        add_member(TEST_DB, 333, fid, "child", "Петя")
+        kids = list_family_children(TEST_DB, fid)
+        assert sorted(k["name"] for k in kids) == ["Маша", "Петя"]
+
+    def test_default_family_constants(self):
+        import database
+        assert database.DEFAULT_FAMILY_ID == 1
+        assert database.SCHEMA_VERSION == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
