@@ -11,13 +11,14 @@ function esc(s) {
 }
 
 function zoneClass(pct) {
-  if (pct >= 80) return "zone-green";
-  if (pct >= 60) return "zone-yellow";
+  const z = state.zones || { green: 80, yellow: 60 };
+  if (pct >= z.green) return "zone-green";
+  if (pct >= z.yellow) return "zone-yellow";
   return "zone-red";
 }
 
 const state = {
-  target: 0, role: null,
+  target: 0, role: null, zones: null,
   chart: { year: null, month: null }, chartData: null, history: { page: 1 },
   form: { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false },
 };
@@ -77,7 +78,7 @@ function clearError() { $("error").hidden = true; }
 function todLabel(tod) { return tod === "morning" ? "☀️ Утро" : "🌙 Вечер"; }
 
 function pct(value) {
-  return state.target ? Math.round((value / state.target) * 100) : 100;
+  return state.target ? Math.floor((value / state.target) * 100) : 100;
 }
 
 function measureCardInner(m) {
@@ -551,6 +552,8 @@ async function boot() {
   try {
     const me = await api("/api/me");
     state.role = me.role;
+    state.zones = me.zones || state.zones;
+    if (me.target_pef) state.target = me.target_pef;
     $("child-name").textContent = me.child_name || "Дневник";
   } catch (e) {
     showError("Откройте приложение через Telegram");

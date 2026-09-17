@@ -99,7 +99,7 @@ peakflow/
 ├── config.py        # Настройки + ID семьи
 ├── report.py        # Общие хелперы и CSV
 ├── web/             # Mini App (FastAPI + static)
-├── test/            # pytest-тесты (197)
+├── test/            # pytest-тесты (236)
 ├── manage.sh        # Установка и эксплуатация
 ├── .env             # Ваш файл с ID
 └── requirements.txt # Зависимости

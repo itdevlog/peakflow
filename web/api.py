@@ -1,4 +1,5 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
+import asyncio
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from database import (
-    add_measurement,
+    add_or_replace_measurement,
     backup_db,
     delete_measurement,
     edit_measurement,
@@ -20,24 +21,31 @@ from database import (
     get_available_months,
     get_last_measurement,
     get_last_of_tod,
-    get_last_two_weeks,
     get_measurements_between,
     get_measurements_for_month,
     get_measurements_paginated,
-    get_reminder_hours,
-    get_stats,
+    get_previous_of_tod,
+    get_reminder_hours,    get_stats,
     get_today_measurements,
     get_effective_target as _db_effective_target,
-    has_today_measurement,
-    replace_auto_measurement,
     set_note,
     set_setting,
+    validate_reminder_hours,
 )
 from report import build_csv_content as _build_csv, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
 
 logger = logging.getLogger(__name__)
+
+
+async def _db(func, *args, **kwargs):
+    """Run a synchronous SQLite helper off the event loop.
+
+    uvicorn shares the event loop with aiogram, so a blocking query freezes
+    both the Mini App and the bot.
+    """
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 MONTH_NAMES = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -66,6 +74,18 @@ def _pef_zone(pef: int, target: int, config) -> str:
     if pct >= getattr(config, "ZONE_YELLOW", 60):
         return "yellow"
     return "red"
+
+
+def _schedule_add_notifications(background, bot, config, who: int, pef: int,
+                                tod: str, target: int, pct: int) -> None:
+    """Queue Telegram notifications off the request path (BackgroundTasks).
+
+    A slow or unavailable Telegram API must not delay the HTTP response, so
+    the sends run after it is returned.
+    """
+    background.add_task(notify_added, bot, config, who, pef, tod, target)
+    if pct < getattr(config, "ZONE_YELLOW", 60):
+        background.add_task(notify_red_zone, bot, config, pef, tod, target, who=who)
 
 
 class MeasurementIn(BaseModel):
@@ -159,22 +179,19 @@ def create_app(services: dict) -> FastAPI:
             "user": auth["user"],
             "role": auth["role"],
             "child_name": getattr(config, "CHILD_NAME", "Ребёнок"),
-            "target_pef": _effective_target(config),
+            "target_pef": await _db(_effective_target, config),
+            "zones": {
+                "green": getattr(config, "ZONE_GREEN", 80),
+                "yellow": getattr(config, "ZONE_YELLOW", 60),
+            },
         }
 
     @app.get("/api/status")
     async def status(auth: dict = Depends(require_user)):
         return {
-            "today": get_today_measurements(config.DB_PATH, config.CHILD_ID),
-            "last": get_last_measurement(config.DB_PATH, config.CHILD_ID),
-            "target_pef": _effective_target(config),
-        }
-
-    @app.get("/api/summary")
-    async def summary(auth: dict = Depends(require_user)):
-        return {
-            "today": get_today_measurements(config.DB_PATH, config.CHILD_ID),
-            "target_pef": _effective_target(config),
+            "today": await _db(get_today_measurements, config.DB_PATH, config.CHILD_ID),
+            "last": await _db(get_last_measurement, config.DB_PATH, config.CHILD_ID),
+            "target_pef": await _db(_effective_target, config),
         }
 
     @app.get("/api/history")
@@ -183,8 +200,8 @@ def create_app(services: dict) -> FastAPI:
         per_page: int = Query(10, ge=1, le=50),
         auth: dict = Depends(require_user),
     ):
-        items, total, total_pages = get_measurements_paginated(
-            config.DB_PATH, config.CHILD_ID, page, per_page
+        items, total, total_pages = await _db(
+            get_measurements_paginated, config.DB_PATH, config.CHILD_ID, page, per_page
         )
         return {"items": items, "page": page, "total": total, "total_pages": total_pages}
 
@@ -198,7 +215,7 @@ def create_app(services: dict) -> FastAPI:
         now = datetime.now(timezone(timedelta(hours=offset)))
         if year is None or month is None:
             year, month = now.year, now.month
-        rows = get_measurements_for_month(config.DB_PATH, config.CHILD_ID, year, month)
+        rows = await _db(get_measurements_for_month, config.DB_PATH, config.CHILD_ID, year, month)
         points = [
             {
                 "date": str(r["measured_at"])[:10],
@@ -208,15 +225,14 @@ def create_app(services: dict) -> FastAPI:
             }
             for r in rows
         ]
-        available = get_available_months(config.DB_PATH, config.CHILD_ID)
+        available = await _db(get_available_months, config.DB_PATH, config.CHILD_ID)
         requested = (year, month)
         return {
             "points": points,
-            "target_pef": _effective_target(config),
+            "target_pef": await _db(_effective_target, config),
             "zones": {
                 "green": getattr(config, "ZONE_GREEN", 80),
                 "yellow": getattr(config, "ZONE_YELLOW", 60),
-                "red": getattr(config, "ZONE_RED", 50),
             },
             "month": f"{year:04d}-{month:02d}",
             "title": f"{MONTH_NAMES[month - 1]} {year}",
@@ -227,53 +243,46 @@ def create_app(services: dict) -> FastAPI:
 
     @app.get("/api/stats")
     async def stats(auth: dict = Depends(require_user)):
-        data = get_stats(config.DB_PATH, config.CHILD_ID)
-        data["target_pef"] = _effective_target(config)
+        data = await _db(get_stats, config.DB_PATH, config.CHILD_ID)
+        data["target_pef"] = await _db(_effective_target, config)
         return data
 
-    @app.get("/api/weekly")
-    async def weekly(offset: int = Query(0, ge=0, le=0), auth: dict = Depends(require_user)):
-        this_week, prev_week = get_last_two_weeks(config.DB_PATH, config.CHILD_ID)
-        return {"this_week": this_week, "prev_week": prev_week, "offset": offset}
-
     @app.post("/api/measurements")
-    async def add(body: MeasurementIn, force: bool = False,
+    async def add(background: BackgroundTasks, body: MeasurementIn, force: bool = False,
                   auth: dict = Depends(require_user)):
         who = auth["user"]["id"]
         tod = _auto_time_of_day(config)
-        if has_today_measurement(config.DB_PATH, config.CHILD_ID, tod, skip_auto=True) and not force:
-            row = get_last_of_tod(config.DB_PATH, config.CHILD_ID, tod)
+        target = await _db(_effective_target, config)
+        mid, status = await _db(
+            add_or_replace_measurement,
+            config.DB_PATH, body.pef, tod, config.CHILD_ID, who, force,
+        )
+        if status == "exists":
+            row = await _db(get_last_of_tod, config.DB_PATH, config.CHILD_ID, tod)
             raise HTTPException(409, detail=json.dumps({
                 "message": f"{'Утренний' if tod == 'morning' else 'Вечерний'} замер уже есть сегодня",
                 "tod": tod,
                 "existing_id": row["id"] if row else None,
             }, ensure_ascii=False))
-        target = _effective_target(config)
-        replaced_id = replace_auto_measurement(config.DB_PATH, config.CHILD_ID, tod, body.pef, who)
-        if replaced_id:
-            mid = replaced_id
-        else:
-            mid = add_measurement(config.DB_PATH, body.pef, tod, config.CHILD_ID, who)
-        all_m = get_all_measurements(config.DB_PATH, config.CHILD_ID)
+        prev = await _db(get_previous_of_tod, config.DB_PATH, config.CHILD_ID, tod, mid)
         diff = None
-        if len(all_m) >= 2:
-            diff = body.pef - all_m[1]["pef_value"]
+        if prev:
+            diff = body.pef - prev["pef_value"]
         pct = _pct_of(body.pef, target)
-        await notify_added(services.get("bot"), config, who, body.pef, tod, target)
-        if pct < getattr(config, "ZONE_YELLOW", 60):
-            await notify_red_zone(services.get("bot"), config, body.pef, tod, target)
+        _schedule_add_notifications(background, services.get("bot"), config,
+                                    who, body.pef, tod, target, pct)
         return {"id": mid, "pef": body.pef, "tod": tod,
                 "zone": _pef_zone(body.pef, target, config), "pct": pct, "diff": diff}
 
     @app.patch("/api/measurements/{mid}")
     async def edit(mid: int, body: MeasurementIn, auth: dict = Depends(require_parent)):
-        if not edit_measurement(config.DB_PATH, mid, body.pef, config.CHILD_ID):
+        if not await _db(edit_measurement, config.DB_PATH, mid, body.pef, config.CHILD_ID):
             raise HTTPException(404, "Запись не найдена")
         return {"id": mid, "pef": body.pef}
 
     @app.delete("/api/measurements/{mid}")
     async def remove(mid: int, auth: dict = Depends(require_parent)):
-        if not delete_measurement(config.DB_PATH, mid, config.CHILD_ID):
+        if not await _db(delete_measurement, config.DB_PATH, mid, config.CHILD_ID):
             raise HTTPException(404, "Запись не найдена")
         return {"deleted": True, "id": mid}
 
@@ -281,42 +290,46 @@ def create_app(services: dict) -> FastAPI:
     async def note(mid: int, body: NoteIn, auth: dict = Depends(require_user)):
         raw = body.note or ""
         note_text = raw.strip()[:200]
-        if not set_note(config.DB_PATH, mid, note_text, config.CHILD_ID):
+        if not await _db(set_note, config.DB_PATH, mid, note_text, config.CHILD_ID):
             raise HTTPException(404, "Запись не найдена")
         return {"id": mid, "note": note_text, "truncated": len(raw.strip()) > 200}
 
     @app.get("/api/settings")
     async def settings(auth: dict = Depends(require_parent)):
         return {
-            "target_pef": _effective_target(config),
+            "target_pef": await _db(_effective_target, config),
             "child_name": getattr(config, "CHILD_NAME", "Ребёнок"),
-            "total": len(get_all_measurements(config.DB_PATH, config.CHILD_ID, include_auto=True)),
-            "reminder_hours": get_reminder_hours(config.DB_PATH),
+            "total": len(await _db(get_all_measurements, config.DB_PATH, config.CHILD_ID, include_auto=True)),
+            "reminder_hours": await _db(get_reminder_hours, config.DB_PATH),
         }
 
     @app.put("/api/settings/target")
     async def put_target(body: TargetIn, auth: dict = Depends(require_parent)):
-        set_setting(config.DB_PATH, "target_pef", str(body.target_pef))
+        await _db(set_setting, config.DB_PATH, "target_pef", str(body.target_pef))
         return {"target_pef": body.target_pef}
 
     @app.put("/api/settings/reminders")
     async def put_reminders(body: RemindersIn, auth: dict = Depends(require_parent)):
+        hours = {key: getattr(body, key) for key in REMINDER_KEYS}
+        error = validate_reminder_hours(hours)
+        if error:
+            raise HTTPException(422, error)
         for key in REMINDER_KEYS:
-            set_setting(config.DB_PATH, f"reminder_{key}", str(getattr(body, key)))
-        return {"reminder_hours": get_reminder_hours(config.DB_PATH)}
+            await _db(set_setting, config.DB_PATH, f"reminder_{key}", str(getattr(body, key)))
+        return {"reminder_hours": await _db(get_reminder_hours, config.DB_PATH)}
 
     @app.get("/api/export/periods")
     async def export_periods(auth: dict = Depends(require_parent)):
-        months = [f"{y:04d}-{m:02d}" for y, m in get_available_months(config.DB_PATH, config.CHILD_ID)]
+        months = [f"{y:04d}-{m:02d}" for y, m in await _db(get_available_months, config.DB_PATH, config.CHILD_ID)]
         return {"months": months, "latest": months[-1] if months else None}
 
     @app.get("/api/export/csv")
     async def export_csv(period: str = "all", auth: dict = Depends(require_parent)):
-        target = _effective_target(config)
+        target = await _db(_effective_target, config)
         child = getattr(config, "CHILD_NAME", "Ребёнок")
         stamp = datetime.now(timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))).strftime("%Y%m%d_%H%M")
         if period == "all":
-            rows = get_measurements_between(config.DB_PATH, config.CHILD_ID, "2000-01-01", _today(config))
+            rows = await _db(get_measurements_between, config.DB_PATH, config.CHILD_ID, "2000-01-01", _today(config))
             filename = f"peakflow_{child}_{stamp}.csv"
         else:
             parsed = parse_month(period)
@@ -324,11 +337,11 @@ def create_app(services: dict) -> FastAPI:
                 raise HTTPException(422, "Неверный период")
             y, m = parsed
             start, end = _month_bounds(y, m)
-            rows = get_measurements_between(config.DB_PATH, config.CHILD_ID, start, end)
+            rows = await _db(get_measurements_between, config.DB_PATH, config.CHILD_ID, start, end)
             filename = f"peakflow_{child}_{y:04d}-{m:02d}.csv"
         if not rows:
             raise HTTPException(404, "Нет записей за период")
-        stats = get_stats(config.DB_PATH, config.CHILD_ID)
+        stats = await _db(get_stats, config.DB_PATH, config.CHILD_ID)
         content = _build_csv(rows, target, child, stats=stats,
                              display_name=lambda uid: _who(config, uid),
                              zone_green=getattr(config, "ZONE_GREEN", 80),
@@ -345,7 +358,7 @@ def create_app(services: dict) -> FastAPI:
         fd, dest = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
-            backup_db(config.DB_PATH, dest)
+            await _db(backup_db, config.DB_PATH, dest)
         except Exception as e:
             logger.error("Ошибка бэкапа: %s", e)
             if os.path.exists(dest):

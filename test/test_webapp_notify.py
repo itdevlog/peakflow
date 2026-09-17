@@ -59,3 +59,32 @@ def test_notify_noop_when_bot_none():
     cfg = _config()
     asyncio.run(notify_added(None, cfg, CHILD_ID, 250, "morning", 260))
     asyncio.run(notify_red_zone(None, cfg, 120, "morning", 260))
+
+
+def test_send_times_out_on_slow_telegram(monkeypatch):
+    """A hung Telegram call must not hold the request open indefinitely."""
+    import time
+    import web.notify as notify
+
+    monkeypatch.setattr(notify, "_SEND_TIMEOUT", 0.05, raising=False)
+
+    async def slow_send(pid, text):
+        await asyncio.sleep(5)
+
+    cfg = _config()
+    bot = SimpleNamespace(send_message=slow_send)
+
+    started = time.monotonic()
+    asyncio.run(notify_added(bot, cfg, CHILD_ID, 250, "morning", 260))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"notify must time out quickly, took {elapsed:.1f}s"
+
+
+def test_red_zone_can_exclude_author():
+    """B3: the parent who entered a bad value must not alarm themselves."""
+    cfg = _config()
+    bot = SimpleNamespace(send_message=AsyncMock())
+    asyncio.run(notify_red_zone(bot, cfg, 120, "morning", 260, who=PARENT_IDS[0]))
+    assert bot.send_message.await_count == 1
+    assert bot.send_message.await_args.args[0] == PARENT_IDS[1]

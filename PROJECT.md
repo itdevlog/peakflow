@@ -49,7 +49,7 @@ peakflow/
 ├── config.py           # Настройки, ID семьи, пороги
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (197)
+├── test/               # Pytest тесты (236)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -441,7 +441,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 197 passed
+# 236 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

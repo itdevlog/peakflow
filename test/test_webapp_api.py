@@ -91,20 +91,25 @@ def test_api_child_role():
     assert body["target_pef"] == 260
 
 
+def test_api_me_exposes_zone_thresholds():
+    """Client must colour zones from server config, not hard-coded values."""
+    _setup_db()
+    body = _client().get("/api/me", headers=_auth(CHILD_ID)).json()
+    assert body["zones"] == {"green": 80, "yellow": 60}
+
+
 def test_api_parent_role():
     _setup_db()
     body = _client().get("/api/me", headers=_auth(PARENT_IDS[0])).json()
     assert body["role"] == "parent"
 
 
-def test_api_status_and_summary_empty():
+def test_api_status_empty():
     _setup_db()
     body = _client().get("/api/status", headers=_auth(CHILD_ID)).json()
     assert body["today"] == []
     assert body["last"] is None
     assert body["target_pef"] == 260
-    summary = _client().get("/api/summary", headers=_auth(CHILD_ID)).json()
-    assert summary["today"] == []
 
 
 def test_api_history_pagination():
@@ -135,6 +140,7 @@ def test_api_chart_current_month_excludes_auto_and_has_zones():
     assert body["target_pef"] == 260
     assert body["zones"]["green"] == 80
     assert body["zones"]["yellow"] == 60
+    assert "red" not in body["zones"], "dead ZONE_RED must not be exposed"
     assert len(body["points"]) == 1
     assert body["points"][0]["pef"] == 250
     assert body["points"][0]["tod"] == "morning"
@@ -164,13 +170,6 @@ def test_api_stats_empty():
     _setup_db()
     body = _client().get("/api/stats", headers=_auth(CHILD_ID)).json()
     assert body["total"] == 0
-
-
-def test_api_weekly_shape():
-    _setup_db()
-    body = _client().get("/api/weekly?offset=0", headers=_auth(CHILD_ID)).json()
-    assert isinstance(body["this_week"], list)
-    assert isinstance(body["prev_week"], list)
 
 
 def test_static_index_served():

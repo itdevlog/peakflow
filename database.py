@@ -174,6 +174,64 @@ def replace_auto_measurement(db_path: str, user_id: int, time_of_day: str,
     return row["id"] if row else False
 
 
+def add_or_replace_measurement(db_path: str, pef_value: int, time_of_day: str,
+                               user_id: int, added_by: int, force: bool = False,
+                               source: str = "manual") -> tuple:
+    """Atomically add a measurement for a slot, replacing today's auto record.
+
+    Returns ``(id, status)`` where status is:
+
+    - ``"ok"`` — row inserted or an existing auto record replaced;
+    - ``"exists"`` — a real (non-auto) measurement already exists in this slot
+      today and ``force`` is False; the returned id is the existing row.
+
+    The check-then-insert runs under ``BEGIN IMMEDIATE`` so two concurrent
+    callers (threads/processes) cannot both create a row for the same slot.
+    """
+    today = _today_str()
+    now_str = _now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if not force:
+            existing = conn.execute(
+                f"SELECT id FROM measurements WHERE user_id = ? AND time_of_day = ? "
+                f"AND measured_at LIKE ? AND {_AUTO_FILTER} ORDER BY id DESC LIMIT 1",
+                (user_id, time_of_day, f"{today}%")
+            ).fetchone()
+            if existing:
+                conn.rollback()
+                return existing["id"], "exists"
+
+        auto = conn.execute(
+            "SELECT id FROM measurements WHERE user_id = ? AND time_of_day = ? "
+            "AND source = 'auto' AND measured_at LIKE ? ORDER BY id DESC LIMIT 1",
+            (user_id, time_of_day, f"{today}%")
+        ).fetchone()
+        if auto:
+            conn.execute(
+                "UPDATE measurements SET pef_value = ?, added_by = ?, source = ?, "
+                "measured_at = ? WHERE id = ?",
+                (pef_value, added_by, source, now_str, auto["id"])
+            )
+            conn.commit()
+            return auto["id"], "ok"
+
+        cursor = conn.execute(
+            "INSERT INTO measurements (pef_value, time_of_day, user_id, added_by, measured_at, source) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (pef_value, time_of_day, user_id, added_by, now_str, source)
+        )
+        mid = cursor.lastrowid
+        conn.commit()
+        return mid, "ok"
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def edit_measurement(db_path: str, measurement_id: int, new_value: int, user_id: int) -> bool:
     """Edit last measurement (only if it belongs to user)."""
     conn = get_connection(db_path)
@@ -207,6 +265,38 @@ def get_measurement_by_id(db_path: str, measurement_id: int) -> Optional[dict]:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_previous_of_tod(db_path: str, user_id: int, time_of_day: str,
+                        before_id: int) -> Optional[dict]:
+    """Latest real measurement of this time of day with id < before_id.
+
+    The "change" for a measurement compares morning↔morning (evening↔evening)
+    rather than against an unrelated slot.
+    """
+    conn = get_connection(db_path)
+    row = conn.execute(
+        f"SELECT * FROM measurements WHERE user_id = ? AND time_of_day = ? "
+        f"AND id < ? AND {_AUTO_FILTER} ORDER BY id DESC LIMIT 1",
+        (user_id, time_of_day, before_id)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_recent_measurements(db_path: str, user_id: int, limit: int = 2) -> list:
+    """Latest ``limit`` real (non-auto) measurements, newest first.
+
+    Used for status/diff so handlers don't scan the whole history.
+    """
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        f"SELECT * FROM measurements WHERE user_id = ? AND {_AUTO_FILTER} "
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, limit)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_last_measurement(db_path: str, user_id: int) -> Optional[dict]:
@@ -468,6 +558,20 @@ def get_reminder_hours(db_path: str) -> dict:
         except ValueError:
             pass
     return result
+
+
+def validate_reminder_hours(hours: dict) -> Optional[str]:
+    """Return an error message if the escalation order is wrong, else None.
+
+    Parents must be pinged *after* the child's reminder, otherwise the same
+    minute both pings the child and escalates/auto-fills — the child never
+    gets a chance to measure.
+    """
+    if hours.get("parent_morning", 0) <= hours.get("child_morning", 0):
+        return "Час родителям (утро) должен быть позже часа ребёнку (утро)."
+    if hours.get("parent_evening", 0) <= hours.get("child_evening", 0):
+        return "Час родителям (вечер) должен быть позже часа ребёнку (вечер)."
+    return None
 
 
 # ============================================================================
