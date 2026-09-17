@@ -11,8 +11,8 @@ _TZ = timezone(timedelta(hours=TZ_OFFSET))
 
 DEFAULT_FAMILY_ID = 1
 
-# Версия схемы БД (PRAGMA user_version). 3 = мульти-тенант + invites.
-SCHEMA_VERSION = 3
+# Версия схемы БД (PRAGMA user_version). 4 = мульти-тенант + active child.
+SCHEMA_VERSION = 4
 
 
 def _now():
@@ -212,6 +212,13 @@ def _create_invites_v3(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_invites_family ON invites(family_id)")
 
 
+def _add_active_child_v4(conn):
+    try:
+        conn.execute("ALTER TABLE members ADD COLUMN active_child_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _needs_migration(probe) -> bool:
     """True when a non-empty DB does not yet have the v2 schema.
 
@@ -277,6 +284,7 @@ def init_db(db_path: str):
         _seed_default_family(c)
         _migrate_to_v2(c)
         _create_invites_v3(c)
+        _add_active_child_v4(c)
 
         # Default target PEF if not set
         c.execute(
@@ -812,6 +820,53 @@ def list_family_children(db_path: str, family_id: int) -> list:
     return [dict(r) for r in rows]
 
 
+def list_family_parents(db_path: str, family_id: int) -> list:
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT * FROM members WHERE family_id = ? AND role = 'parent' ORDER BY telegram_id",
+        (family_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_family_children(db_path: str, family_id: int) -> int:
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM members WHERE family_id = ? AND role = 'child'", (family_id,)
+    ).fetchone()
+    conn.close()
+    return row[0]
+
+
+def set_active_child(db_path: str, telegram_id: int, child_id: int) -> bool:
+    member = get_member(db_path, telegram_id)
+    if not member or member["role"] != "parent":
+        return False
+    child = get_member(db_path, child_id)
+    if not child or child["role"] != "child" or child["family_id"] != member["family_id"]:
+        return False
+    conn = get_connection(db_path)
+    conn.execute("UPDATE members SET active_child_id = ? WHERE telegram_id = ?", (child_id, telegram_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def resolve_active_child(db_path: str, member, children=None) -> Optional[int]:
+    if not member:
+        return None
+    if member["role"] == "child":
+        return member["telegram_id"]
+    if children is None:
+        children = list_family_children(db_path, member["family_id"])
+    ids = [c["telegram_id"] for c in children]
+    selected = member.get("active_child_id") if hasattr(member, "get") else None
+    if selected in ids:
+        return selected
+    return ids[0] if ids else None
+
+
 # ============================================================================
 # Invites (registration tokens)
 # ============================================================================
@@ -989,6 +1044,115 @@ def backup_db(db_path: str, dest_path: str):
         src.backup(dst)
     dst.close()
     src.close()
+
+
+def backup_family_db(db_path: str, dest_path: str, family_id: int) -> None:
+    """Write a self-contained SQLite backup containing only one family's data.
+
+    The whole-file ``backup_db`` is multi-tenant: handing that file to one
+    family would leak every other family's measurements. Here the destination
+    gets the full schema but only the rows belonging to ``family_id``. Schema
+    is created directly (not via ``init_db``) so no family #1 seed rows are
+    written.
+    """
+    if os.path.exists(dest_path):
+        os.remove(dest_path)
+    dst = sqlite3.connect(dest_path)
+    try:
+        dst.row_factory = sqlite3.Row
+        dst.executescript(_FAMILY_BACKUP_DDL)
+        dst.execute("ATTACH DATABASE ? AS src", (db_path,))
+        try:
+            dst.execute(
+                "INSERT INTO families SELECT * FROM src.families WHERE id = ?",
+                (family_id,)
+            )
+            dst.execute(
+                "INSERT INTO members SELECT * FROM src.members WHERE family_id = ?",
+                (family_id,)
+            )
+            dst.execute(
+                "INSERT INTO measurements SELECT * FROM src.measurements "
+                "WHERE family_id = ?",
+                (family_id,)
+            )
+            dst.execute(
+                "INSERT INTO settings SELECT * FROM src.settings "
+                "WHERE family_id = ?",
+                (family_id,)
+            )
+            dst.execute(
+                "INSERT INTO invites SELECT * FROM src.invites WHERE family_id = ?",
+                (family_id,)
+            )
+            dst.execute(
+                "INSERT INTO reminders_sent SELECT * FROM src.reminders_sent "
+                "WHERE child_id IN (SELECT telegram_id FROM src.members "
+                "WHERE family_id = ? AND role = 'child')",
+                (family_id,)
+            )
+            dst.commit()
+        finally:
+            dst.execute("DETACH DATABASE src")
+    finally:
+        dst.close()
+
+
+# Exact schema for a family-scoped backup (mirrors init_db's v4 tables).
+_FAMILY_BACKUP_DDL = """
+    CREATE TABLE IF NOT EXISTS families (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS members (
+        telegram_id INTEGER PRIMARY KEY,
+        family_id INTEGER NOT NULL REFERENCES families(id),
+        role TEXT NOT NULL CHECK(role IN ('parent', 'child')),
+        name TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        active_child_id INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_members_family ON members(family_id);
+    CREATE TABLE IF NOT EXISTS measurements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        family_id INTEGER NOT NULL DEFAULT 1,
+        child_id INTEGER NOT NULL,
+        pef_value INTEGER NOT NULL,
+        time_of_day TEXT NOT NULL CHECK(time_of_day IN ('morning', 'evening', 'unknown')),
+        measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        added_by INTEGER,
+        note TEXT,
+        source TEXT DEFAULT 'manual'
+    );
+    CREATE INDEX IF NOT EXISTS idx_meas_family_child_time
+        ON measurements(family_id, child_id, measured_at);
+    CREATE TABLE IF NOT EXISTS settings (
+        family_id INTEGER NOT NULL DEFAULT 1,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (family_id, key)
+    );
+    CREATE TABLE IF NOT EXISTS invites (
+        token TEXT PRIMARY KEY,
+        family_id INTEGER NOT NULL REFERENCES families(id),
+        role TEXT NOT NULL CHECK(role IN ('parent', 'child')),
+        name TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_invites_family ON invites(family_id);
+    CREATE TABLE IF NOT EXISTS reminders_sent (
+        child_id INTEGER NOT NULL DEFAULT 0, date TEXT NOT NULL,
+        morning_reminder INTEGER DEFAULT 0,
+        evening_reminder INTEGER DEFAULT 0,
+        weekly_report INTEGER DEFAULT 0,
+        child_morning_reminder INTEGER DEFAULT 0,
+        child_evening_reminder INTEGER DEFAULT 0,
+        auto_morning INTEGER DEFAULT 0,
+        auto_evening INTEGER DEFAULT 0,
+        PRIMARY KEY (child_id, date)
+    );
+"""
 
 
 # ============================================================================

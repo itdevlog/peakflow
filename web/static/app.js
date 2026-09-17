@@ -18,7 +18,8 @@ function zoneClass(pct) {
 }
 
 const state = {
-  target: 0, role: null, zones: null,
+  target: 0, role: null, zones: null, screen: "today",
+  children: [], activeChildId: null,
   chart: { year: null, month: null }, chartData: null, history: { page: 1 },
   form: { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false },
 };
@@ -170,7 +171,45 @@ async function loadStats() {
     <div class="card"><div class="label">Тренд (3 vs 3)</div><div class="big">${trend}</div></div>`;
 }
 
+function renderChildSelector() {
+  const bar = $("topbar");
+  if (!bar) return;
+  ["child-select", "no-child-hint"].forEach((id) => {
+    const old = $(id);
+    if (old) old.remove();
+  });
+  if (state.role === "parent" && state.children.length > 1) {
+    const sel = document.createElement("select");
+    sel.id = "child-select";
+    state.children.forEach((c) => {
+      const opt = document.createElement("option");
+      opt.value = String(c.telegram_id);
+      opt.textContent = c.name || "Ребёнок";
+      if (String(c.telegram_id) === String(state.activeChildId)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = async () => {
+      try {
+        const childId = Number(sel.value);
+        await api("/api/active-child", { method: "PUT", body: { child_id: childId } });
+        state.activeChildId = childId;
+        const child = state.children.find((c) => String(c.telegram_id) === String(childId));
+        if (child && child.name) $("child-name").textContent = child.name;
+        await switchTo(state.screen);
+      } catch (e) { showError(e.message); }
+    };
+    bar.insertBefore(sel, $("target-badge"));
+  } else if (state.role === "parent" && !state.children.length) {
+    const hint = document.createElement("span");
+    hint.id = "no-child-hint";
+    hint.className = "label";
+    hint.textContent = "Добавьте ребёнка в боте";
+    bar.insertBefore(hint, $("target-badge"));
+  }
+}
+
 async function switchTo(name) {
+  state.screen = name;
   document.querySelectorAll(".tab").forEach((t) =>
     t.classList.toggle("active", t.dataset.screen === name));
   document.querySelectorAll(".screen").forEach((s) =>
@@ -553,8 +592,11 @@ async function boot() {
     const me = await api("/api/me");
     state.role = me.role;
     state.zones = me.zones || state.zones;
+    state.children = me.children || [];
+    state.activeChildId = me.active_child_id;
     if (me.target_pef) state.target = me.target_pef;
     $("child-name").textContent = me.child_name || "Дневник";
+    renderChildSelector();
   } catch (e) {
     showError("Откройте приложение через Telegram");
     return;

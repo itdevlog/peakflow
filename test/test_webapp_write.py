@@ -144,6 +144,7 @@ class TestNotifyScheduling:
         api._schedule_add_notifications(
             FakeBackground(), bot=None, config=cfg,
             who=CHILD_ID, pef=120, tod="morning", target=260, pct=46,
+            recipients=PARENT_IDS,
         )
         funcs = [f for f, _, _ in scheduled]
         assert notify.notify_added in funcs
@@ -162,6 +163,7 @@ class TestNotifyScheduling:
         api._schedule_add_notifications(
             FakeBackground(), bot=None, config=_config(),
             who=CHILD_ID, pef=250, tod="morning", target=260, pct=96,
+            recipients=PARENT_IDS,
         )
         funcs = [f for f, _, _ in scheduled]
         assert notify.notify_added in funcs
@@ -180,6 +182,7 @@ class TestNotifyScheduling:
         api._schedule_add_notifications(
             FakeBackground(), bot=None, config=_config(),
             who=PARENT_IDS[0], pef=120, tod="morning", target=260, pct=46,
+            recipients=PARENT_IDS,
         )
         red = [kw for f, _, kw in scheduled if f is notify.notify_red_zone]
         assert red and red[0].get("who") == PARENT_IDS[0]

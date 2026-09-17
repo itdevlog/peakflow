@@ -1,7 +1,8 @@
 # 🫁 Пикфлоуметр — Полная техническая документация
 
 > Telegram-бот для мониторинга пиковой скорости выдоха (ПСВ / PEF)  
-> Предназначен для семьи: **1 ребёнок + 2 родителя**
+> Мульти-семейный (тенантный) сервис: родители + один или несколько детей,
+> у каждого родителя — свой активный ребёнок
 
 ---
 
@@ -34,6 +35,7 @@
 | Редактирование | Кнопка «✏️ Исправить последний» |
 | Сводка «Сегодня» | Все замеры дня + статистика (родители) |
 | Недельный отчёт | Сравнение с прошлой неделей, тренды утро/вечер |
+| Выбор ребёнка | Родитель переключает активного ребёнка в боте и Mini App |
 | Напоминания | 10:00 / 22:00 — если замер пропущен |
 | Красная зона | Мгновенное уведомление обоим родителям при `< 60%` |
 | Уведомление родителю | При каждом замере — второму родителю |
@@ -49,7 +51,7 @@ peakflow/
 ├── config.py           # Настройки, ID семьи, пороги
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (330)
+├── test/               # Pytest тесты (412)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -78,15 +80,22 @@ peakflow/
 
 ## База данных
 
-Схема — **v3 (мульти-тенант + регистрация)**: `SCHEMA_VERSION = 3`, `DEFAULT_FAMILY_ID = 1`.
-Данные изолированы по семье (`families`/`members`), замеры принадлежат семье и
-ребёнку. При старте `init_db()` на непустой БД старой версии сначала делает резервную
-копию `<db>.v1.bak` (`backup_db`), затем мигрирует схему до v3. Миграция идемпотентна,
-выполняется в транзакции, при ошибке бэкапа прерывается.
+Схема — **v4 (мульти-тенант + регистрация + активный ребёнок)**: `SCHEMA_VERSION = 4`,
+`DEFAULT_FAMILY_ID = 1`. Данные изолированы по семье (`families`/`members`), замеры
+принадлежат семье и ребёнку. При старте `init_db()` на непустой БД старой версии
+сначала делает резервную копию `<db>.v1.bak` (`backup_db`), затем мигрирует схему до
+v4. Миграция идемпотентна (`ALTER TABLE members ADD COLUMN active_child_id` в
+try/except), выполняется в транзакции, при ошибке бэкапа прерывается.
 
 Роли участников в рантайме берутся из `members` (в боте — через `MemberMiddleware`,
 в Mini App — в `_resolve_user`). Переменные `.env` (`CHILD_ID`/`PARENT_IDS`) используются
-как fallback и для сидинга семьи №1 при миграции.
+как fallback и для сидинга семьи №1 при миграции. Временный gate 2B, ограничивавший
+обслуживание семьёй №1, **снят**: все зарегистрированные семьи получают данные.
+
+Активный ребёнок родителя хранится в `members.active_child_id` (NULL или недоступный
+ребёнок → первый ребёнок семьи; у ребёнка активный = он сам). Родитель переключает
+ребёнка в боте (кнопка «🧒 Ребёнок» при >1 ребёнке) и в Mini App (`PUT /api/active-child`,
+селектор в шапке); все data-запросы идут в разрезе `(family_id, active_child_id)`.
 
 ### Таблица `families` (v2)
 
@@ -96,7 +105,7 @@ peakflow/
 | `name` | TEXT | NOT NULL | Название семьи |
 | `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | Дата создания |
 
-### Таблица `members` (v2)
+### Таблица `members` (v2, `active_child_id` — v4)
 
 | Поле | Тип | Ограничения | Описание |
 |------|-----|-------------|----------|
@@ -104,6 +113,7 @@ peakflow/
 | `family_id` | INTEGER | NOT NULL REFERENCES families(id) | Семья участника |
 | `role` | TEXT | NOT NULL CHECK IN ('parent', 'child') | Роль участника |
 | `name` | TEXT | NOT NULL DEFAULT '' | Отображаемое имя |
+| `active_child_id` | INTEGER | — | Выбранный активный ребёнок родителя (NULL → первый ребёнок семьи; v4) |
 | `created_at` | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | Дата добавления |
 
 **Индекс:** `idx_members_family` по `family_id`.
@@ -240,12 +250,16 @@ class Measurement(StatesGroup):
 | `answer_callback(cb)` | `callback: CallbackQuery` | — | ACK + удаление сообщения callback |
 | `respond(cb, text, kb)` | `callback, text, kb, parse_mode` | `Message` | answer_callback + answer |
 | `_user_display_name(uid)` | `user_id: int` | `str` | Имя ребёнка или «Родитель» |
+| `_ctx(member) → (family_id, child_id)` | `member: dict \| None` | `tuple` | Тенант-контекст: семья и активный ребёнок (`member=None` → семья №1 из `.env`) |
+| `_child_name(member, child_id, child_name=None)` | `...` | `str` | Имя активного ребёнка (`member=None` → env `CHILD_NAME`) |
+| `_family_parents(member, family_id)` | `...` | `list[int]` | Telegram ID родителей семьи (fallback — env `PARENT_IDS`) |
+| `_no_child_reply(target, member)` | `target, member` | — | Подсказка «добавьте ребёнка», когда в семье нет детей |
 
 ### Клавиатуры
 
 | Функция | Параметры | Возвращает | Описание |
 |---------|-----------|-----------|----------|
-| `kb_main(is_parent)` | `is_parent_user: bool` | `InlineKeyboardMarkup` | Главное меню (разное для родителя/ребёнка) |
+| `kb_main(is_parent, show_child_button=False)` | `is_parent_user: bool, show_child_button: bool` | `InlineKeyboardMarkup` | Главное меню (разное для родителя/ребёнка); кнопка выбора ребёнка при >1 ребёнке |
 | `kb_back()` | — | `InlineKeyboardMarkup` | Кнопка «⬅️ Назад» |
 | `kb_pagination(page, total)` | `page: int, total_pages: int` | `InlineKeyboardMarkup` | Кнопки ⏮️ 1/2 ⏭️ |
 
@@ -323,6 +337,10 @@ async def scheduler_loop():
     #   Вс 21:00 — недельный отчёт родителям
 ```
 
+> **Ограничение:** планировщик по-прежнему обслуживает только семью №1 из `.env`
+> (`_ctx(None)`): напоминания ребёнку, эскалация родителям и недельный отчёт не
+> обходят все семьи. Мульти-семейный обход — вне SP3C (2D/Фаза 3).
+
 ### Главная функция
 
 ```python
@@ -360,6 +378,11 @@ def main():
 | `create_family(db, name)` / `get_family(db, fid)` | `str, str` / `str, int` | `int` / `Optional[dict]` | Создать/прочитать семью |
 | `add_member(db, telegram_id, family_id, role, name)` / `get_member(db, telegram_id)` | `...` | — / `Optional[dict]` | Upsert/чтение участника |
 | `list_family_children(db, family_id)` | `str, int` | `list[dict]` | Дети семьи |
+| `list_family_parents(db, family_id)` | `str, int` | `list[dict]` | Родители семьи (получатели уведомлений) |
+| `count_family_children(db, family_id)` | `str, int` | `int` | Число детей семьи (кнопка выбора при >1) |
+| `set_active_child(db, telegram_id, child_id)` | `str, int, int` | `bool` | Выбрать активного ребёнка родителя (валидирует роль и свою семью) |
+| `resolve_active_child(db, member)` | `str, dict` | `int \| None` | Активный ребёнок: ребёнок → сам; родитель → `active_child_id`/первый; нет детей → `None` |
+| `backup_family_db(db, dest, family_id)` | `str, str, int` | — | Family-scoped бэкап: вся схема, но только строки одной семьи |
 | `get_setting(db, key, default='', family_id=1)` / `set_setting(db, key, value, family_id=1)` | `...` | `str` / — | Настройки в разрезе семьи |
 | `get_effective_target(db, fallback, family_id=1)` | `str, int, int` | `int` | Целевая ПСВ (settings → fallback → 300) |
 | `get_reminder_hours(db, family_id=1)` | `str, int` | `dict` | Часы напоминаний |
@@ -455,7 +478,7 @@ def main():
 | Красная зона | Мгновенно при замере < 60% | Оба родителя |
 | Новый замер | Мгновенно | Другой родитель |
 
-### Регистрация семьи (v3)
+### Регистрация семьи (v3) и выбор ребёнка (v4)
 
 Неизвестный пользователь на `/start` видит экран выбора:
 
@@ -469,12 +492,14 @@ def main():
 
 Родитель в «⚙️ Настройки» → «👨‍👩‍👧 Участники» видит invite-код и может его
 перегенерировать; «🧒 Дети» — карточки детей (создать/удалить), каждая с токеном
-для входа ребёнка.
+для входа ребёнка. Активный ребёнок помечается «✅»; при >1 ребёнке в главном меню
+появляется кнопка «🧒 Ребёнок» (`pick_child` → `set_child_<id>`) для переключения.
 
 **Инфраструктура ролей:** `MemberMiddleware` один раз на update читает строку
 `members` в `asyncio.to_thread` и кладёт `member` в data хендлеров. Хелпер
 `_role(member, uid)` возвращает роль из БД, а при `member is None` — fallback на
-`.env` (семья №1).
+`.env` (семья №1). Тенант-контекст даёт `_ctx(member)` → `(family_id, active_child_id)`,
+имя активного ребёнка — `_child_name`, получатели уведомлений — `_family_parents`.
 
 ---
 
@@ -515,6 +540,16 @@ Mini App даёт общий Caddy через `./manage.sh caddy` (Let's Encrypt
 пишет фрагмент `/etc/caddy/conf.d/<instance>.caddy`, базовый `/etc/caddy/Caddyfile`
 импортирует `conf.d/*.caddy` (шаблон-справка — `deploy/Caddyfile.site`).
 
+Mini App tenant-aware: `_resolve_user` берёт роль, `family_id`, `active_child_id`
+и список детей из `members` (gate 2B снят — семьи ≠ №1 обслуживаются). `/api/me`
+отдаёт `children` и `active_child_id`; `GET /api/children` — список детей семьи;
+`PUT /api/active-child` (`{child_id}`, только родитель) меняет активного ребёнка.
+Все data-эндпоинты (`/api/status`, `/api/history`, `/api/chart`, `/api/stats`,
+`/api/settings`, `/api/export/*`, `/api/backup`) scoped по
+`(family_id, active_child_id)`; бэкап — `backup_family_db` (данные одной семьи).
+В шапке Mini App при >1 ребёнке показывается селектор (`<select>`), при 0 детей —
+подсказка «Добавьте ребёнка в боте»; уведомления уходят родителям семьи.
+
 ### Настройка
 
 ```bash
@@ -532,7 +567,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 330 passed
+# 412 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

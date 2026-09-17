@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from database import (
     DEFAULT_FAMILY_ID,
     add_or_replace_measurement,
-    backup_db,
+    backup_family_db,
     delete_measurement,
     edit_measurement,
     get_all_measurements,
@@ -27,10 +27,15 @@ from database import (
     get_measurements_for_month,
     get_measurements_paginated,
     get_previous_of_tod,
-    get_reminder_hours,    get_stats,
+    get_reminder_hours,
+    get_stats,
     get_today_measurements,
     get_effective_target as _db_effective_target,
     get_member,
+    list_family_children,
+    list_family_parents,
+    resolve_active_child,
+    set_active_child,
     set_note,
     set_setting,
     validate_reminder_hours,
@@ -56,8 +61,8 @@ MONTH_NAMES = [
 ]
 
 
-def _effective_target(config) -> int:
-    return _db_effective_target(config.DB_PATH, getattr(config, "TARGET_PEF", 0))
+def _effective_target(config, family_id: int = DEFAULT_FAMILY_ID) -> int:
+    return _db_effective_target(config.DB_PATH, getattr(config, "TARGET_PEF", 0), family_id)
 
 
 def _auto_time_of_day(config) -> str:
@@ -80,15 +85,23 @@ def _pef_zone(pef: int, target: int, config) -> str:
 
 
 def _schedule_add_notifications(background, bot, config, who: int, pef: int,
-                                tod: str, target: int, pct: int) -> None:
+                                tod: str, target: int, pct: int, recipients,
+                                child_name=None,
+                                child_id: int | None = None) -> None:
     """Queue Telegram notifications off the request path (BackgroundTasks).
 
     A slow or unavailable Telegram API must not delay the HTTP response, so
-    the sends run after it is returned.
+    the sends run after it is returned. ``recipients``/``child_name``/
+    ``child_id`` carry the caller's tenant (family parents + active child)
+    explicitly; there is no env fallback.
     """
-    background.add_task(notify_added, bot, config, who, pef, tod, target)
+    background.add_task(notify_added, bot, config, who, pef, tod, target,
+                        recipients=recipients, child_name=child_name,
+                        child_id=child_id)
     if pct < getattr(config, "ZONE_YELLOW", 60):
-        background.add_task(notify_red_zone, bot, config, pef, tod, target, who=who)
+        background.add_task(notify_red_zone, bot, config, pef, tod, target, who=who,
+                            recipients=recipients, child_name=child_name,
+                            child_id=child_id)
 
 
 class MeasurementIn(BaseModel):
@@ -110,6 +123,10 @@ class RemindersIn(BaseModel):
     parent_evening: int = Field(ge=0, le=23)
 
 
+class ActiveChildIn(BaseModel):
+    child_id: int
+
+
 REMINDER_KEYS = ("child_morning", "child_evening", "parent_morning", "parent_evening")
 
 
@@ -125,12 +142,17 @@ def _month_bounds(year: int, month: int) -> tuple[str, str]:
     return start, last_day.strftime("%Y-%m-%d")
 
 
-def _who(config, added_by: int) -> str:
-    if added_by == getattr(config, "CHILD_ID", 0):
-        return getattr(config, "CHILD_NAME", "Ребёнок")
-    if added_by in (getattr(config, "PARENT_IDS", []) or []):
-        return "Родитель"
-    return "Кто-то"
+def _shape_children(children: list) -> list:
+    """Trim member rows to the fields the Mini App needs."""
+    return [
+        {
+            "telegram_id": c["telegram_id"],
+            "family_id": c["family_id"],
+            "role": c["role"],
+            "name": c.get("name") or "Ребёнок",
+        }
+        for c in children
+    ]
 
 
 def _content_disposition(filename: str) -> str:
@@ -145,7 +167,7 @@ def create_app(services: dict) -> FastAPI:
     app = FastAPI(title="Peakflow Bot Mini App API", docs_url=None, redoc_url=None)
     config = services.get("config")
 
-    def _resolve_user(init_data: str | None) -> dict:
+    async def _resolve_user(init_data: str | None) -> dict:
         token = getattr(config, "BOT_TOKEN", "") or ""
         if not token or not init_data:
             raise HTTPException(403, "Нет доступа")
@@ -154,7 +176,7 @@ def create_app(services: dict) -> FastAPI:
             raise HTTPException(403, "Нет доступа")
         uid = user.get("id")
         try:
-            member = get_member(config.DB_PATH, uid)
+            member = await _db(get_member, config.DB_PATH, uid)
         except sqlite3.OperationalError as e:
             # Uninitialized/locked DB: behave as "not a member" (403 via fallback)
             # instead of leaking a 500. Narrow to OperationalError so real
@@ -164,28 +186,58 @@ def create_app(services: dict) -> FastAPI:
         if member:
             role = member["role"]
             family_id = member["family_id"]
+            # Load the family's children once; resolve the active one from that
+            # list so the same query is not issued twice.
+            children = await _db(list_family_children, config.DB_PATH, family_id)
+            active_child_id = await _db(resolve_active_child, config.DB_PATH,
+                                        member, children)
         else:
-            # Fallback for family #1 before its members are read (defensive).
+            # Family #1 fallback (member row missing): only the env-configured
+            # ids are allowed. The active child is the env child, mirroring
+            # bot._ctx's member=None branch.
             if uid == getattr(config, "CHILD_ID", 0):
-                role, family_id = "child", 1
+                role, family_id = "child", DEFAULT_FAMILY_ID
             elif uid in (getattr(config, "PARENT_IDS", []) or []):
-                role, family_id = "parent", 1
+                role, family_id = "parent", DEFAULT_FAMILY_ID
             else:
                 raise HTTPException(403, "Нет доступа")
-        # Interim gate until SP2C threads the active child/family through every
-        # query: all data access still targets family #1's global CHILD_ID, so
-        # members of any other family must not reach it.
-        if member and member["family_id"] != DEFAULT_FAMILY_ID:
-            raise HTTPException(403, "Дневник для новых семей появится позже")
-        return {"user": user, "role": role, "family_id": family_id, "member": member}
+            active_child_id = getattr(config, "CHILD_ID", 0) or None
+            children = (
+                [{"telegram_id": active_child_id, "family_id": family_id,
+                  "role": "child", "name": getattr(config, "CHILD_NAME", "Ребёнок")}]
+                if active_child_id else []
+            )
+        return {
+            "user": user,
+            "role": role,
+            "family_id": family_id,
+            "member": member,
+            "active_child_id": active_child_id,
+            "children": _shape_children(children),
+        }
 
-    def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
-        return _resolve_user(x_telegram_init_data)
+    async def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
+        return await _resolve_user(x_telegram_init_data)
 
-    def require_parent(auth: dict = Depends(require_user)) -> dict:
+    async def require_parent(auth: dict = Depends(require_user)) -> dict:
         if auth["role"] != "parent":
             raise HTTPException(403, "Только родители")
         return auth
+
+    def _child_name(auth: dict) -> str:
+        """Display name of the caller's active child."""
+        if auth["member"] is None:
+            return getattr(config, "CHILD_NAME", "Ребёнок")
+        for child in auth["children"]:
+            if child["telegram_id"] == auth["active_child_id"]:
+                return child["name"]
+        return "Ребёнок"
+
+    async def _family_parent_ids(auth: dict) -> list:
+        if auth["member"] is None:
+            return list(getattr(config, "PARENT_IDS", []) or [])
+        rows = await _db(list_family_parents, config.DB_PATH, auth["family_id"])
+        return [r["telegram_id"] for r in rows]
 
     @app.get("/healthz")
     async def healthz():
@@ -194,13 +246,23 @@ def create_app(services: dict) -> FastAPI:
             return JSONResponse(status_code=503, content={"status": "bot down"})
         return {"status": "ok"}
 
+    @app.get("/api/children")
+    async def children(auth: dict = Depends(require_user)):
+        return {
+            "children": auth["children"],
+            "active_child_id": auth["active_child_id"],
+        }
+
     @app.get("/api/me")
     async def me(auth: dict = Depends(require_user)):
         return {
             "user": auth["user"],
             "role": auth["role"],
-            "child_name": getattr(config, "CHILD_NAME", "Ребёнок"),
-            "target_pef": await _db(_effective_target, config),
+            "family_id": auth["family_id"],
+            "child_name": _child_name(auth),
+            "active_child_id": auth["active_child_id"],
+            "children": auth["children"],
+            "target_pef": await _db(_effective_target, config, auth["family_id"]),
             "zones": {
                 "green": getattr(config, "ZONE_GREEN", 80),
                 "yellow": getattr(config, "ZONE_YELLOW", 60),
@@ -210,9 +272,11 @@ def create_app(services: dict) -> FastAPI:
     @app.get("/api/status")
     async def status(auth: dict = Depends(require_user)):
         return {
-            "today": await _db(get_today_measurements, config.DB_PATH, config.CHILD_ID),
-            "last": await _db(get_last_measurement, config.DB_PATH, config.CHILD_ID),
-            "target_pef": await _db(_effective_target, config),
+            "today": await _db(get_today_measurements, config.DB_PATH,
+                               auth["active_child_id"], auth["family_id"]),
+            "last": await _db(get_last_measurement, config.DB_PATH,
+                              auth["active_child_id"], auth["family_id"]),
+            "target_pef": await _db(_effective_target, config, auth["family_id"]),
         }
 
     @app.get("/api/history")
@@ -222,7 +286,8 @@ def create_app(services: dict) -> FastAPI:
         auth: dict = Depends(require_user),
     ):
         items, total, total_pages = await _db(
-            get_measurements_paginated, config.DB_PATH, config.CHILD_ID, page, per_page
+            get_measurements_paginated, config.DB_PATH, auth["active_child_id"],
+            page, per_page, auth["family_id"]
         )
         return {"items": items, "page": page, "total": total, "total_pages": total_pages}
 
@@ -236,7 +301,8 @@ def create_app(services: dict) -> FastAPI:
         now = datetime.now(timezone(timedelta(hours=offset)))
         if year is None or month is None:
             year, month = now.year, now.month
-        rows = await _db(get_measurements_for_month, config.DB_PATH, config.CHILD_ID, year, month)
+        rows = await _db(get_measurements_for_month, config.DB_PATH,
+                         auth["active_child_id"], year, month, False, auth["family_id"])
         points = [
             {
                 "date": str(r["measured_at"])[:10],
@@ -246,11 +312,12 @@ def create_app(services: dict) -> FastAPI:
             }
             for r in rows
         ]
-        available = await _db(get_available_months, config.DB_PATH, config.CHILD_ID)
+        available = await _db(get_available_months, config.DB_PATH,
+                              auth["active_child_id"], auth["family_id"])
         requested = (year, month)
         return {
             "points": points,
-            "target_pef": await _db(_effective_target, config),
+            "target_pef": await _db(_effective_target, config, auth["family_id"]),
             "zones": {
                 "green": getattr(config, "ZONE_GREEN", 80),
                 "yellow": getattr(config, "ZONE_YELLOW", 60),
@@ -264,46 +331,56 @@ def create_app(services: dict) -> FastAPI:
 
     @app.get("/api/stats")
     async def stats(auth: dict = Depends(require_user)):
-        data = await _db(get_stats, config.DB_PATH, config.CHILD_ID)
-        data["target_pef"] = await _db(_effective_target, config)
+        data = await _db(get_stats, config.DB_PATH, auth["active_child_id"], auth["family_id"])
+        data["target_pef"] = await _db(_effective_target, config, auth["family_id"])
         return data
 
     @app.post("/api/measurements")
     async def add(background: BackgroundTasks, body: MeasurementIn, force: bool = False,
                   auth: dict = Depends(require_user)):
         who = auth["user"]["id"]
+        child_id = auth["active_child_id"]
+        if child_id is None:
+            raise HTTPException(409, "В семье нет ребёнка")
         tod = _auto_time_of_day(config)
-        target = await _db(_effective_target, config)
+        target = await _db(_effective_target, config, auth["family_id"])
         mid, status = await _db(
             add_or_replace_measurement,
-            config.DB_PATH, body.pef, tod, config.CHILD_ID, who, force,
+            config.DB_PATH, body.pef, tod, child_id, who, force,
+            family_id=auth["family_id"],
         )
         if status == "exists":
-            row = await _db(get_last_of_tod, config.DB_PATH, config.CHILD_ID, tod)
+            row = await _db(get_last_of_tod, config.DB_PATH, child_id, tod, auth["family_id"])
             raise HTTPException(409, detail=json.dumps({
                 "message": f"{'Утренний' if tod == 'morning' else 'Вечерний'} замер уже есть сегодня",
                 "tod": tod,
                 "existing_id": row["id"] if row else None,
             }, ensure_ascii=False))
-        prev = await _db(get_previous_of_tod, config.DB_PATH, config.CHILD_ID, tod, mid)
+        prev = await _db(get_previous_of_tod, config.DB_PATH, child_id, tod, mid, auth["family_id"])
         diff = None
         if prev:
             diff = body.pef - prev["pef_value"]
         pct = _pct_of(body.pef, target)
-        _schedule_add_notifications(background, services.get("bot"), config,
-                                    who, body.pef, tod, target, pct)
+        _schedule_add_notifications(
+            background, services.get("bot"), config, who, body.pef, tod, target, pct,
+            recipients=await _family_parent_ids(auth),
+            child_name=_child_name(auth),
+            child_id=child_id,
+        )
         return {"id": mid, "pef": body.pef, "tod": tod,
                 "zone": _pef_zone(body.pef, target, config), "pct": pct, "diff": diff}
 
     @app.patch("/api/measurements/{mid}")
     async def edit(mid: int, body: MeasurementIn, auth: dict = Depends(require_parent)):
-        if not await _db(edit_measurement, config.DB_PATH, mid, body.pef, config.CHILD_ID):
+        if not await _db(edit_measurement, config.DB_PATH, mid, body.pef,
+                         auth["active_child_id"], auth["family_id"]):
             raise HTTPException(404, "Запись не найдена")
         return {"id": mid, "pef": body.pef}
 
     @app.delete("/api/measurements/{mid}")
     async def remove(mid: int, auth: dict = Depends(require_parent)):
-        if not await _db(delete_measurement, config.DB_PATH, mid, config.CHILD_ID):
+        if not await _db(delete_measurement, config.DB_PATH, mid,
+                         auth["active_child_id"], auth["family_id"]):
             raise HTTPException(404, "Запись не найдена")
         return {"deleted": True, "id": mid}
 
@@ -311,22 +388,25 @@ def create_app(services: dict) -> FastAPI:
     async def note(mid: int, body: NoteIn, auth: dict = Depends(require_user)):
         raw = body.note or ""
         note_text = raw.strip()[:200]
-        if not await _db(set_note, config.DB_PATH, mid, note_text, config.CHILD_ID):
+        if not await _db(set_note, config.DB_PATH, mid, note_text,
+                         auth["active_child_id"], auth["family_id"]):
             raise HTTPException(404, "Запись не найдена")
         return {"id": mid, "note": note_text, "truncated": len(raw.strip()) > 200}
 
     @app.get("/api/settings")
     async def settings(auth: dict = Depends(require_parent)):
         return {
-            "target_pef": await _db(_effective_target, config),
-            "child_name": getattr(config, "CHILD_NAME", "Ребёнок"),
-            "total": len(await _db(get_all_measurements, config.DB_PATH, config.CHILD_ID, include_auto=True)),
-            "reminder_hours": await _db(get_reminder_hours, config.DB_PATH),
+            "target_pef": await _db(_effective_target, config, auth["family_id"]),
+            "child_name": _child_name(auth),
+            "total": len(await _db(get_all_measurements, config.DB_PATH,
+                                   auth["active_child_id"], True, auth["family_id"])),
+            "reminder_hours": await _db(get_reminder_hours, config.DB_PATH, auth["family_id"]),
         }
 
     @app.put("/api/settings/target")
     async def put_target(body: TargetIn, auth: dict = Depends(require_parent)):
-        await _db(set_setting, config.DB_PATH, "target_pef", str(body.target_pef))
+        await _db(set_setting, config.DB_PATH, "target_pef",
+                  str(body.target_pef), auth["family_id"])
         return {"target_pef": body.target_pef}
 
     @app.put("/api/settings/reminders")
@@ -336,21 +416,33 @@ def create_app(services: dict) -> FastAPI:
         if error:
             raise HTTPException(422, error)
         for key in REMINDER_KEYS:
-            await _db(set_setting, config.DB_PATH, f"reminder_{key}", str(getattr(body, key)))
-        return {"reminder_hours": await _db(get_reminder_hours, config.DB_PATH)}
+            await _db(set_setting, config.DB_PATH, f"reminder_{key}",
+                      str(getattr(body, key)), auth["family_id"])
+        return {"reminder_hours": await _db(get_reminder_hours, config.DB_PATH, auth["family_id"])}
+
+    @app.put("/api/active-child")
+    async def put_active_child(body: ActiveChildIn, auth: dict = Depends(require_parent)):
+        ok = await _db(set_active_child, config.DB_PATH, auth["user"]["id"], body.child_id)
+        if not ok:
+            raise HTTPException(404, "Ребёнок не найден")
+        return {"active_child_id": body.child_id}
 
     @app.get("/api/export/periods")
     async def export_periods(auth: dict = Depends(require_parent)):
-        months = [f"{y:04d}-{m:02d}" for y, m in await _db(get_available_months, config.DB_PATH, config.CHILD_ID)]
+        months = [f"{y:04d}-{m:02d}" for y, m in await _db(
+            get_available_months, config.DB_PATH, auth["active_child_id"], auth["family_id"])]
         return {"months": months, "latest": months[-1] if months else None}
 
     @app.get("/api/export/csv")
     async def export_csv(period: str = "all", auth: dict = Depends(require_parent)):
-        target = await _db(_effective_target, config)
-        child = getattr(config, "CHILD_NAME", "Ребёнок")
+        child_id = auth["active_child_id"]
+        target = await _db(_effective_target, config, auth["family_id"])
+        child = _child_name(auth)
+        parent_ids = await _family_parent_ids(auth)
         stamp = datetime.now(timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))).strftime("%Y%m%d_%H%M")
         if period == "all":
-            rows = await _db(get_measurements_between, config.DB_PATH, config.CHILD_ID, "2000-01-01", _today(config))
+            rows = await _db(get_measurements_between, config.DB_PATH, child_id,
+                             "2000-01-01", _today(config), auth["family_id"])
             filename = f"peakflow_{child}_{stamp}.csv"
         else:
             parsed = parse_month(period)
@@ -358,13 +450,22 @@ def create_app(services: dict) -> FastAPI:
                 raise HTTPException(422, "Неверный период")
             y, m = parsed
             start, end = _month_bounds(y, m)
-            rows = await _db(get_measurements_between, config.DB_PATH, config.CHILD_ID, start, end)
+            rows = await _db(get_measurements_between, config.DB_PATH, child_id,
+                             start, end, auth["family_id"])
             filename = f"peakflow_{child}_{y:04d}-{m:02d}.csv"
         if not rows:
             raise HTTPException(404, "Нет записей за период")
-        stats = await _db(get_stats, config.DB_PATH, config.CHILD_ID)
+        stats = await _db(get_stats, config.DB_PATH, child_id, auth["family_id"])
+
+        def _display(uid: int) -> str:
+            if uid == child_id:
+                return child
+            if uid in parent_ids:
+                return "Родитель"
+            return "Кто-то"
+
         content = _build_csv(rows, target, child, stats=stats,
-                             display_name=lambda uid: _who(config, uid),
+                             display_name=_display,
                              zone_green=getattr(config, "ZONE_GREEN", 80),
                              zone_yellow=getattr(config, "ZONE_YELLOW", 60))
         return Response(
@@ -379,7 +480,7 @@ def create_app(services: dict) -> FastAPI:
         fd, dest = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
-            await _db(backup_db, config.DB_PATH, dest)
+            await _db(backup_family_db, config.DB_PATH, dest, auth["family_id"])
         except Exception as e:
             logger.error("Ошибка бэкапа: %s", e)
             if os.path.exists(dest):

@@ -42,7 +42,7 @@ from database import (
     mark_reminder_sent, was_reminder_sent,
     set_setting, set_note,
     get_effective_target as _db_get_effective_target,
-    get_reminder_hours, backup_db, validate_reminder_hours,
+    get_reminder_hours, backup_family_db, validate_reminder_hours,
     get_measurements_for_month, get_available_months, get_measurements_between,
     get_last_of_tod, replace_auto_measurement,
     get_previous_of_tod,
@@ -53,6 +53,10 @@ from database import (
     get_family_invite,
     regenerate_family_invite,
     list_family_children,
+    list_family_parents,
+    resolve_active_child,
+    set_active_child,
+    count_family_children,
     list_child_cards,
     create_invite,
     delete_invite,
@@ -157,64 +161,18 @@ def _family_deny_text(member) -> str:
     return "⚠️ Сначала войдите в семью." if member is None else "⚠️ Только для родителей."
 
 
-def _is_reg_command(text) -> bool:
-    """True only for a bare /start or /cancel addressed to *this* bot.
-
-    The optional ``@mention`` suffix is accepted only when it matches the bot's
-    own username; anything else (``/start@otherbot``, ``/start@``, ``/startxyz``)
-    is rejected. A bare prefix match would let those fall through to
-    ``catch_all`` and leak family #1's menu.
-    """
-    parts = (text or "").split()
-    if not parts:
-        return False
-    token = parts[0]
-    if "@" in token:
-        command, _, mention = token.partition("@")
-        username = getattr(bot, "username", None)
-        if not mention or not username or mention.lower() != username.lower():
-            return False
-        token = command
-    return token in {"/start", "/cancel"}
-
-
 class MemberMiddleware(BaseMiddleware):
-    """Inject the caller's member row (role, family_id) from the DB.
+    """Inject the caller's member row (role, family_id, active_child_id).
 
-    Interim gate until SP2C threads the active child/family through every
-    handler: all data access still targets family #1's global ``CHILD_ID``, so
-    members of any other family are denied everything except registration.
+    All data access resolves the tenant from ``member`` (see ``_ctx``), so the
+    middleware only needs to load the row once per update.
     """
-
-    REG_SOON_MESSAGE = (
-        "🚧 Дневник для нескольких семей появится в следующем обновлении. "
-        "Регистрация уже сохранена."
-    )
-    REG_SOON_CALLBACK = "🚧 Дневник для новых семей появится позже"
-    _REG_CALLBACKS = {"reg_create", "reg_join"}
-
-    @classmethod
-    def _is_registration(cls, event) -> bool:
-        if isinstance(event, types.CallbackQuery):
-            return event.data in cls._REG_CALLBACKS
-        return _is_reg_command(getattr(event, "text", None))
-
-    @classmethod
-    async def _deny(cls, event) -> None:
-        if isinstance(event, types.CallbackQuery):
-            await event.answer(cls.REG_SOON_CALLBACK, show_alert=True)
-        else:
-            await event.answer(cls.REG_SOON_MESSAGE)
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         uid = getattr(user, "id", None)
         member = await _db(get_member, DB_PATH, uid) if uid else None
         data["member"] = member
-        if member and member["family_id"] != DEFAULT_FAMILY_ID:
-            if not self._is_registration(event):
-                await self._deny(event)
-                return
         return await handler(event, data)
 
 
@@ -249,9 +207,9 @@ class Registration(StatesGroup):
     adding_child_name = State()
 
 
-def get_effective_target() -> int:
-    """Целевая ПСВ из БД (settings), fallback — TARGET_PEF из .env."""
-    return _db_get_effective_target(DB_PATH, TARGET_PEF)
+def get_effective_target(family_id: int = DEFAULT_FAMILY_ID) -> int:
+    """Целевая ПСВ из БД (settings) семьи, fallback — TARGET_PEF из .env."""
+    return _db_get_effective_target(DB_PATH, TARGET_PEF, family_id=family_id)
 
 
 async def _db(func, *args, **kwargs):
@@ -262,6 +220,55 @@ async def _db(func, *args, **kwargs):
     database functions directly.
     """
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _ctx(member):
+    """(family_id, active_child_id). member=None → семья №1 из .env."""
+    if not member:
+        return DEFAULT_FAMILY_ID, CHILD_ID
+    if member["role"] == "child":
+        return member["family_id"], member["telegram_id"]
+    return member["family_id"], await _db(resolve_active_child, DB_PATH, member)
+
+
+async def _child_name(member, child_id, child_name=None) -> str:
+    """Display name of the active child.
+
+    ``member=None`` → env ``CHILD_NAME`` (family #1 semantics). For a real
+    member the child's stored name is looked up from ``members``; callers that
+    already have it pass ``child_name`` to skip the query.
+    """
+    if member is None:
+        return CHILD_NAME
+    if child_id is None:
+        return "Ребёнок"
+    if child_name:
+        return child_name
+    row = await _db(get_member, DB_PATH, child_id)
+    if row and row.get("name"):
+        return row["name"]
+    return "Ребёнок"
+
+
+async def _family_parents(member, family_id) -> list:
+    if not member:
+        return list(PARENT_IDS)
+    return [p["telegram_id"] for p in await _db(list_family_parents, DB_PATH, family_id)]
+
+
+async def _no_child_reply(target, member):
+    """Подсказка «добавьте ребёнка», когда у семьи нет детей-участников."""
+    text = (
+        "🧒 В семье пока нет ребёнка.\n\n"
+        "Добавьте ребёнка в разделе «Дети»."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧒 Дети", callback_data="children")],
+    ])
+    if isinstance(target, types.CallbackQuery):
+        await respond(target, text, kb=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
 
 
 def auto_time_of_day() -> str:
@@ -329,11 +336,13 @@ async def respond(callback: types.CallbackQuery, text: str,
 # ---------------------------------------------------------------------------
 # Keyboards
 # ---------------------------------------------------------------------------
-def kb_main(is_parent_user: bool) -> InlineKeyboardMarkup:
+def kb_main(is_parent_user: bool, show_child_button: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💨 Измерение", callback_data="add")],
     ]
     if is_parent_user:
+        if show_child_button:
+            rows.insert(0, [InlineKeyboardButton(text="🧒 Ребёнок", callback_data="pick_child")])
         rows.append([
             InlineKeyboardButton(text="📋 История", callback_data="history"),
             InlineKeyboardButton(text="📊 График", callback_data="chart"),
@@ -411,9 +420,13 @@ def kb_pef_tens() -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 # Status block — shows in main menu
 # ---------------------------------------------------------------------------
-async def build_status_block() -> str:
-    today = await asyncio.to_thread(get_today_measurements, DB_PATH, CHILD_ID)
-    target = await asyncio.to_thread(get_effective_target)
+async def build_status_block(member=None) -> str:
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        return "🧒 В семье пока нет ребёнка. Добавьте ребёнка в разделе «Дети»."
+
+    today = await _db(get_today_measurements, DB_PATH, child_id, family_id=family_id)
+    target = await _db(get_effective_target, family_id=family_id)
 
     morning_val = None
     evening_val = None
@@ -427,7 +440,7 @@ async def build_status_block() -> str:
     evening_display = f"{tod_emoji('evening')} {evening_val} {pef_zone(evening_val, target)[0]}" if evening_val else f"{tod_emoji('evening')} —"
 
     # Last measurement diff (only the two latest rows are needed)
-    recent = await asyncio.to_thread(get_recent_measurements, DB_PATH, CHILD_ID, 2)
+    recent = await _db(get_recent_measurements, DB_PATH, child_id, 2, family_id=family_id)
     diff = ""
     if len(recent) >= 2:
         d = recent[0]["pef_value"] - recent[1]["pef_value"]
@@ -435,8 +448,9 @@ async def build_status_block() -> str:
         zone, _ = pef_zone(recent[0]["pef_value"], target)
         diff = f"\nПоследний: {recent[0]['pef_value']} {zone} ({sign}{d})"
 
+    name = await _child_name(member, child_id)
     return (
-        f"👋 *{escape_md(CHILD_NAME)}* | Целевая: {target} л/мин\n\n"
+        f"👋 *{escape_md(name)}* | Целевая: {target} л/мин\n\n"
         f"Сегодня: {morning_display} | {evening_display}"
         f"{diff}"
     )
@@ -446,32 +460,21 @@ async def build_status_block() -> str:
 # Send main menu
 # ---------------------------------------------------------------------------
 async def send_main_menu(message_or_callback, user_id: int, member=None):
-    # Single choke point: a non-family-#1 member must never render the
-    # family-#1 menu. The member row is read fresh here so newly created or
-    # just-joined families are caught even when callers pass member=None.
-    db_member = await _db(get_member, DB_PATH, user_id)
-    effective = db_member if db_member is not None else member
-    if effective and effective["family_id"] != DEFAULT_FAMILY_ID:
-        if isinstance(message_or_callback, types.CallbackQuery):
-            await answer_callback(message_or_callback)
-            target = getattr(message_or_callback, "message", None)
-            if target is not None:
-                await target.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        else:
-            await message_or_callback.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        return
-
     is_p = _role(member, user_id) == "parent"
-    status = await build_status_block()
+    status = await build_status_block(member)
+    family_id = member["family_id"] if member else DEFAULT_FAMILY_ID
+    show_child_button = await _db(count_family_children, DB_PATH, family_id) > 1
 
     if isinstance(message_or_callback, types.CallbackQuery):
         await answer_callback(message_or_callback)
         await message_or_callback.message.answer(
-            status, parse_mode="Markdown", reply_markup=kb_main(is_p)
+            status, parse_mode="Markdown",
+            reply_markup=kb_main(is_p, show_child_button=show_child_button),
         )
     else:
         await message_or_callback.answer(
-            status, parse_mode="Markdown", reply_markup=kb_main(is_p)
+            status, parse_mode="Markdown",
+            reply_markup=kb_main(is_p, show_child_button=show_child_button),
         )
 
 
@@ -497,13 +500,6 @@ async def _show_registration(message_or_callback, extra_text: str = ""):
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    # Interim gate: /start is allowed through the middleware so registration can
-    # still run, but a non-family-#1 member must never reach send_main_menu
-    # (it reads family #1's global CHILD_ID).
-    if member and member["family_id"] != DEFAULT_FAMILY_ID:
-        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        await state.clear()
-        return
     role = _role(member, uid)
 
     # Deep-link: /start <token>
@@ -519,11 +515,6 @@ async def cmd_start(message: types.Message, state: FSMContext, member=None):
         token = parts[1].strip()
         result = await _db(join_by_invite, DB_PATH, token, uid)
         if result:
-            if result["family_id"] != DEFAULT_FAMILY_ID:
-                # Joined a new family: data access is gated until SP2C.
-                await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-                await state.clear()
-                return
             who = "👨‍👧 Родитель" if result["role"] == "parent" else f"👶 {escape_md(result['name'])}"
             await message.answer(f"✅ Вы вошли в семью как *{who}*", parse_mode="Markdown")
             await state.clear()
@@ -538,7 +529,8 @@ async def cmd_start(message: types.Message, state: FSMContext, member=None):
         await _show_registration(message)
         return
 
-    who = "👨‍👧 Родитель" if role == "parent" else f"👶 {escape_md(CHILD_NAME)}"
+    who = ("👨‍👧 Родитель" if role == "parent"
+           else f"👶 {escape_md(await _child_name(member, uid))}")
     await message.answer(f"✅ Привет! Вы вошли как *{who}*", parse_mode="Markdown")
     await send_main_menu(message, uid, member=member)
     await state.clear()
@@ -580,12 +572,6 @@ async def cb_reg_join(callback: types.CallbackQuery, state: FSMContext, member=N
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    # Interim gate: /cancel is allowed through so mid-registration users can
-    # escape a state, but a non-family-#1 member must not reach send_main_menu.
-    if member and member["family_id"] != DEFAULT_FAMILY_ID:
-        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        await state.clear()
-        return
     current = await state.get_state()
     # Always clear the FSM state first: an unknown user (mid-registration) must
     # be able to escape a text state with /cancel.
@@ -652,13 +638,19 @@ async def input_invite_code(message: types.Message, state: FSMContext, member=No
 # ADD measurement — auto time of day, inline пошаговый ввод
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "add")
-async def cb_add(callback: types.CallbackQuery, state: FSMContext):
+async def cb_add(callback: types.CallbackQuery, state: FSMContext, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     tod = auto_time_of_day()
     tod_icon = tod_emoji(tod)
     tod_name = tod_label(tod)
 
     # Check if already done (auto-carry doesn't count — it gets replaced)
-    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
+    if await _db(has_today_measurement, DB_PATH, child_id, tod,
+                 skip_auto=True, family_id=family_id):
         await respond(callback,
             f"⚠️ {tod_icon} {tod_name} уже измерено сегодня.\n\n"
             f"Хотите добавить ещё одно или исправить последнее?",
@@ -683,7 +675,11 @@ async def cb_add(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("add_force_"))
-async def cb_add_force(callback: types.CallbackQuery, state: FSMContext):
+async def cb_add_force(callback: types.CallbackQuery, state: FSMContext, member=None):
+    _, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     tod = callback.data.replace("add_force_", "")
     await state.update_data(input_context="add", forced_tod=tod)
     await respond(callback,
@@ -697,13 +693,19 @@ async def cb_add_force(callback: types.CallbackQuery, state: FSMContext):
 # ---------------------------------------------------------------------------
 # Пошаговый inline-ввод: сотни → десятки — функции сохранения
 # ---------------------------------------------------------------------------
-async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, data: dict):
+async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, data: dict, member=None):
     """Сохранить новое измерение после inline-ввода."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     if "forced_tod" in data:
         tod = data["forced_tod"]
     else:
         tod = auto_time_of_day()
-        if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
+        if await _db(has_today_measurement, DB_PATH, child_id, tod,
+                     skip_auto=True, family_id=family_id):
             # The auto-detected slot is already filled by a real entry.
             # Never silently flip morning↔evening (that corrupts statistics) —
             # keep the chosen value and ask the user which slot to use.
@@ -721,25 +723,32 @@ async def _save_measurement(callback: types.CallbackQuery, state: FSMContext, pe
             )
             return
 
-    await _persist_measurement(callback, state, pef, tod)
+    await _persist_measurement(callback, state, pef, tod, member=member)
 
 
-async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, tod: str):
+async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext, pef: int, tod: str, member=None):
     """Insert/replace a measurement with a definitive time of day."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     who = callback.from_user.id
 
     # Auto-carry record for this slot today → replace it with the real value
-    replaced_id = await _db(replace_auto_measurement, DB_PATH, CHILD_ID, tod, pef, who)
+    replaced_id = await _db(replace_auto_measurement, DB_PATH, child_id, tod, pef, who,
+                            family_id=family_id)
     if replaced_id:
         mid = replaced_id
     else:
-        mid = await _db(add_measurement, DB_PATH, pef, tod, CHILD_ID, who)
+        mid = await _db(add_measurement, DB_PATH, pef, tod, child_id, who,
+                        family_id=family_id)
 
-    target = await _db(get_effective_target)
+    target = await _db(get_effective_target, family_id=family_id)
     zone_emoji, zone_name = pef_zone(pef, target)
 
     # Diff against the previous measurement of the same time of day
-    prev = await _db(get_previous_of_tod, DB_PATH, CHILD_ID, tod, mid)
+    prev = await _db(get_previous_of_tod, DB_PATH, child_id, tod, mid,
+                     family_id=family_id)
     diff_msg = ""
     if prev:
         d = pef - prev["pef_value"]
@@ -758,14 +767,17 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
         ]),
     )
 
+    child_name = await _child_name(member, child_id)
+    parents = await _family_parents(member, family_id)
+
     # Notify other parents
-    added_by_name = _user_display_name(who)
-    for pid in PARENT_IDS:
-        if pid != who and pid != CHILD_ID:
+    added_by_name = _user_display_name(who, member, child_name)
+    for pid in parents:
+        if pid != who and pid != child_id:
             try:
                 await bot.send_message(
                     pid,
-                    f"📝 {escape_md(added_by_name)} добавил для *{escape_md(CHILD_NAME)}*: "
+                    f"📝 {escape_md(added_by_name)} добавил для *{escape_md(child_name)}*: "
                     f"{pef} л/мин {zone_emoji} ({tod_label(tod)})",
                     parse_mode="Markdown",
                 )
@@ -774,13 +786,13 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
 
     # Alert if red zone (skip the author — they already know the value)
     if pct_of(pef, target) < ZONE_YELLOW:
-        for pid in PARENT_IDS:
+        for pid in parents:
             if pid == who:
                 continue
             try:
                 await bot.send_message(
                     pid,
-                    f"🚨 *{escape_md(CHILD_NAME)}*: ПСВ *{pef}* л/мин — {zone_name}!\n"
+                    f"🚨 *{escape_md(child_name)}*: ПСВ *{pef}* л/мин — {zone_name}!\n"
                     f"Норма: {target} л/мин ({pct_of(pef, target)}%). Свяжитесь с врачом.",
                     parse_mode="Markdown",
                 )
@@ -793,7 +805,7 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
 
 
 @router.callback_query(F.data.in_({"pick_tod_morning", "pick_tod_evening"}))
-async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
+async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext, member=None):
     """User explicitly chose the time of day for a pending measurement."""
     data = await state.get_data()
     pef = data.get("pending_pef")
@@ -801,19 +813,24 @@ async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("❌ Значение потеряно, начните заново.", show_alert=True)
         return
     tod = "morning" if callback.data == "pick_tod_morning" else "evening"
-    await _persist_measurement(callback, state, pef, tod)
+    await _persist_measurement(callback, state, pef, tod, member=member)
 
 
 async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict, member=None):
     """Сохранить исправление последнего измерения."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     mid = data.get("edit_id")
     if mid is None:
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = await _db(edit_measurement, DB_PATH, mid, new_val, CHILD_ID)
+    ok = await _db(edit_measurement, DB_PATH, mid, new_val, child_id,
+                   family_id=family_id)
     if ok:
-        target = await _db(get_effective_target)
+        target = await _db(get_effective_target, family_id=family_id)
         zone, _ = pef_zone(new_val, target)
         await respond(callback,
             f"✅ Исправлено: *{new_val}* л/мин {zone}",
@@ -827,15 +844,20 @@ async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_
 
 async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict, member=None):
     """Сохранить исправление любого измерения."""
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     mid = data.get("edit_id")
     if mid is None:
         await callback.answer("❌ Ошибка: нет ID записи", show_alert=True)
         return
 
-    ok = await _db(edit_measurement, DB_PATH, mid, new_val, CHILD_ID)
+    ok = await _db(edit_measurement, DB_PATH, mid, new_val, child_id,
+                   family_id=family_id)
 
     if ok:
-        target = await _db(get_effective_target)
+        target = await _db(get_effective_target, family_id=family_id)
         zone, _ = pef_zone(new_val, target)
         await respond(callback,
             f"✅ Запись #{mid} исправлена: *{new_val}* л/мин {zone}",
@@ -883,7 +905,7 @@ async def cb_select_tens(callback: types.CallbackQuery, state: FSMContext, membe
 
     # Обрабатываем по контексту
     if context == "add":
-        await _save_measurement(callback, state, pef, data)
+        await _save_measurement(callback, state, pef, data, member=member)
     elif context == "edit_last":
         await _save_edit_last(callback, state, pef, data, member=member)
     elif context == "edit_any":
@@ -923,6 +945,7 @@ async def cb_note_skip(callback: types.CallbackQuery, state: FSMContext, member=
 @router.message(Measurement.waiting_note, F.text)
 async def input_note(message: types.Message, state: FSMContext, member=None):
     """Save the note text to the last measurement."""
+    family_id, child_id = await _ctx(member)
     data = await state.get_data()
     mid = data.get("note_for_id")
     if mid is None:
@@ -930,8 +953,13 @@ async def input_note(message: types.Message, state: FSMContext, member=None):
         await send_main_menu(message, message.from_user.id, member=member)
         return
 
+    if child_id is None:
+        await _no_child_reply(message, member)
+        await state.clear()
+        return
+
     note = message.text.strip()[:200]
-    ok = await _db(set_note, DB_PATH, mid, note, CHILD_ID)
+    ok = await _db(set_note, DB_PATH, mid, note, child_id, family_id=family_id)
 
     truncated = "" if len(message.text.strip()) <= 200 else " (обрезано до 200 символов)"
     await message.answer(
@@ -950,7 +978,11 @@ async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext, member=
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
-    last = await _db(get_last_measurement, DB_PATH, CHILD_ID)
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    last = await _db(get_last_measurement, DB_PATH, child_id, family_id=family_id)
     if not last:
         await respond(callback, "📭 Нет измерений для исправления.", kb=kb_back())
         return
@@ -997,17 +1029,22 @@ def _format_history_lines(measurements: list, target: int) -> list:
 
 
 async def _show_history(callback: types.CallbackQuery, page: int = 1, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     if page < 1:
         page = 1
+    scope = {"family_id": family_id} if family_id != DEFAULT_FAMILY_ID else {}
     measurements, total, total_pages = await _db(
-        get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
+        get_measurements_paginated, DB_PATH, child_id, page=page, per_page=10, **scope)
     # A stale keyboard (page since deleted) may point past the last page —
     # clamp instead of rendering an empty screen.
     if page > total_pages:
         page = total_pages
         measurements, total, total_pages = await _db(
-            get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
-    target = await _db(get_effective_target)
+            get_measurements_paginated, DB_PATH, child_id, page=page, per_page=10, **scope)
+    target = await _db(get_effective_target, family_id=family_id)
     is_p = _role(member, callback.from_user.id) == "parent"
 
     if not measurements:
@@ -1016,9 +1053,10 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1, member=Non
 
     lines = _format_history_lines(measurements, target)
     kb = kb_pagination(page, total_pages, is_p, measurements)
+    name = await _child_name(member, child_id)
 
     await respond(callback,
-        f"📋 История *{escape_md(CHILD_NAME)}*:\n\n" + "\n".join(lines),
+        f"📋 История *{escape_md(name)}*:\n\n" + "\n".join(lines),
         kb=kb,
     )
 
@@ -1032,11 +1070,16 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext, member=N
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
 
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     mid = parse_callback_int(callback.data, "edit_")
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    measurement = await _db(get_measurement_by_id, DB_PATH, mid)
+    measurement = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
     if not measurement:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
         return
@@ -1063,11 +1106,16 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext, me
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     mid = parse_callback_int(callback.data, "del_confirm_")
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    ok = await _db(delete_measurement, DB_PATH, mid, CHILD_ID)
+    ok = await _db(delete_measurement, DB_PATH, mid, child_id, family_id=family_id)
 
     if ok:
         await callback.answer("✅ Запись удалена.", show_alert=True)
@@ -1084,11 +1132,16 @@ async def cb_delete(callback: types.CallbackQuery, state: FSMContext, member=Non
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+
     mid = parse_callback_int(callback.data, "del_")
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    row = await _db(get_measurement_by_id, DB_PATH, mid)
+    row = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
 
     if not row:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
@@ -1124,10 +1177,10 @@ def kb_settings(target: int) -> InlineKeyboardMarkup:
     ])
 
 
-def build_settings_text(target: int, total: int) -> str:
+def build_settings_text(target: int, total: int, child_name: str = None) -> str:
     return (
         f"⚙️ *Настройки*\n\n"
-        f"👤 Ребёнок: *{escape_md(CHILD_NAME)}*\n"
+        f"👤 Ребёнок: *{escape_md(child_name or 'Ребёнок')}*\n"
         f"🎯 Целевая ПСВ: *{target}* л/мин\n"
         f"📊 Всего замеров: {total}\n\n"
         f"Выберите действие:"
@@ -1140,11 +1193,16 @@ async def cb_settings(callback: types.CallbackQuery, member=None):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    target = await _db(get_effective_target)
-    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
+    family_id, child_id = await _ctx(member)
+    target = await _db(get_effective_target, family_id=family_id)
+    if child_id is None:
+        measurements = []
+    else:
+        measurements = await _db(get_all_measurements, DB_PATH, child_id,
+                                 include_auto=True, family_id=family_id)
 
     await respond(callback,
-        build_settings_text(target, len(measurements)),
+        build_settings_text(target, len(measurements), await _child_name(member, child_id)),
         kb=kb_settings(target),
     )
 
@@ -1178,7 +1236,8 @@ async def cb_reminders(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    hours = await _db(get_reminder_hours, DB_PATH)
+    family_id, _ = await _ctx(member)
+    hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
     await respond(callback, build_reminders_text(hours), kb=kb_reminders())
 
 
@@ -1204,7 +1263,7 @@ async def cb_rem_set(callback: types.CallbackQuery, state: FSMContext, member=No
 
 
 @router.message(Measurement.editing_reminder_hour, F.text)
-async def input_reminder_hour(message: types.Message, state: FSMContext):
+async def input_reminder_hour(message: types.Message, state: FSMContext, member=None):
     data = await state.get_data()
     key = data.get("reminder_key")
     if not key or not message.text.strip().isdigit():
@@ -1215,22 +1274,24 @@ async def input_reminder_hour(message: types.Message, state: FSMContext):
         await message.answer("Введите число 0–23:")
         return
 
-    hours = await _db(get_reminder_hours, DB_PATH)
+    family_id, _ = await _ctx(member)
+    hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
     hours[key] = hour
     error = validate_reminder_hours(hours)
     if error:
         await message.answer(f"⚠️ {error}")
         return
 
-    await _db(set_setting, DB_PATH, f"reminder_{key}", str(hour))
+    await _db(set_setting, DB_PATH, f"reminder_{key}", str(hour), family_id=family_id)
     await message.answer(f"✅ Час изменён: {hour:02d}:00")
 
     await state.clear()
-    await _send_reminders_from_message(message)
+    await _send_reminders_from_message(message, member=member)
 
 
-async def _send_reminders_from_message(message: types.Message):
-    hours = await _db(get_reminder_hours, DB_PATH)
+async def _send_reminders_from_message(message: types.Message, member=None):
+    family_id, _ = await _ctx(member)
+    hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
     await message.answer(
         build_reminders_text(hours),
         parse_mode="Markdown",
@@ -1247,7 +1308,8 @@ async def cb_change_target(callback: types.CallbackQuery, state: FSMContext, mem
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
-    current = await _db(get_effective_target)
+    family_id, _ = await _ctx(member)
+    current = await _db(get_effective_target, family_id=family_id)
     await respond(callback,
         f"🎯 Текущая цель: *{current}* л/мин\n\n"
         f"Введите новое значение (100–800):",
@@ -1257,13 +1319,14 @@ async def cb_change_target(callback: types.CallbackQuery, state: FSMContext, mem
 
 
 @router.message(Measurement.editing_target_pef, F.text.isdigit())
-async def input_target(message: types.Message, state: FSMContext):
+async def input_target(message: types.Message, state: FSMContext, member=None):
     new_val = int(message.text.strip())
     if not (100 <= new_val <= 800):
         await message.answer("Диапазон: 100–800 л/мин.", reply_markup=kb_back())
         return
 
-    await _db(set_setting, DB_PATH, "target_pef", str(new_val))
+    family_id, _ = await _ctx(member)
+    await _db(set_setting, DB_PATH, "target_pef", str(new_val), family_id=family_id)
     zone, _ = pef_zone(new_val, new_val)  # target is 100% of itself
 
     await message.answer(
@@ -1273,15 +1336,20 @@ async def input_target(message: types.Message, state: FSMContext):
 
     await state.clear()
     # Send settings screen again
-    await _send_settings_from_message(message)
+    await _send_settings_from_message(message, member=member)
 
 
-async def _send_settings_from_message(message: types.Message):
-    target = await _db(get_effective_target)
-    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
+async def _send_settings_from_message(message: types.Message, member=None):
+    family_id, child_id = await _ctx(member)
+    target = await _db(get_effective_target, family_id=family_id)
+    if child_id is None:
+        measurements = []
+    else:
+        measurements = await _db(get_all_measurements, DB_PATH, child_id,
+                                 include_auto=True, family_id=family_id)
 
     await message.answer(
-        build_settings_text(target, len(measurements)),
+        build_settings_text(target, len(measurements), await _child_name(member, child_id)),
         parse_mode="Markdown",
         reply_markup=kb_settings(target),
     )
@@ -1290,11 +1358,20 @@ async def _send_settings_from_message(message: types.Message):
 # ---------------------------------------------------------------------------
 # EXPORT CSV — period selection screen
 # ---------------------------------------------------------------------------
-def build_csv_content(rows, target, include_summary=True):
-    stats = get_stats(DB_PATH, CHILD_ID) if include_summary else None
-    return _report_build_csv(rows, target, CHILD_NAME, stats=stats,
+def build_csv_content(rows, target, include_summary=True, child_id=None,
+                      child_name=None, family_id=DEFAULT_FAMILY_ID):
+    cid = CHILD_ID if child_id is None else child_id
+    label = child_name or (CHILD_NAME if child_id is None else "Ребёнок")
+    stats = get_stats(DB_PATH, cid, family_id=family_id) if include_summary else None
+
+    def _display_name(uid):
+        if uid == cid:
+            return label
+        return _user_display_name(uid, None)
+
+    return _report_build_csv(rows, target, label, stats=stats,
                              include_summary=include_summary,
-                             display_name=_user_display_name,
+                             display_name=_display_name,
                              zone_green=ZONE_GREEN, zone_yellow=ZONE_YELLOW)
 
 
@@ -1314,19 +1391,27 @@ async def cb_export(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    months = await _db(get_available_months, DB_PATH, CHILD_ID)
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    months = await _db(get_available_months, DB_PATH, child_id, family_id=family_id)
     if not months:
         await respond(callback, "📭 Нет данных для экспорта.", kb=kb_back())
         return
     await respond(callback, "📥 Экспорт CSV — выберите период:", kb=kb_export_periods(months))
 
 
-async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, caption: str):
-    target = await _db(get_effective_target)
+async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, caption: str,
+                    member=None):
+    family_id, child_id = await _ctx(member)
+    target = await _db(get_effective_target, family_id=family_id)
     if not rows:
         await callback.answer("📭 В выбранном периоде нет записей.", show_alert=True)
         return
-    content = await _db(build_csv_content, rows, target, True)
+    name = await _child_name(member, child_id)
+    content = await _db(build_csv_content, rows, target, True,
+                        child_id=child_id, child_name=name, family_id=family_id)
     await answer_callback(callback)
     await callback.message.answer_document(
         BufferedInputFile(content.encode("utf-8-sig"), filename=filename),
@@ -1342,18 +1427,29 @@ async def cb_export_all(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     rows = await _db(
         get_measurements_between,
-        DB_PATH, CHILD_ID, "2000-01-01", now_tz().strftime("%Y-%m-%d")
+        DB_PATH, child_id, "2000-01-01", now_tz().strftime("%Y-%m-%d"),
+        family_id=family_id,
     )
-    filename = f"peakflow_{CHILD_NAME}_{now_tz().strftime('%Y%m%d_%H%M')}.csv"
-    await _send_csv(callback, rows, filename, f"📥 Экспорт (всё): {len(rows)} записей")
+    name = await _child_name(member, child_id)
+    filename = f"peakflow_{name}_{now_tz().strftime('%Y%m%d_%H%M')}.csv"
+    await _send_csv(callback, rows, filename, f"📥 Экспорт (всё): {len(rows)} записей",
+                    member=member)
 
 
 @router.callback_query(F.data.startswith("csv_"))
 async def cb_export_month(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
         return
     parsed = parse_csv_month(callback.data)
     if not parsed:
@@ -1362,12 +1458,15 @@ async def cb_export_month(callback: types.CallbackQuery, member=None):
     y, m = parsed
     # [first of month, first of next month) — last_day is the day before next month
     last_day = (datetime(y, m, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-    rows = await _db(get_measurements_between, DB_PATH, CHILD_ID,
-                     f"{y:04d}-{m:02d}-01", last_day.strftime("%Y-%m-%d"))
+    rows = await _db(get_measurements_between, DB_PATH, child_id,
+                     f"{y:04d}-{m:02d}-01", last_day.strftime("%Y-%m-%d"),
+                     family_id=family_id)
     # get_measurements_between includes auto (CSV shows them with 'auto' source column)
-    filename = f"peakflow_{CHILD_NAME}_{y:04d}-{m:02d}.csv"
+    name = await _child_name(member, child_id)
+    filename = f"peakflow_{name}_{y:04d}-{m:02d}.csv"
     await _send_csv(callback, rows, filename,
-                    f"📥 Экспорт за {month_title(y, m)}: {len(rows)} записей")
+                    f"📥 Экспорт за {month_title(y, m)}: {len(rows)} записей",
+                    member=member)
 
 
 # ---------------------------------------------------------------------------
@@ -1380,15 +1479,20 @@ async def cb_backup(callback: types.CallbackQuery, member=None):
         return
 
     stamp = now_tz().strftime("%Y%m%d_%H%M")
-    dest = f"backup_{CHILD_NAME}_{stamp}.db"
+    family_id, child_id = await _ctx(member)
+    dest = f"backup_{await _child_name(member, child_id)}_{stamp}.db"
     try:
-        await _db(backup_db, DB_PATH, dest)
+        await _db(backup_family_db, DB_PATH, dest, family_id)
     except Exception as e:
         logger.error("Ошибка бэкапа: %s", e)
         await callback.answer("❌ Не удалось создать бэкап.", show_alert=True)
         return
 
-    measurements = await _db(get_all_measurements, DB_PATH, CHILD_ID, include_auto=True)
+    if child_id is None:
+        measurements = []
+    else:
+        measurements = await _db(get_all_measurements, DB_PATH, child_id,
+                                 include_auto=True, family_id=family_id)
     try:
         def _read_backup():
             with open(dest, "rb") as f:
@@ -1481,13 +1585,24 @@ async def cb_regen_invite(callback: types.CallbackQuery, member=None):
     await respond(callback, _members_text(children, invite), kb=kb_members())
 
 
-def _children_text(cards: list) -> str:
+def _children_text(cards: list, children: list = None, active_id: int = None) -> str:
+    lines = ["🧒 *Дети*"]
+    if children:
+        lines.append("")
+        lines.append("В семье:")
+        for c in children:
+            name = escape_md(c["name"]) if c.get("name") else "без имени"
+            mark = " ✅ активный" if c["telegram_id"] == active_id else ""
+            lines.append(f"  • {name}{mark}")
     if not cards:
-        return "🧒 *Дети*\n\nПока нет карточек для добавления детей."
-    lines = ["🧒 *Дети*", "", "Карточки для входа ребёнка:"]
-    for c in cards:
-        name = escape_md(c["name"]) if c.get("name") else "без имени"
-        lines.append(f"  • {name}")
+        lines.append("")
+        lines.append("Пока нет карточек для добавления детей.")
+    else:
+        lines.append("")
+        lines.append("Карточки для входа ребёнка:")
+        for c in cards:
+            name = escape_md(c["name"]) if c.get("name") else "без имени"
+            lines.append(f"  • {name}")
     return "\n".join(lines)
 
 
@@ -1501,9 +1616,12 @@ def kb_children(cards: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _show_children(callback: types.CallbackQuery, family_id: int):
+async def _show_children(callback: types.CallbackQuery, family_id: int,
+                         active_id: int = None):
     cards = await _db(list_child_cards, DB_PATH, family_id)
-    await respond(callback, _children_text(cards), kb=kb_children(cards))
+    children = await _db(list_family_children, DB_PATH, family_id)
+    await respond(callback, _children_text(cards, children, active_id),
+                  kb=kb_children(cards))
 
 
 @router.callback_query(F.data == "children")
@@ -1511,7 +1629,8 @@ async def cb_children(callback: types.CallbackQuery, member=None):
     if not _can_manage_family(member, callback.from_user.id):
         await callback.answer(_family_deny_text(member), show_alert=True)
         return
-    await _show_children(callback, member["family_id"])
+    _, child_id = await _ctx(member)
+    await _show_children(callback, member["family_id"], child_id)
 
 
 @router.callback_query(F.data == "add_child")
@@ -1544,8 +1663,11 @@ async def input_child_name(message: types.Message, state: FSMContext, member=Non
         parse_mode="Markdown",
     )
     await state.clear()
+    _, active_child_id = await _ctx(member)
     cards = await _db(list_child_cards, DB_PATH, family_id)
-    await message.answer(_children_text(cards), parse_mode="Markdown",
+    children = await _db(list_family_children, DB_PATH, family_id)
+    await message.answer(_children_text(cards, children, active_child_id),
+                         parse_mode="Markdown",
                          reply_markup=kb_children(cards))
 
 
@@ -1563,7 +1685,47 @@ async def cb_del_child(callback: types.CallbackQuery, member=None):
         await callback.answer("✅ Карточка удалена.", show_alert=True)
     else:
         await callback.answer("❌ Карточка не найдена.", show_alert=True)
-    await _show_children(callback, member["family_id"])
+    _, child_id = await _ctx(member)
+    await _show_children(callback, member["family_id"], child_id)
+
+
+# ---------------------------------------------------------------------------
+# CHILD SELECTOR — active child for a parent with >1 child
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data == "pick_child")
+async def cb_pick_child(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id, child_id = await _ctx(member)
+    children = await _db(list_family_children, DB_PATH, family_id)
+    rows = []
+    for c in children:
+        name = c["name"] if c.get("name") else "Ребёнок"
+        mark = "✅ " if c["telegram_id"] == child_id else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{mark}{name}", callback_data=f"set_child_{c['telegram_id']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+    await respond(callback, "🧒 *Выберите ребёнка*",
+                  kb=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith("set_child_"))
+async def cb_set_child(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    child_id = parse_callback_int(callback.data, "set_child_")
+    if child_id is None:
+        await callback.answer("❌ Некорректный ребёнок.", show_alert=True)
+        return
+    ok = await _db(set_active_child, DB_PATH, callback.from_user.id, child_id)
+    if not ok:
+        await callback.answer("❌ Ребёнок недоступен.", show_alert=True)
+        return
+    new_member = await _db(get_member, DB_PATH, callback.from_user.id)
+    await send_main_menu(callback, callback.from_user.id,
+                         member=new_member or member)
 
 
 # ---------------------------------------------------------------------------
@@ -1660,9 +1822,14 @@ async def _render_chart_png_async(rows: list, target: int, title: str) -> bytes:
     return await asyncio.to_thread(_render_chart_png, rows, target, title)
 
 
-async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int):
-    target = await _db(get_effective_target)
-    rows = await _db(get_measurements_for_month, DB_PATH, CHILD_ID, year, month)
+async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    target = await _db(get_effective_target, family_id=family_id)
+    rows = await _db(get_measurements_for_month, DB_PATH, child_id, year, month,
+                     family_id=family_id)
 
     now = now_tz()
     can_next = (year, month) < (now.year, now.month)
@@ -1674,49 +1841,56 @@ async def _send_month_chart(callback: types.CallbackQuery, year: int, month: int
         )
         return
 
-    png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
+    name = await _child_name(member, child_id)
+    png = await _render_chart_png_async(rows, target, f"{name} — {month_title(year, month)}")
     values = [r["pef_value"] for r in rows]
 
     await answer_callback(callback)
     await callback.message.answer_photo(
         BufferedInputFile(png, filename="chart.png"),
-        caption=f"📊 {CHILD_NAME} — {month_title(year, month)}. Норма: {target} л/мин\n"
+        caption=f"📊 {name} — {month_title(year, month)}. Норма: {target} л/мин\n"
                 f"🏆 Лучший: {max(values)} | ⚠️ Худший: {min(values)}",
         reply_markup=kb_chart_nav(year, month, can_next),
     )
 
 
 @router.callback_query(F.data == "chart")
-async def cb_chart(callback: types.CallbackQuery):
+async def cb_chart(callback: types.CallbackQuery, member=None):
     now = now_tz()
-    await _send_month_chart(callback, now.year, now.month)
+    await _send_month_chart(callback, now.year, now.month, member=member)
 
 
 @router.callback_query(F.data.regexp(r"^chart_\d{4}-\d{2}$"))
-async def cb_chart_month(callback: types.CallbackQuery):
+async def cb_chart_month(callback: types.CallbackQuery, member=None):
     parsed = parse_chart_month(callback.data)
     if not parsed:
         await callback.answer("❌ Неверный месяц.", show_alert=True)
         return
-    await _send_month_chart(callback, parsed[0], parsed[1])
+    await _send_month_chart(callback, parsed[0], parsed[1], member=member)
 
 
 @router.callback_query(F.data.startswith("chart_dl_"))
-async def cb_chart_download(callback: types.CallbackQuery):
+async def cb_chart_download(callback: types.CallbackQuery, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
     parsed = parse_chart_month(callback.data.replace("chart_dl_", "chart_"))
     if not parsed:
         await callback.answer("❌ Неверный месяц.", show_alert=True)
         return
     year, month = parsed
-    rows = await _db(get_measurements_for_month, DB_PATH, CHILD_ID, year, month)
+    rows = await _db(get_measurements_for_month, DB_PATH, child_id, year, month,
+                     family_id=family_id)
     if len(rows) < 2:
         await callback.answer("В этом месяце меньше 2 измерений.", show_alert=True)
         return
-    target = await _db(get_effective_target)
-    png = await _render_chart_png_async(rows, target, f"{CHILD_NAME} — {month_title(year, month)}")
+    target = await _db(get_effective_target, family_id=family_id)
+    name = await _child_name(member, child_id)
+    png = await _render_chart_png_async(rows, target, f"{name} — {month_title(year, month)}")
     await answer_callback(callback)
     await callback.message.answer_document(
-        BufferedInputFile(png, filename=f"chart_{CHILD_NAME}_{year:04d}-{month:02d}.png"),
+        BufferedInputFile(png, filename=f"chart_{name}_{year:04d}-{month:02d}.png"),
         caption=f"📥 График за {month_title(year, month)}",
         reply_markup=kb_back(),
     )
@@ -1730,8 +1904,12 @@ async def cb_summary(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
-    target = await _db(get_effective_target)
-    today = await _db(get_today_measurements, DB_PATH, CHILD_ID)
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    target = await _db(get_effective_target, family_id=family_id)
+    today = await _db(get_today_measurements, DB_PATH, child_id, family_id=family_id)
 
     morning = [m for m in today if m["time_of_day"] == "morning"]
     evening = [m for m in today if m["time_of_day"] == "evening"]
@@ -1751,15 +1929,16 @@ async def cb_summary(callback: types.CallbackQuery, member=None):
         e_str = "🌆 Вечер: ещё нет"
 
     # Stats
-    stats = await _db(get_stats, DB_PATH, CHILD_ID)
+    stats = await _db(get_stats, DB_PATH, child_id, family_id=family_id)
 
     m_avg = stats.get('morning_avg')
     e_avg = stats.get('evening_avg')
     m_avg_str = f"{m_avg:.0f}" if m_avg is not None else "—"
     e_avg_str = f"{e_avg:.0f}" if e_avg is not None else "—"
 
+    name = await _child_name(member, child_id)
     await respond(callback,
-        f"📊 *{escape_md(CHILD_NAME)}* — сегодня, {now_tz().strftime('%d %B')}\n\n"
+        f"📊 *{escape_md(name)}* — сегодня, {now_tz().strftime('%d %B')}\n\n"
         f"{m_str}\n{e_str}\n\n"
         f"📈 Всего: {stats.get('total', 0)} | Среднее: {stats.get('avg', 0):.0f}\n"
         f"🌅 Утро avg: {m_avg_str} | 🌆 Вечер avg: {e_avg_str}",
@@ -1776,11 +1955,18 @@ async def cb_weekly(callback: types.CallbackQuery, member=None):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     await callback.answer()
-    await _send_weekly_report(callback.message)
+    await _send_weekly_report(callback.message, member=member)
 
 
-async def _send_weekly_report(message=None):
-    this_week, prev_week = await _db(get_last_two_weeks, DB_PATH, CHILD_ID)
+async def _send_weekly_report(message=None, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        if message:
+            await _no_child_reply(message, member)
+        return None
+
+    this_week, prev_week = await _db(get_last_two_weeks, DB_PATH, child_id,
+                                     family_id=family_id)
 
     if not this_week:
         if message:
@@ -1801,7 +1987,7 @@ async def _send_weekly_report(message=None):
     best_m = max(this_week, key=lambda m: m["pef_value"])
     worst_m = min(this_week, key=lambda m: m["pef_value"])
 
-    text = f"📋 *{escape_md(CHILD_NAME)}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
+    text = f"📋 *{escape_md(await _child_name(member, child_id))}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
     text += f"Замеров: {len(this_week)} (🌅 {len(this_morning)} / 🌆 {len(this_evening)})\n"
     text += f"Среднее: {sum(this_vals)/len(this_vals):.0f}\n"
     text += f"🏆 Лучший: {best} ({tod_emoji(best_m['time_of_day'])} {best_m['measured_at'][:10]})\n"
@@ -1834,9 +2020,13 @@ async def _send_weekly_report(message=None):
 # STATS (for child)
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "stats")
-async def cb_stats(callback: types.CallbackQuery):
-    stats = await _db(get_stats, DB_PATH, CHILD_ID)
-    target = await _db(get_effective_target)
+async def cb_stats(callback: types.CallbackQuery, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    stats = await _db(get_stats, DB_PATH, child_id, family_id=family_id)
+    target = await _db(get_effective_target, family_id=family_id)
 
     if stats.get("total", 0) == 0:
         await respond(callback, "📭 Нет измерений.", kb=kb_back())
@@ -1856,7 +2046,7 @@ async def cb_stats(callback: types.CallbackQuery):
         tod_info += f"\n🌆 Вечер avg: {stats['evening_avg']:.0f} ({stats['evening_count']} замеров)"
 
     await respond(callback,
-        f"📊 *{escape_md(CHILD_NAME)}*\n\n"
+        f"📊 *{escape_md(await _child_name(member, child_id))}*\n\n"
         f"Всего: {stats['total']} | Сегодня: {stats['today_count']}\n"
         f"Среднее: {stats['avg']:.0f}\n"
         f"Мин: {stats['min']} | Макс: {stats['max']}\n"
@@ -1905,11 +2095,6 @@ _FSM_HINTS = {
 @router.message(F.text)
 async def catch_all(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    # Defense in depth: no text path (including unknown command variants) may
-    # render family #1's menu for a non-family-#1 member.
-    if member and member["family_id"] != DEFAULT_FAMILY_ID:
-        await message.answer(MemberMiddleware.REG_SOON_MESSAGE)
-        return
     current = await state.get_state()
     if current:
         hint = _FSM_HINTS.get(current)
@@ -1930,10 +2115,18 @@ async def catch_all(message: types.Message, state: FSMContext, member=None):
 _scheduler_task = None
 
 
-def _user_display_name(user_id: int, member=None) -> str:
-    if _role(member, user_id) == "child":
-        return CHILD_NAME
-    if _role(member, user_id) == "parent":
+def _user_display_name(user_id: int, member=None, child_name=None) -> str:
+    """Display label for an author (CSV/plain contexts — stays unescaped).
+
+    A known member without an explicit child name falls back to a generic
+    label instead of leaking family #1's env ``CHILD_NAME``.
+    """
+    role = _role(member, user_id)
+    if role == "child":
+        if child_name:
+            return child_name
+        return CHILD_NAME if member is None else "Ребёнок"
+    if role == "parent":
         return "Родитель"
     return "Кто-то"
 
@@ -1974,20 +2167,22 @@ async def _setup_menu_button():
 
 async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today: str):
     """Ping the child to do a measurement (child_morning / child_evening)."""
+    family_id, child_id = await _ctx(None)
     key = "child_morning" if tod == "morning" else "child_evening"
     flag = f"child_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, child_id):
         return
-    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
-        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    if await _db(has_today_measurement, DB_PATH, child_id, tod, skip_auto=True,
+                 family_id=family_id):
+        await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
         return
     icon = "☀️" if tod == "morning" else "🌙"
     try:
         await bot.send_message(
-            CHILD_ID,
-            f"{icon} Привет, *{escape_md(CHILD_NAME)}*! Пора сделать "
+            child_id,
+            f"{icon} Привет, *{escape_md(await _child_name(None, child_id))}*! Пора сделать "
             f"{'утренний' if tod == 'morning' else 'вечерний'} замер 💨",
             parse_mode="Markdown",
         )
@@ -1995,45 +2190,49 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
         # Do not set the flag: retry on the next tick (the 2-minute window).
         logger.error("Не удалось напомнить ребёнку (%s): %s", tod, e)
         return
-    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
     logger.info("Напоминание ребёнку: %s", tod)
 
 
 async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today: str):
     """No measurement at deadline → auto-carry record + inform parents."""
+    family_id, child_id = await _ctx(None)
     flag = f"{tod}_missing"
     auto_flag = f"auto_{tod}"
     key = f"parent_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
         return
-    if await _db(was_reminder_sent, DB_PATH, today, flag, CHILD_ID):
+    if await _db(was_reminder_sent, DB_PATH, today, flag, child_id):
         return
-    if await _db(has_today_measurement, DB_PATH, CHILD_ID, tod, skip_auto=True):
-        await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    if await _db(has_today_measurement, DB_PATH, child_id, tod, skip_auto=True,
+                 family_id=family_id):
+        await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
         return
 
     # Auto-carry: reuse last real value of this time of day
-    last = await _db(get_last_of_tod, DB_PATH, CHILD_ID, tod)
-    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID):
-        await _db(add_measurement, DB_PATH, last["pef_value"], tod, CHILD_ID, 0, source="auto")
-        await _db(mark_reminder_sent, DB_PATH, today, auto_flag, CHILD_ID)
+    last = await _db(get_last_of_tod, DB_PATH, child_id, tod, family_id=family_id)
+    if last and not await _db(was_reminder_sent, DB_PATH, today, auto_flag, child_id):
+        await _db(add_measurement, DB_PATH, last["pef_value"], tod, child_id, 0,
+                  source="auto", family_id=family_id)
+        await _db(mark_reminder_sent, DB_PATH, today, auto_flag, child_id)
         logger.info("Авто-запись: %s = %d (%s)", tod, last["pef_value"], today)
 
     icon = "☀️" if tod == "morning" else "🌙"
+    child_name = await _child_name(None, child_id)
     if last:
         text = (
-            f"⚠️ {icon} *{escape_md(CHILD_NAME)}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
+            f"⚠️ {icon} *{escape_md(child_name)}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
             f"🤖 Записали как в последний раз: *{last['pef_value']}* (авто, не измерено).\n"
             f"Скорректируйте, если знаете реальное значение."
         )
     else:
         text = (
-            f"⚠️ {icon} *{escape_md(CHILD_NAME)}* ещё не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер!\n"
+            f"⚠️ {icon} *{escape_md(child_name)}* ещё не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер!\n"
             f"Напомните, пожалуйста."
         )
 
     delivered = False
-    for pid in PARENT_IDS:
+    for pid in await _family_parents(None, family_id):
         try:
             await bot.send_message(pid, text, parse_mode="Markdown")
             delivered = True
@@ -2043,7 +2242,7 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
         # No parent received it — allow a retry on the next tick.
         logger.error("Эскалация родителям (%s) не доставлена, повтор", tod)
         return
-    await _db(mark_reminder_sent, DB_PATH, today, flag, CHILD_ID)
+    await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
     logger.info("Эскалация родителям: %s", tod)
 
 
@@ -2057,7 +2256,8 @@ async def scheduler_loop():
             hour = now.hour
             minute = now.minute
 
-            hours = await _db(get_reminder_hours, DB_PATH)
+            family_id, child_id = await _ctx(None)
+            hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
 
             # Child pings (08:00 / 20:00 by default)
             await _maybe_ping_child("morning", hours, hour, minute, today)
@@ -2069,18 +2269,18 @@ async def scheduler_loop():
 
             # Weekly report
             if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
-                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", CHILD_ID):
+                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", child_id):
                     text = await _send_weekly_report()
                     if text:
                         delivered = False
-                        for pid in PARENT_IDS:
+                        for pid in await _family_parents(None, family_id):
                             try:
                                 await bot.send_message(pid, text, parse_mode="Markdown")
                                 delivered = True
                             except Exception:
                                 pass
                         if delivered:
-                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", CHILD_ID)
+                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", child_id)
                             logger.info("Недельный отчёт отправлен")
                         else:
                             logger.error("Недельный отчёт не доставлен, повтор")

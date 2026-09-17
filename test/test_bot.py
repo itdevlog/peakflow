@@ -2191,7 +2191,7 @@ class TestFamiliesAndMembers:
     def test_default_family_constants(self):
         import database
         assert database.DEFAULT_FAMILY_ID == 1
-        assert database.SCHEMA_VERSION == 3
+        assert database.SCHEMA_VERSION == 4
 
 
 class TestMeasurementV2:
@@ -2284,7 +2284,7 @@ class TestMigrationV2:
         row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
         setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
         conn.close()
-        assert version == SCHEMA_VERSION == 3
+        assert version == SCHEMA_VERSION == 4
         assert row == (1, 111, 240)
         assert setting[0] == "300"
 
@@ -2466,9 +2466,9 @@ class TestFamilyIsolation:
 
 
 class TestInvites:
-    def test_schema_version_is_3(self):
+    def test_schema_version_is_4(self):
         import database
-        assert database.SCHEMA_VERSION == 3
+        assert database.SCHEMA_VERSION == 4
 
     def test_create_and_get_invite(self):
         from database import create_family, create_invite, get_invite
@@ -2624,12 +2624,12 @@ class TestMemberMiddleware:
         assert captured["member"] is None
 
 
-class TestMemberGateNonFamilyOne:
-    """F1 interim gate: non-family-#1 members have no data access.
+class TestFamilyTwoAccessNoGate:
+    """SP3C Task 6: the interim family-#1 gate is removed.
 
-    Only registration survives; every other message/callback must be answered
-    by the middleware and never reach its handler. Family #1 and the
-    .env-fallback (member=None) must be untouched.
+    The middleware only injects the caller's member row; all data paths are
+    tenant-scoped, so family #2 members reach their own menu/data. Family #1
+    and the .env fallback (member=None) stay unchanged.
     """
 
     @staticmethod
@@ -2673,105 +2673,20 @@ class TestMemberGateNonFamilyOne:
         return patch.object(bot, "get_member",
                             return_value={"role": "parent", "family_id": family_id})
 
-    def test_new_family_message_denied_and_handler_skipped(self):
+    def test_new_family_message_reaches_handler(self):
         msg = self._message(999, "status")
         with self._patch_member(2):
-            assert self._run(msg) == []
-        msg.answer.assert_awaited_once()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
-
-    def test_new_family_callback_denied_and_handler_skipped(self):
-        cb = self._callback(999, "settings")
-        with self._patch_member(2):
-            assert self._run(cb) == []
-        cb.answer.assert_awaited_once()
-        assert cb.answer.await_args.kwargs.get("show_alert") is True
-
-    def test_new_family_bare_start_and_cancel_pass_through(self):
-        for text in ("/start", "/start TOK", "/cancel"):
-            with self._patch_member(2):
-                assert self._run(self._message(999, text)) == [True], text
-
-    def test_new_family_own_mention_passes_through(self):
-        from unittest.mock import patch
-        import bot
-        msg = self._message(999, "/start@peakflow_bot")
-        with patch.object(bot.bot, "username", "peakflow_bot", create=True), \
-             self._patch_member(2):
             assert self._run(msg) == [True]
 
-    def test_start_like_commands_are_not_registration(self):
-        """Prefixes and foreign mentions must not slip through to catch_all."""
-        for text in ("/startxyz", "/cancelled", "/starter",
-                     "/start@otherbot", "/cancel@otherbot",
-                     "/start@", "/cancel@", "/start@otherbot extra"):
-            msg = self._message(999, text)
-            with self._patch_member(2):
-                assert self._run(msg) == [], text
-            msg.answer.assert_awaited_once()
-
-    def test_is_reg_command_strict(self):
-        from unittest.mock import patch
-        import bot
-        assert bot._is_reg_command("/start")
-        assert bot._is_reg_command("/cancel")
-        assert bot._is_reg_command("/start payload")
-        for bad in ("/startxyz", "/cancelled", "", "   ",
-                    "/start@otherbot", "/start@", None):
-            assert not bot._is_reg_command(bad), bad
-        with patch.object(bot.bot, "username", "peakflow_bot", create=True):
-            assert bot._is_reg_command("/start@peakflow_bot")
-            assert bot._is_reg_command("/cancel@PEAKFLOW_BOT")
-            assert not bot._is_reg_command("/start@otherbot")
+    def test_new_family_callback_reaches_handler(self):
+        cb = self._callback(999, "settings")
+        with self._patch_member(2):
+            assert self._run(cb) == [True]
 
     def test_new_family_registration_callbacks_pass_through(self):
         for data in ("reg_create", "reg_join"):
             with self._patch_member(2):
                 assert self._run(self._callback(999, data)) == [True], data
-
-    def test_cmd_start_family_two_does_not_show_menu(self):
-        import asyncio
-        import bot
-        from unittest.mock import AsyncMock, patch
-
-        msg = self._message(999, "/start")
-        state = AsyncMock()
-        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-            asyncio.run(bot.cmd_start(
-                msg, state, member={"role": "parent", "family_id": 2}))
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
-        state.clear.assert_awaited()
-
-    def test_cmd_cancel_family_two_does_not_show_menu(self):
-        import asyncio
-        import bot
-        from unittest.mock import AsyncMock, patch
-
-        msg = self._message(999, "/cancel")
-        state = AsyncMock()
-        state.get_state = AsyncMock(return_value=None)
-        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-            asyncio.run(bot.cmd_cancel(
-                msg, state, member={"role": "parent", "family_id": 2}))
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
-        state.clear.assert_awaited()
-
-    def test_catch_all_family_two_does_not_show_menu(self):
-        """Defense in depth: catch_all itself must gate non-family-#1 members."""
-        import asyncio
-        import bot
-        from unittest.mock import AsyncMock, patch
-
-        msg = self._message(999, "/start@otherbot")
-        state = AsyncMock()
-        state.get_state = AsyncMock(return_value=None)
-        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
-            asyncio.run(bot.catch_all(
-                msg, state, member={"role": "parent", "family_id": 2}))
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
 
     def test_family_one_member_still_reaches_handler(self):
         with self._patch_member(1):
@@ -2783,21 +2698,75 @@ class TestMemberGateNonFamilyOne:
         with patch.object(bot, "get_member", return_value=None):
             assert self._run(self._message(111, "status")) == [True]
 
-    def test_send_main_menu_family_two_skips_status_builder(self):
-        """The choke point must not render family #1's status for family #2."""
+    def test_cmd_start_family_two_shows_tenant_menu(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "/start")
+        state = AsyncMock()
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cmd_start(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_awaited()
+        state.clear.assert_awaited()
+
+    def test_cmd_cancel_family_two_shows_tenant_menu(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "/cancel")
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cmd_cancel(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_awaited()
+
+    def test_catch_all_family_two_shows_tenant_menu(self):
+        """catch_all must again render the menu for family != 1."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        msg = self._message(999, "привет")
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.catch_all(
+                msg, state, member={"role": "parent", "family_id": 2}))
+        menu.assert_awaited()
+
+    def test_lookalike_commands_reach_family_two_menu(self):
+        """Lookalike commands fall through to catch_all's tenant menu."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+
+        state = AsyncMock()
+        state.get_state = AsyncMock(return_value=None)
+        for text in ("/startxyz", "/start@otherbot", "/cancel@otherbot"):
+            msg = self._message(999, text)
+            with patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+                asyncio.run(bot.catch_all(
+                    msg, state, member={"role": "parent", "family_id": 2}))
+            assert menu.await_count == 1, text
+
+    def test_send_main_menu_family_two_builds_status(self):
+        """The menu now renders the *tenant-scoped* status for family #2."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
 
         msg = self._message(999, None)
-        with patch.object(bot, "get_member",
-                          return_value={"role": "parent", "family_id": 2}), \
-             patch.object(bot, "build_status_block",
-                          new=AsyncMock(return_value="STATUS")) as status:
+        with patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="STATUS")) as status, \
+             patch.object(bot, "count_family_children", return_value=0):
             asyncio.run(bot.send_main_menu(
                 msg, 999, member={"role": "parent", "family_id": 2}))
-        status.assert_not_awaited()
-        assert "следующем обновлении" in msg.answer.await_args.args[0]
+        status.assert_awaited()
+        assert msg.answer.await_args.args[0] == "STATUS"
 
     def test_send_main_menu_family_one_still_builds_status(self):
         import asyncio
@@ -2945,12 +2914,41 @@ class TestHandlerRolesFromDb:
             calls.append(member)
 
         with patch.object(bot, "send_main_menu", side_effect=fake_menu), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
              patch.object(bot, "set_note", return_value=True):
             asyncio.run(bot.input_note(
                 msg, state, member={"role": "parent", "family_id": 2}))
 
         assert calls == [{"role": "parent", "family_id": 2}], \
             "input_note must forward member to send_main_menu"
+
+    def test_input_note_no_child_sends_single_hint(self):
+        """SP3C Task 6: the no-child branch must not double-prompt.
+
+        ``_no_child_reply`` already carries the hint and the «Дети» button, so
+        the handler returns without an extra main-menu (status) message.
+        """
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        msg = MagicMock()
+        msg.from_user.id = 999
+        msg.text = "спорт"
+        msg.answer = AsyncMock()
+
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"note_for_id": 1})
+        state.clear = AsyncMock()
+
+        with patch.object(bot, "_no_child_reply", new=AsyncMock()) as hint, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.input_note(
+                msg, state, member={"role": "parent", "family_id": 2}))
+
+        hint.assert_awaited()
+        menu.assert_not_awaited()
+        state.clear.assert_awaited()
 
 
 class TestRegistrationFlow:
@@ -3063,8 +3061,8 @@ class TestRegistrationFlow:
         assert "не найден" in sent or "найд" in sent
         assert "семью" in sent or "код" in sent
 
-    def test_deep_link_join_new_family_does_not_show_menu(self):
-        """Joining a non-family-#1 family must not leak family #1's menu."""
+    def test_deep_link_join_new_family_shows_menu(self):
+        """A family-#2 invitee now reaches the tenant-scoped main menu."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3079,8 +3077,7 @@ class TestRegistrationFlow:
              patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
             asyncio.run(bot.cmd_start(msg, state, member=None))
 
-        menu.assert_not_awaited()
-        assert "следующем обновлении" in self._sent(msg)
+        menu.assert_awaited()
 
     def test_deep_link_join_family_one_still_shows_menu(self):
         """Joining family #1 keeps the existing menu behaviour."""
@@ -3173,8 +3170,8 @@ class TestRegistrationFlow:
         state.clear.assert_awaited()
         assert "PARENTTOK" in self._sent(msg)
 
-    def test_input_family_name_new_family_does_not_render_family_one_menu(self):
-        """Centralized gate: a freshly created family #2 must not see family #1."""
+    def test_input_family_name_new_family_renders_tenant_menu(self):
+        """A freshly created family #2 now renders its own menu/status."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3187,16 +3184,16 @@ class TestRegistrationFlow:
                           return_value={"token": "PARENTTOK"}), \
              patch.object(bot, "get_member",
                           return_value={"role": "parent", "family_id": 2}), \
+             patch.object(bot, "count_family_children", return_value=0), \
              patch.object(bot, "build_status_block",
                           new=AsyncMock(return_value="STATUS")) as status:
             asyncio.run(bot.input_family_name(msg, state, member=None))
 
-        status.assert_not_awaited()
-        assert "STATUS" not in self._sent(msg)
-        assert "следующем обновлении" in self._sent(msg)
+        status.assert_awaited()
+        assert "STATUS" in self._sent(msg)
 
-    def test_input_invite_code_new_family_does_not_render_family_one_menu(self):
-        """Centralized gate: a freshly joined family #2 must not see family #1."""
+    def test_input_invite_code_new_family_renders_tenant_menu(self):
+        """A freshly joined family #2 now renders its own menu/status."""
         import asyncio
         import bot
         from unittest.mock import AsyncMock, patch
@@ -3204,19 +3201,17 @@ class TestRegistrationFlow:
         msg = self._msg(700, "TOKEN123")
         state = self._make_state("Registration:entering_invite_code")
 
-        with patch.object(bot, "is_parent", return_value=False), \
-             patch.object(bot, "is_child", return_value=False), \
-             patch.object(bot, "join_by_invite",
+        with patch.object(bot, "join_by_invite",
                           return_value={"family_id": 2, "role": "child", "name": "Маша"}), \
              patch.object(bot, "get_member",
                           return_value={"role": "child", "family_id": 2}), \
+             patch.object(bot, "count_family_children", return_value=0), \
              patch.object(bot, "build_status_block",
                           new=AsyncMock(return_value="STATUS")) as status:
             asyncio.run(bot.input_invite_code(msg, state, member=None))
 
-        status.assert_not_awaited()
-        assert "STATUS" not in self._sent(msg)
-        assert "следующем обновлении" in self._sent(msg)
+        status.assert_awaited()
+        assert "STATUS" in self._sent(msg)
 
     def test_input_family_name_blank_prompts(self):
         import asyncio
@@ -3315,42 +3310,36 @@ class TestRegistrationCancelRouting:
         join.assert_not_called()
         assert state is None
 
-    def test_lookalike_commands_denied_for_family_two_via_dispatcher(self):
-        """/start@otherbot, /cancel@otherbot and /startxyz must all be gated.
+    def test_lookalike_commands_reach_family_two_menu_via_dispatcher(self):
+        """/start@otherbot, /cancel@otherbot and /startxyz now reach the menu.
 
         Through the real dispatcher, so aiogram's own Command filter is in play:
-        these updates would otherwise fall through to catch_all and render
-        family #1's menu.
+        these updates fall through to catch_all, which renders the tenant menu.
         """
         import asyncio
         import bot
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, patch
-        from aiogram import Bot, types
+        from aiogram import Bot
+        from aiogram.fsm.storage.base import StorageKey
 
         async def run(text):
             b = Bot(token="123456:TESTTOKEN", session=AsyncMock())
             b.session = AsyncMock(return_value=None)
             # aiogram's Command filter calls bot.me() to validate @mentions.
             b._me = SimpleNamespace(username="someother_bot")
-            captured = []
-
-            async def fake_answer(self, text=None, **kw):
-                captured.append(text)
-                return None
+            key = StorageKey(bot_id=b.id, chat_id=700, user_id=700)
+            await bot.dp.storage.set_state(key, None)
 
             with patch.object(bot, "DB_PATH", TEST_DB), \
                  patch.object(bot, "get_member",
                               return_value={"role": "parent", "family_id": 2}), \
-                 patch.object(bot, "send_main_menu", new=AsyncMock()) as menu, \
-                 patch.object(types.Message, "answer", fake_answer):
+                 patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
                 await bot.dp.feed_update(b, self._update(700, text))
-            return menu, captured
+            return menu
 
         for text in ("/start@otherbot", "/cancel@otherbot", "/startxyz"):
-            menu, captured = asyncio.run(run(text))
-            menu.assert_not_awaited()
-            assert any("следующем обновлении" in (c or "") for c in captured), text
+            asyncio.run(run(text)).assert_awaited()
 
     def test_family_one_bare_start_shows_menu_via_dispatcher(self):
         import asyncio
@@ -3857,6 +3846,711 @@ class TestFamilyManagement:
 
         d = asyncio.run(run())
         d.assert_called_once_with(TEST_DB, "TOK", 1)
+
+
+class TestActiveChild:
+    def test_schema_v4(self):
+        import database
+        assert database.SCHEMA_VERSION == 4
+
+    def test_active_child_column(self):
+        import sqlite3
+        from database import init_db
+        init_db(TEST_DB)
+        c = sqlite3.connect(TEST_DB)
+        cols = [r[1] for r in c.execute("PRAGMA table_info(members)")]
+        c.close()
+        assert "active_child_id" in cols
+
+    def test_set_active_child_validates_same_family(self):
+        from database import create_family_with_owner, add_member, set_active_child, get_member
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        f2 = create_family_with_owner(TEST_DB, 501, "B")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f2, "child", "Петя")
+        assert set_active_child(TEST_DB, 500, 700) is True
+        assert get_member(TEST_DB, 500)["active_child_id"] == 700
+        assert set_active_child(TEST_DB, 500, 701) is False  # чужой ребёнок
+        assert set_active_child(TEST_DB, 500, 999) is False
+
+    def test_resolve_active_child_for_child_member(self):
+        from database import create_family_with_owner, add_member, resolve_active_child, get_member
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 700)) == 700
+
+    def test_resolve_active_child_defaults_to_first(self):
+        from database import create_family_with_owner, add_member, resolve_active_child, get_member
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f1, "child", "Петя")
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) in (700, 701)
+
+    def test_resolve_active_child_none_without_children(self):
+        from database import create_family_with_owner, resolve_active_child, get_member
+        create_family_with_owner(TEST_DB, 500, "A")
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) is None
+
+    def test_resolve_active_child_respects_selection(self):
+        from database import (create_family_with_owner, add_member, set_active_child,
+                              resolve_active_child, get_member)
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f1, "child", "Петя")
+        set_active_child(TEST_DB, 500, 701)
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500)) == 701
+
+    def test_resolve_active_child_uses_preloaded_children(self, monkeypatch):
+        """F2: callers may pass the family's children to avoid a duplicate query."""
+        from database import create_family_with_owner, add_member, resolve_active_child, get_member
+        import database
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 701, f1, "child", "Петя")
+        monkeypatch.setattr(database, "list_family_children",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("extra query")))
+        children = [{"telegram_id": 701, "family_id": f1, "role": "child", "name": "Петя"}]
+        assert resolve_active_child(TEST_DB, get_member(TEST_DB, 500), children) == 701
+
+    def test_count_family_children(self):
+        from database import create_family_with_owner, add_member, count_family_children
+        f1 = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, f1, "child", "Маша")
+        add_member(TEST_DB, 222, f1, "parent", "Олег")
+        assert count_family_children(TEST_DB, f1) == 1
+
+
+class TestTenantContext:
+    def test_ctx_fallback_env(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_ID", 111)
+        assert asyncio.run(bot._ctx(None)) == (bot.DEFAULT_FAMILY_ID, 111)
+
+    def test_ctx_child_self(self):
+        import asyncio, bot
+        assert asyncio.run(bot._ctx({"role": "child", "telegram_id": 700, "family_id": 2})) == (2, 700)
+
+    def test_ctx_parent_uses_resolve(self, monkeypatch):
+        import asyncio, bot
+        from unittest.mock import patch
+        with patch.object(bot, "resolve_active_child", return_value=700):
+            assert asyncio.run(bot._ctx({"role": "parent", "telegram_id": 500, "family_id": 2})) == (2, 700)
+
+    def test_child_name_fallback(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert asyncio.run(bot._child_name(None, None)) == "Motya"
+
+    def test_family_parents_env_fallback(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "PARENT_IDS", [222, 333])
+        assert asyncio.run(bot._family_parents(None, 1)) == [222, 333]
+
+
+class TestTenantAwareCore:
+    def test_status_block_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        seen = {}
+        def fake_today(db, child_id, family_id=bot.DEFAULT_FAMILY_ID):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+        with patch.object(bot, "get_today_measurements", side_effect=fake_today), \
+             patch.object(bot, "get_recent_measurements", return_value=[]), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700):
+            asyncio.run(bot.build_status_block(member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert seen.get("child_id") == 700
+        assert seen.get("family_id") == 2
+
+    def test_add_measurement_uses_context(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock()
+        state.get_data = AsyncMock(return_value={"input_context": "add"})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock(); state.clear = AsyncMock()
+        calls = {}
+        def fake_add(db, pef, tod, child_id, added_by, source="manual", family_id=1):
+            calls["child_id"] = child_id; calls["family_id"] = family_id; return 1
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "add_measurement", side_effect=fake_add), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._persist_measurement(cb, state, 250, "morning",
+                                                 member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert calls.get("child_id") == 700 and calls.get("family_id") == 2
+
+    def test_send_main_menu_forwards_member_to_status(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        msg = MagicMock()
+        msg.from_user = MagicMock(); msg.from_user.id = 999
+        msg.answer = AsyncMock()
+        member = {"role": "parent", "telegram_id": 999, "family_id": 1}
+        with patch.object(bot, "get_member",
+                          return_value={"role": "parent", "family_id": 1}), \
+             patch.object(bot, "build_status_block",
+                          new=AsyncMock(return_value="S")) as status:
+            asyncio.run(bot.send_main_menu(msg, 999, member=member))
+        status.assert_awaited_once_with(member)
+
+    def test_no_child_reply_hint_and_button(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock
+        msg = MagicMock(); msg.answer = AsyncMock()
+        asyncio.run(bot._no_child_reply(
+            msg, {"role": "parent", "telegram_id": 500, "family_id": 2}))
+        text = msg.answer.await_args.args[0]
+        kb = msg.answer.await_args.kwargs["reply_markup"]
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "ребёнк" in text.lower()
+        assert "children" in cbs
+
+
+class TestTenantAwareViews:
+    """SP3C Task 4: history/chart/summary/stats/week use the active child."""
+
+    PARENT = {"role": "parent", "telegram_id": 500, "family_id": 2}
+
+    @staticmethod
+    def _cb(uid=500, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user = MagicMock()
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_photo = AsyncMock()
+        cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_history_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb()
+        seen = {}
+
+        def fake_pag(db, child_id, page=1, per_page=10, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return [], 0, 1
+
+        with patch.object(bot, "get_measurements_paginated", side_effect=fake_pag), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot._show_history(cb, 1, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_summary_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb()
+        seen = {}
+
+        def fake_today(db, child_id, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+
+        with patch.object(bot, "get_today_measurements", side_effect=fake_today), \
+             patch.object(bot, "get_stats", return_value={"total": 0}), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_summary(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_stats_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb()
+        seen = {}
+
+        def fake_stats(db, child_id, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return {"total": 0}
+
+        with patch.object(bot, "get_stats", side_effect=fake_stats), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_stats(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_chart_download_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="chart_dl_2026-08")
+        seen = {}
+        rows = [
+            {"pef_value": 240, "time_of_day": "morning", "measured_at": "2026-08-05 08:00:00"},
+            {"pef_value": 250, "time_of_day": "evening", "measured_at": "2026-08-06 20:00:00"},
+        ]
+
+        def fake_month(db, child_id, year, month, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return rows
+
+        with patch.object(bot, "get_measurements_for_month", side_effect=fake_month), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_render_chart_png_async", new=AsyncMock(return_value=b"png")), \
+             patch.object(bot, "answer_callback", new=AsyncMock()):
+            asyncio.run(bot.cb_chart_download(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_weekly_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        msg = MagicMock()
+        msg.answer = AsyncMock()
+        seen = {}
+
+        def fake_weeks(db, child_id, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return [], []
+
+        with patch.object(bot, "get_last_two_weeks", side_effect=fake_weeks), \
+             patch.object(bot, "resolve_active_child", return_value=700):
+            asyncio.run(bot._send_weekly_report(msg, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+
+class TestTenantAwareOps:
+    """SP3C Task 5: settings/export/scheduler use the family context."""
+
+    PARENT = {"role": "parent", "telegram_id": 500, "family_id": 2}
+
+    @staticmethod
+    def _cb(uid=500, data=None):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user = MagicMock()
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_measurement_notifies_family_parents(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 700; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock(); state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock()
+        sent = []
+
+        async def fake_parents(member, family_id):
+            return [222]
+
+        async def fake_send(pid, text, **kw):
+            sent.append(pid)
+
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "replace_auto_measurement", return_value=False), \
+             patch.object(bot, "add_measurement", return_value=1), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "_family_parents", side_effect=fake_parents), \
+             patch.object(bot, "_ctx", new=AsyncMock(return_value=(2, 700))), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send), \
+             patch.object(bot, "send_main_menu", new=AsyncMock()):
+            asyncio.run(bot._persist_measurement(
+                cb, state, 240, "morning",
+                member={"role": "child", "telegram_id": 700, "family_id": 2}))
+        assert 222 in sent
+
+    def test_settings_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="settings")
+        seen = {}
+
+        def fake_all(db, child_id, include_auto=False, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+
+        with patch.object(bot, "get_all_measurements", side_effect=fake_all), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_settings(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_reminders_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="reminders")
+        seen = {}
+
+        def fake_hours(db, family_id=1):
+            seen["family_id"] = family_id
+            return {"child_morning": 8, "child_evening": 20,
+                    "parent_morning": 10, "parent_evening": 22}
+
+        with patch.object(bot, "get_reminder_hours", side_effect=fake_hours), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_reminders(cb, member=dict(self.PARENT)))
+        assert seen.get("family_id") == 2
+
+    def test_export_all_uses_active_child(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(data="export_all")
+        seen = {}
+
+        def fake_between(db, child_id, start, end, family_id=1):
+            seen["child_id"] = child_id
+            seen["family_id"] = family_id
+            return []
+
+        with patch.object(bot, "get_measurements_between", side_effect=fake_between), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "answer_callback", new=AsyncMock()):
+            asyncio.run(bot.cb_export_all(cb, member=dict(self.PARENT)))
+        assert seen.get("child_id") == 700 and seen.get("family_id") == 2
+
+    def test_change_target_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = self._cb(data="change_target")
+        state = MagicMock(); state.set_state = AsyncMock()
+        seen = {}
+
+        def fake_target(family_id=1):
+            seen["family_id"] = family_id
+            return 260
+
+        with patch.object(bot, "get_effective_target", side_effect=fake_target), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()):
+            asyncio.run(bot.cb_change_target(cb, state, member=dict(self.PARENT)))
+        assert seen.get("family_id") == 2
+
+    def test_input_target_uses_family(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        msg = MagicMock(); msg.text = "300"; msg.answer = AsyncMock()
+        state = MagicMock(); state.clear = AsyncMock()
+        calls = []
+
+        def fake_set(db, key, value, family_id=1):
+            calls.append({"key": key, "family_id": family_id})
+
+        with patch.object(bot, "set_setting", side_effect=fake_set), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_send_settings_from_message", new=AsyncMock()):
+            asyncio.run(bot.input_target(msg, state, member=dict(self.PARENT)))
+        assert calls and calls[0]["family_id"] == 2
+
+    def test_escalation_uses_family_parents(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        sent = []
+
+        async def fake_parents(member, family_id):
+            return [222]
+
+        async def fake_send(pid, text, **kw):
+            sent.append(pid)
+
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "get_last_of_tod", return_value=None), \
+             patch.object(bot, "mark_reminder_sent", return_value=None), \
+             patch.object(bot, "_family_parents", side_effect=fake_parents), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._escalate_parents(
+                "morning",
+                {"child_morning": 8, "child_evening": 20,
+                 "parent_morning": 10, "parent_evening": 22},
+                10, 0, "2026-09-12"))
+        assert 222 in sent
+
+
+class TestBackupScopedToFamily:
+    """F1: the DB backup must contain only the caller's family."""
+
+    def test_backup_family_db_contains_only_that_family(self):
+        import sqlite3
+        import os
+        from database import (create_family, add_member, add_measurement,
+                              set_setting, create_invite, mark_reminder_sent,
+                              backup_family_db)
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_measurement(TEST_DB, 300, "morning", 700, 700, family_id=f2)
+        add_measurement(TEST_DB, 240, "morning", 111, 111, family_id=f1)
+        set_setting(TEST_DB, "target_pef", "400", family_id=f2)
+        set_setting(TEST_DB, "target_pef", "240", family_id=f1)
+        create_invite(TEST_DB, f2, "parent")
+        mark_reminder_sent(TEST_DB, "2026-09-17", "weekly", 700)
+
+        dest = TEST_DB + ".fam2.bak"
+        try:
+            backup_family_db(TEST_DB, dest, f2)
+            conn = sqlite3.connect(dest)
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM measurements").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT pef_value FROM measurements").fetchone()[0] == 300
+            assert conn.execute(
+                "SELECT COUNT(*) FROM measurements WHERE family_id = ?",
+                (f1,)).fetchone()[0] == 0
+            assert [r[0] for r in conn.execute(
+                "SELECT id FROM families ORDER BY id")] == [f2]
+            assert [r[0] for r in conn.execute(
+                "SELECT telegram_id FROM members")] == [700]
+            assert [r[0] for r in conn.execute(
+                "SELECT family_id FROM settings")] == [f2]
+            assert [r[0] for r in conn.execute(
+                "SELECT family_id FROM invites")] == [f2]
+            assert [r[0] for r in conn.execute(
+                "SELECT child_id FROM reminders_sent")] == [700]
+            conn.close()
+        finally:
+            for ext in ["", "-wal", "-shm"]:
+                p = dest + ext
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_cb_backup_uses_family_scoped_backup(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "backup"
+        cb.from_user = MagicMock(); cb.from_user.id = 500
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        seen = {}
+
+        def fake_backup(db, dest, family_id):
+            seen["family_id"] = family_id
+
+        with patch.object(bot, "backup_family_db", side_effect=fake_backup), \
+             patch.object(bot, "_ctx", new=AsyncMock(return_value=(2, 700))), \
+             patch.object(bot, "get_all_measurements", return_value=[]), \
+             patch.object(bot, "answer_callback", new=AsyncMock()), \
+             patch.object(bot, "os") as m_os:
+            m_os.path.exists.return_value = False
+            asyncio.run(bot.cb_backup(cb, member={"role": "parent",
+                                                  "telegram_id": 500,
+                                                  "family_id": 2}))
+        assert seen.get("family_id") == 2
+
+
+class TestChildNameLookup:
+    """F2: _child_name resolves the active child's stored name."""
+
+    def test_child_name_for_family_member(self):
+        import asyncio, bot
+        from database import create_family, add_member
+        f2 = create_family(TEST_DB, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        name = asyncio.run(bot._child_name(
+            {"role": "parent", "telegram_id": 500, "family_id": f2}, 700))
+        assert name == "Маша"
+
+    def test_child_name_none_member_uses_env(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert asyncio.run(bot._child_name(None, 111)) == "Motya"
+
+    def test_child_name_explicit_skips_lookup(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        with patch.object(bot, "_db") as m_db:
+            name = asyncio.run(bot._child_name(
+                {"role": "parent", "telegram_id": 500, "family_id": 2},
+                700, child_name="Петя"))
+        assert name == "Петя"
+        m_db.assert_not_called()
+
+    def test_child_name_missing_member_falls_back(self):
+        import asyncio, bot
+        name = asyncio.run(bot._child_name(
+            {"role": "parent", "telegram_id": 500, "family_id": 2}, 999999))
+        assert name == "Ребёнок"
+
+    def test_child_name_known_member_without_child_does_not_leak_env(self, monkeypatch):
+        """F1: a family-2 parent with no active child must not see family #1's name."""
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        name = asyncio.run(bot._child_name(
+            {"role": "parent", "telegram_id": 500, "family_id": 2}, None))
+        assert name == "Ребёнок"
+
+    def test_settings_text_without_child_name_does_not_leak_env(self, monkeypatch):
+        """F1: no secondary env fallback in the settings screen."""
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert "Motya" not in bot.build_settings_text(260, 0, None)
+        member = {"role": "parent", "telegram_id": 500, "family_id": 2}
+        name = asyncio.run(bot._child_name(member, None))
+        assert "Motya" not in bot.build_settings_text(260, 0, name)
+
+    def test_display_name_known_child_does_not_leak_env(self, monkeypatch):
+        """Trivial: a known child author must not be labelled with env CHILD_NAME."""
+        import bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        member = {"role": "child", "telegram_id": 700, "family_id": 2}
+        assert bot._user_display_name(700, member) == "Ребёнок"
+        assert bot._user_display_name(700, member, "Маша") == "Маша"
+
+
+class TestChildSelector:
+    """SP3C Task 6: parents pick the active child when the family has >1."""
+
+    def _cb(self, uid, data):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_main_menu_has_child_button_when_multi(self):
+        import bot
+        kb = bot.kb_main(is_parent_user=True, show_child_button=True)
+        cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "pick_child" in cbs
+
+    def test_main_menu_no_child_button_otherwise(self):
+        import bot
+        for is_parent, show in ((True, False), (False, True)):
+            kb = bot.kb_main(is_parent_user=is_parent, show_child_button=show)
+            cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+            assert "pick_child" not in cbs
+
+    def test_set_child_sets_active(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "set_child_700"; cb.from_user.id = 500
+        cb.answer = AsyncMock(); cb.message = MagicMock()
+        cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        with patch.object(bot, "set_active_child", return_value=True) as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cb_set_child(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        m.assert_called_once_with(bot.DB_PATH, 500, 700)
+        menu.assert_awaited()
+
+    def test_set_child_rejected_for_child_member(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "set_child_700"; cb.from_user.id = 700
+        cb.answer = AsyncMock()
+        with patch.object(bot, "set_active_child") as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cb_set_child(
+                cb, member={"role": "child", "telegram_id": 700, "family_id": 2}))
+        m.assert_not_called()
+        menu.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_set_child_malformed_payload_alerts(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "set_child_abc"; cb.from_user.id = 500
+        cb.answer = AsyncMock()
+        with patch.object(bot, "set_active_child") as m, \
+             patch.object(bot, "send_main_menu", new=AsyncMock()) as menu:
+            asyncio.run(bot.cb_set_child(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        m.assert_not_called()
+        menu.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_pick_child_lists_children_with_set_callbacks(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(500, "pick_child")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["kb"] = kb
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "list_family_children",
+                          return_value=[{"telegram_id": 700, "name": "Маша"},
+                                        {"telegram_id": 701, "name": "Петя"}]), \
+             patch.object(bot, "_ctx", new=AsyncMock(return_value=(2, 700))):
+            asyncio.run(bot.cb_pick_child(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+
+        cbs = [b.callback_data for row in sent["kb"].inline_keyboard for b in row]
+        assert "set_child_700" in cbs and "set_child_701" in cbs
+
+    def test_pick_child_rejected_for_child_member(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, patch
+        cb = self._cb(700, "pick_child")
+        with patch.object(bot, "respond", new=AsyncMock()) as respond:
+            asyncio.run(bot.cb_pick_child(
+                cb, member={"role": "child", "telegram_id": 700, "family_id": 2}))
+        respond.assert_not_awaited()
+        cb.answer.assert_awaited()
+
+    def test_children_screen_marks_active_child(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        cb = self._cb(500, "children")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children",
+                          return_value=[{"telegram_id": 700, "name": "Маша"},
+                                        {"telegram_id": 701, "name": "Петя"}]), \
+             patch.object(bot, "resolve_active_child", return_value=701):
+            asyncio.run(bot.cb_children(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+
+        assert "✅" in sent.get("text", "")
+        assert "Петя" in sent.get("text", "")
+
+
+class TestGateRemoved:
+    """SP3C Task 6: the 2B interim gate must be fully removed from bot.py."""
+
+    def test_no_reg_soon_in_source(self):
+        import pathlib
+        assert "REG_SOON_MESSAGE" not in pathlib.Path("bot.py").read_text()
+
+    def test_no_reg_soon_symbol(self):
+        import bot
+        assert not hasattr(bot.MemberMiddleware, "REG_SOON_MESSAGE")
+        assert not hasattr(bot, "_is_reg_command")
 
 
 if __name__ == "__main__":
