@@ -2613,5 +2613,99 @@ class TestMemberMiddleware:
         assert captured["member"] is None
 
 
+class TestHandlerRolesFromDb:
+    """Task 4 (SP3B): runtime role checks must use the member row from the DB.
+
+    A parent of a new family (whose Telegram id is absent from .env) must pass
+    parent-only gates via ``member``, while an unknown user (member=None and
+    not in .env) is rejected. Existing callers without ``member`` keep working
+    through the .env fallback inside ``_role``.
+    """
+
+    def _cb(self, uid, data):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_new_family_parent_allowed_via_member(self):
+        """A parent of a new family (not in .env) may open settings."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(999, "settings")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_all_measurements", return_value=[]):
+            asyncio.run(bot.cb_settings(cb, member={"role": "parent", "family_id": 2}))
+
+        assert "Настройки" in sent.get("text", "")
+
+    def test_unknown_user_rejected(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(999, "settings")
+        with patch.object(bot, "is_parent", return_value=False), \
+             patch.object(bot, "is_child", return_value=False):
+            asyncio.run(bot.cb_settings(cb, member=None))
+
+        cb.message.answer.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_child_member_rejected_on_parent_handler(self):
+        """A DB child must not reach a parent-only handler (export)."""
+        import asyncio
+        import bot
+
+        cb = self._cb(999, "export")
+        asyncio.run(bot.cb_export(cb, member={"role": "child", "family_id": 2}))
+
+        cb.message.answer.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_send_main_menu_uses_member_role_for_keyboard(self):
+        """The main-menu keyboard must reflect the DB role, not only .env."""
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        def labels(markup):
+            return [b.text for row in markup.inline_keyboard for b in row]
+
+        parent_msg = MagicMock()
+        parent_msg.answer = AsyncMock()
+        parent_msg.from_user = MagicMock()
+        parent_msg.from_user.id = 999
+
+        child_msg = MagicMock()
+        child_msg.answer = AsyncMock()
+        child_msg.from_user = MagicMock()
+        child_msg.from_user.id = 999
+
+        with patch.object(bot, "build_status_block", new=AsyncMock(return_value="status")):
+            asyncio.run(bot.send_main_menu(parent_msg, 999,
+                                           member={"role": "parent", "family_id": 2}))
+            asyncio.run(bot.send_main_menu(child_msg, 999,
+                                           member={"role": "child", "family_id": 2}))
+
+        parent_labels = labels(parent_msg.answer.call_args.kwargs["reply_markup"])
+        child_labels = labels(child_msg.answer.call_args.kwargs["reply_markup"])
+        assert "⚙️ Настройки" in parent_labels
+        assert "📈 Моя статистика" in child_labels
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

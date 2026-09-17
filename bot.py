@@ -364,8 +364,8 @@ async def build_status_block() -> str:
 # ---------------------------------------------------------------------------
 # Send main menu
 # ---------------------------------------------------------------------------
-async def send_main_menu(message_or_callback, user_id: int):
-    is_p = is_parent(user_id)
+async def send_main_menu(message_or_callback, user_id: int, member=None):
+    is_p = _role(member, user_id) == "parent"
     status = await build_status_block()
 
     if isinstance(message_or_callback, types.CallbackQuery):
@@ -383,17 +383,17 @@ async def send_main_menu(message_or_callback, user_id: int):
 # /start
 # ---------------------------------------------------------------------------
 @router.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
+async def cmd_start(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    if not is_parent(uid) and not is_child(uid):
+    if _role(member, uid) == "unknown":
         await message.answer(
             "⚠️ Этот бот только для семьи. Обратитесь к администратору."
         )
         return
 
-    who = "👨‍👧 Родитель" if is_parent(uid) else f"👶 {escape_md(CHILD_NAME)}"
+    who = "👨‍👧 Родитель" if _role(member, uid) == "parent" else f"👶 {escape_md(CHILD_NAME)}"
     await message.answer(f"✅ Привет! Вы вошли как *{who}*", parse_mode="Markdown")
-    await send_main_menu(message, uid)
+    await send_main_menu(message, uid, member=member)
     await state.clear()
     logger.info("Пользователь %d (%s) вошёл в бот", uid, who)
 
@@ -402,15 +402,15 @@ async def cmd_start(message: types.Message, state: FSMContext):
 # /cancel — exit any FSM state
 # ---------------------------------------------------------------------------
 @router.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext):
+async def cmd_cancel(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    if not is_parent(uid) and not is_child(uid):
+    if _role(member, uid) == "unknown":
         return
     current = await state.get_state()
     await state.clear()
     if current:
         await message.answer("❌ Действие отменено.")
-    await send_main_menu(message, uid)
+    await send_main_menu(message, uid, member=member)
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +569,7 @@ async def cb_pick_tod(callback: types.CallbackQuery, state: FSMContext):
     await _persist_measurement(callback, state, pef, tod)
 
 
-async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict):
+async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict, member=None):
     """Сохранить исправление последнего измерения."""
     mid = data.get("edit_id")
     if mid is None:
@@ -587,10 +587,10 @@ async def _save_edit_last(callback: types.CallbackQuery, state: FSMContext, new_
         await respond(callback, "❌ Не удалось изменить запись.")
 
     await state.clear()
-    await send_main_menu(callback, callback.from_user.id)
+    await send_main_menu(callback, callback.from_user.id, member=member)
 
 
-async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict):
+async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_val: int, data: dict, member=None):
     """Сохранить исправление любого измерения."""
     mid = data.get("edit_id")
     if mid is None:
@@ -609,7 +609,7 @@ async def _save_edit_any(callback: types.CallbackQuery, state: FSMContext, new_v
         await respond(callback, "❌ Не удалось изменить запись.")
 
     await state.clear()
-    await _show_history(callback, page=1)
+    await _show_history(callback, page=1, member=member)
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +632,7 @@ async def cb_select_hundreds(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(Measurement.pef_input_tens, F.data.startswith("t_"))
-async def cb_select_tens(callback: types.CallbackQuery, state: FSMContext):
+async def cb_select_tens(callback: types.CallbackQuery, state: FSMContext, member=None):
     d = parse_callback_int(callback.data, "t_")
     if d is None:
         await callback.answer("❌ Некорректный ввод.", show_alert=True)
@@ -650,16 +650,16 @@ async def cb_select_tens(callback: types.CallbackQuery, state: FSMContext):
     if context == "add":
         await _save_measurement(callback, state, pef, data)
     elif context == "edit_last":
-        await _save_edit_last(callback, state, pef, data)
+        await _save_edit_last(callback, state, pef, data, member=member)
     elif context == "edit_any":
-        await _save_edit_any(callback, state, pef, data)
+        await _save_edit_any(callback, state, pef, data, member=member)
 
 
 @router.callback_query(Measurement.pef_input_hundreds, F.data == "back")
 @router.callback_query(Measurement.pef_input_tens, F.data == "back")
-async def cb_back_from_pef_input(callback: types.CallbackQuery, state: FSMContext):
+async def cb_back_from_pef_input(callback: types.CallbackQuery, state: FSMContext, member=None):
     await state.clear()
-    await send_main_menu(callback, callback.from_user.id)
+    await send_main_menu(callback, callback.from_user.id, member=member)
 
 
 # ---------------------------------------------------------------------------
@@ -679,10 +679,10 @@ async def cb_note_add(callback: types.CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "note_skip")
-async def cb_note_skip(callback: types.CallbackQuery, state: FSMContext):
+async def cb_note_skip(callback: types.CallbackQuery, state: FSMContext, member=None):
     """Skip the note — back to main menu."""
     await state.clear()
-    await send_main_menu(callback, callback.from_user.id)
+    await send_main_menu(callback, callback.from_user.id, member=member)
 
 
 @router.message(Measurement.waiting_note, F.text)
@@ -711,8 +711,8 @@ async def input_note(message: types.Message, state: FSMContext):
 # EDIT last measurement — inline пошаговый ввод
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "edit_last")
-async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext):
-    if not is_parent(callback.from_user.id):
+async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
     last = await _db(get_last_measurement, DB_PATH, CHILD_ID)
@@ -734,17 +734,17 @@ async def cb_edit_last(callback: types.CallbackQuery, state: FSMContext):
 # HISTORY
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "history")
-async def cb_history(callback: types.CallbackQuery, state: FSMContext):
-    await _show_history(callback, page=1)
+async def cb_history(callback: types.CallbackQuery, state: FSMContext, member=None):
+    await _show_history(callback, page=1, member=member)
 
 
 @router.callback_query(F.data.startswith("hist_page_"))
-async def cb_history_page(callback: types.CallbackQuery, state: FSMContext):
+async def cb_history_page(callback: types.CallbackQuery, state: FSMContext, member=None):
     page = parse_callback_int(callback.data, "hist_page_")
     if page is None or page < 1:
         await callback.answer("❌ Некорректная страница.", show_alert=True)
         return
-    await _show_history(callback, page=page)
+    await _show_history(callback, page=page, member=member)
 
 
 def _history_line(m: dict, target: int) -> str:
@@ -761,7 +761,7 @@ def _format_history_lines(measurements: list, target: int) -> list:
     return [_history_line(m, target) for m in measurements]
 
 
-async def _show_history(callback: types.CallbackQuery, page: int = 1):
+async def _show_history(callback: types.CallbackQuery, page: int = 1, member=None):
     if page < 1:
         page = 1
     measurements, total, total_pages = await _db(
@@ -773,7 +773,7 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1):
         measurements, total, total_pages = await _db(
             get_measurements_paginated, DB_PATH, CHILD_ID, page=page, per_page=10)
     target = await _db(get_effective_target)
-    is_p = is_parent(callback.from_user.id)
+    is_p = _role(member, callback.from_user.id) == "parent"
 
     if not measurements:
         await respond(callback, "📭 Нет измерений.", kb=kb_back())
@@ -792,8 +792,8 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1):
 # EDIT any measurement (parent only) — inline пошаговый ввод
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data.startswith("edit_"))
-async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext):
-    if not is_parent(callback.from_user.id):
+async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут редактировать.", show_alert=True)
         return
 
@@ -823,8 +823,8 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext):
 # IMPORTANT: del_confirm_ handler MUST be registered BEFORE del_ handler
 # so aiogram matches the more specific pattern first.
 @router.callback_query(F.data.startswith("del_confirm_"))
-async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
-    if not is_parent(callback.from_user.id):
+async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
@@ -840,12 +840,12 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("❌ Не удалось удалить.", show_alert=True)
 
     await state.clear()
-    await _show_history(callback, page=1)
+    await _show_history(callback, page=1, member=member)
 
 
 @router.callback_query(F.data.startswith("del_"))
-async def cb_delete(callback: types.CallbackQuery, state: FSMContext):
-    if not is_parent(callback.from_user.id):
+async def cb_delete(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
         return
 
@@ -898,8 +898,8 @@ def build_settings_text(target: int, total: int) -> str:
 
 
 @router.callback_query(F.data == "settings")
-async def cb_settings(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_settings(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
@@ -937,8 +937,8 @@ def kb_reminders() -> InlineKeyboardMarkup:
 
 
 @router.callback_query(F.data == "reminders")
-async def cb_reminders(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_reminders(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     hours = await _db(get_reminder_hours, DB_PATH)
@@ -946,8 +946,8 @@ async def cb_reminders(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("rem_set_"))
-async def cb_rem_set(callback: types.CallbackQuery, state: FSMContext):
-    if not is_parent(callback.from_user.id):
+async def cb_rem_set(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     key = callback.data.replace("rem_set_", "")
@@ -1005,8 +1005,8 @@ async def _send_reminders_from_message(message: types.Message):
 # Change target PEF
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "change_target")
-async def cb_change_target(callback: types.CallbackQuery, state: FSMContext):
-    if not is_parent(callback.from_user.id):
+async def cb_change_target(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
@@ -1073,8 +1073,8 @@ def kb_export_periods(months: list) -> InlineKeyboardMarkup:
 
 
 @router.callback_query(F.data == "export")
-async def cb_export(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_export(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     months = await _db(get_available_months, DB_PATH, CHILD_ID)
@@ -1101,8 +1101,8 @@ async def _send_csv(callback: types.CallbackQuery, rows: list, filename: str, ca
 
 
 @router.callback_query(F.data == "export_all")
-async def cb_export_all(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_export_all(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     rows = await _db(
@@ -1114,8 +1114,8 @@ async def cb_export_all(callback: types.CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("csv_"))
-async def cb_export_month(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_export_month(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     parsed = parse_csv_month(callback.data)
@@ -1137,8 +1137,8 @@ async def cb_export_month(callback: types.CallbackQuery):
 # BACKUP — parents only
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "backup")
-async def cb_backup(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_backup(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
 
@@ -1336,8 +1336,8 @@ async def cb_chart_download(callback: types.CallbackQuery):
 # SUMMARY — today's overview (parents only)
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "summary")
-async def cb_summary(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_summary(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     target = await _db(get_effective_target)
@@ -1381,8 +1381,8 @@ async def cb_summary(callback: types.CallbackQuery):
 # WEEKLY report
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "weekly")
-async def cb_weekly(callback: types.CallbackQuery):
-    if not is_parent(callback.from_user.id):
+async def cb_weekly(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только для родителей.", show_alert=True)
         return
     await callback.answer()
@@ -1479,8 +1479,8 @@ async def cb_stats(callback: types.CallbackQuery):
 # BACK
 # ---------------------------------------------------------------------------
 @router.callback_query(F.data == "back")
-async def cb_back(callback: types.CallbackQuery, state: FSMContext):
-    await send_main_menu(callback, callback.from_user.id)
+async def cb_back(callback: types.CallbackQuery, state: FSMContext, member=None):
+    await send_main_menu(callback, callback.from_user.id, member=member)
     await state.clear()
 
 
@@ -1504,9 +1504,9 @@ _FSM_HINTS = {
 
 
 @router.message(F.text)
-async def catch_all(message: types.Message, state: FSMContext):
+async def catch_all(message: types.Message, state: FSMContext, member=None):
     uid = message.from_user.id
-    if not is_parent(uid) and not is_child(uid):
+    if _role(member, uid) == "unknown":
         await message.answer(
             "⚠️ Этот бот только для семьи. Обратитесь к администратору."
         )
@@ -1517,7 +1517,7 @@ async def catch_all(message: types.Message, state: FSMContext):
         if hint:
             await message.answer(hint, reply_markup=kb_back())
         return
-    await send_main_menu(message, uid)
+    await send_main_menu(message, uid, member=member)
 
 
 # ---------------------------------------------------------------------------
@@ -1526,10 +1526,10 @@ async def catch_all(message: types.Message, state: FSMContext):
 _scheduler_task = None
 
 
-def _user_display_name(user_id: int) -> str:
-    if is_child(user_id):
+def _user_display_name(user_id: int, member=None) -> str:
+    if _role(member, user_id) == "child":
         return CHILD_NAME
-    if user_id in PARENT_IDS:
+    if _role(member, user_id) == "parent":
         return "Родитель"
     return "Кто-то"
 
