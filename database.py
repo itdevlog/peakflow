@@ -125,7 +125,14 @@ def _rebuild_reminders_v2(conn):
 
 
 def _seed_default_family(conn):
-    """Create family #1 and its members from legacy users, else from env."""
+    """Create family #1 and seed members from legacy users *and* config.
+
+    The legacy ``users`` rows and the ``.env`` config (``CHILD_ID`` /
+    ``PARENT_IDS``) are unioned: legacy members are inserted first so their
+    roles/names win, then config members fill any gaps via INSERT OR IGNORE.
+    This matters in prod, where the active child owns most measurements but is
+    absent from the legacy ``users`` table.
+    """
     existing = conn.execute(
         "SELECT id FROM families WHERE id = ?", (DEFAULT_FAMILY_ID,)
     ).fetchone()
@@ -134,8 +141,9 @@ def _seed_default_family(conn):
     conn.execute(
         "INSERT INTO families (id, name) VALUES (?, ?)", (DEFAULT_FAMILY_ID, "Семья")
     )
+
+    # 1. Legacy users first — authoritative on conflict.
     cols = _table_columns(conn, "users")
-    seeded = False
     if "user_id" in cols:
         # Materialise first: `conn` may be a cursor, and reusing it for INSERT
         # while iterating its SELECT truncates the loop after the first row.
@@ -151,24 +159,23 @@ def _seed_default_family(conn):
                 "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, ?, ?)",
                 (r["user_id"], DEFAULT_FAMILY_ID, role, name)
             )
-            seeded = True
-    if not seeded:
-        # Fallback: seed from .env (config snapshots at import time).
-        import config
-        child_id = getattr(config, "CHILD_ID", 0)
-        parent_ids = getattr(config, "PARENT_IDS", []) or []
-        child_name = getattr(config, "CHILD_NAME", "Ребёнок")
-        if child_id:
+
+    # 2. Config members fill the gaps (INSERT OR IGNORE keeps legacy rows).
+    import config
+    child_id = getattr(config, "CHILD_ID", 0)
+    parent_ids = getattr(config, "PARENT_IDS", []) or []
+    child_name = getattr(config, "CHILD_NAME", "Ребёнок")
+    if child_id:
+        conn.execute(
+            "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'child', ?)",
+            (child_id, DEFAULT_FAMILY_ID, child_name)
+        )
+    for pid in parent_ids:
+        if pid:
             conn.execute(
-                "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'child', ?)",
-                (child_id, DEFAULT_FAMILY_ID, child_name)
+                "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', 'Родитель')",
+                (pid, DEFAULT_FAMILY_ID)
             )
-        for pid in parent_ids:
-            if pid:
-                conn.execute(
-                    "INSERT OR IGNORE INTO members (telegram_id, family_id, role, name) VALUES (?, ?, 'parent', 'Родитель')",
-                    (pid, DEFAULT_FAMILY_ID)
-                )
 
 
 def _migrate_to_v2(conn):

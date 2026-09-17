@@ -2296,6 +2296,39 @@ class TestMigrationV2:
         assert get_member(TEST_DB, 111)["role"] == "child"
         assert get_member(TEST_DB, 222)["role"] == "parent"
 
+    def test_migration_unions_legacy_users_and_config(self, monkeypatch):
+        """Config CHILD_ID/PARENT_IDS seed even when legacy users exist."""
+        import config
+        from database import init_db, get_member
+        self._make_v1_db()
+        monkeypatch.setattr(config, "CHILD_ID", 1727847144)
+        monkeypatch.setattr(config, "PARENT_IDS", [35641953, 704630847])
+        monkeypatch.setattr(config, "CHILD_NAME", "Матвей")
+        init_db(TEST_DB)
+
+        # Legacy members are still present with their roles.
+        assert get_member(TEST_DB, 111)["role"] == "child"
+        assert get_member(TEST_DB, 222)["role"] == "parent"
+        # Config members are seeded too (union, not either/or).
+        assert get_member(TEST_DB, 1727847144)["role"] == "child"
+        assert get_member(TEST_DB, 1727847144)["name"] == "Матвей"
+        assert get_member(TEST_DB, 35641953)["role"] == "parent"
+        assert get_member(TEST_DB, 704630847)["role"] == "parent"
+
+    def test_migration_legacy_role_wins_on_conflict(self, monkeypatch):
+        """When config ids collide with legacy users, legacy role/name wins."""
+        import config
+        from database import init_db, get_member
+        self._make_v1_db()
+        # 111/222 already exist as legacy child/parent with a real name.
+        monkeypatch.setattr(config, "CHILD_ID", 111)
+        monkeypatch.setattr(config, "PARENT_IDS", [222])
+        monkeypatch.setattr(config, "CHILD_NAME", "НовоеИмя")
+        init_db(TEST_DB)
+        assert get_member(TEST_DB, 111)["role"] == "child"
+        assert get_member(TEST_DB, 111)["name"] == "Маша"
+        assert get_member(TEST_DB, 222)["role"] == "parent"
+
     def test_migration_is_idempotent(self):
         from database import init_db
         self._make_v1_db()
