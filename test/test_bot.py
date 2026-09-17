@@ -3936,9 +3936,9 @@ class TestTenantContext:
             assert asyncio.run(bot._ctx({"role": "parent", "telegram_id": 500, "family_id": 2})) == (2, 700)
 
     def test_child_name_fallback(self, monkeypatch):
-        import bot
+        import asyncio, bot
         monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
-        assert bot._child_name(None, None) == "Motya"
+        assert asyncio.run(bot._child_name(None, None)) == "Motya"
 
     def test_family_parents_env_fallback(self, monkeypatch):
         import asyncio, bot
@@ -4285,6 +4285,115 @@ class TestTenantAwareOps:
                  "parent_morning": 10, "parent_evening": 22},
                 10, 0, "2026-09-12"))
         assert 222 in sent
+
+
+class TestBackupScopedToFamily:
+    """F1: the DB backup must contain only the caller's family."""
+
+    def test_backup_family_db_contains_only_that_family(self):
+        import sqlite3
+        import os
+        from database import (create_family, add_member, add_measurement,
+                              set_setting, create_invite, mark_reminder_sent,
+                              backup_family_db)
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_measurement(TEST_DB, 300, "morning", 700, 700, family_id=f2)
+        add_measurement(TEST_DB, 240, "morning", 111, 111, family_id=f1)
+        set_setting(TEST_DB, "target_pef", "400", family_id=f2)
+        set_setting(TEST_DB, "target_pef", "240", family_id=f1)
+        create_invite(TEST_DB, f2, "parent")
+        mark_reminder_sent(TEST_DB, "2026-09-17", "weekly", 700)
+
+        dest = TEST_DB + ".fam2.bak"
+        try:
+            backup_family_db(TEST_DB, dest, f2)
+            conn = sqlite3.connect(dest)
+            assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM measurements").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT pef_value FROM measurements").fetchone()[0] == 300
+            assert conn.execute(
+                "SELECT COUNT(*) FROM measurements WHERE family_id = ?",
+                (f1,)).fetchone()[0] == 0
+            assert [r[0] for r in conn.execute(
+                "SELECT id FROM families ORDER BY id")] == [f2]
+            assert [r[0] for r in conn.execute(
+                "SELECT telegram_id FROM members")] == [700]
+            assert [r[0] for r in conn.execute(
+                "SELECT family_id FROM settings")] == [f2]
+            assert [r[0] for r in conn.execute(
+                "SELECT family_id FROM invites")] == [f2]
+            assert [r[0] for r in conn.execute(
+                "SELECT child_id FROM reminders_sent")] == [700]
+            conn.close()
+        finally:
+            for ext in ["", "-wal", "-shm"]:
+                p = dest + ext
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_cb_backup_uses_family_scoped_backup(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.data = "backup"
+        cb.from_user = MagicMock(); cb.from_user.id = 500
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        seen = {}
+
+        def fake_backup(db, dest, family_id):
+            seen["family_id"] = family_id
+
+        with patch.object(bot, "backup_family_db", side_effect=fake_backup), \
+             patch.object(bot, "_ctx", new=AsyncMock(return_value=(2, 700))), \
+             patch.object(bot, "get_all_measurements", return_value=[]), \
+             patch.object(bot, "answer_callback", new=AsyncMock()), \
+             patch.object(bot, "os") as m_os:
+            m_os.path.exists.return_value = False
+            asyncio.run(bot.cb_backup(cb, member={"role": "parent",
+                                                  "telegram_id": 500,
+                                                  "family_id": 2}))
+        assert seen.get("family_id") == 2
+
+
+class TestChildNameLookup:
+    """F2: _child_name resolves the active child's stored name."""
+
+    def test_child_name_for_family_member(self):
+        import asyncio, bot
+        from database import create_family, add_member
+        f2 = create_family(TEST_DB, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        name = asyncio.run(bot._child_name(
+            {"role": "parent", "telegram_id": 500, "family_id": f2}, 700))
+        assert name == "Маша"
+
+    def test_child_name_none_member_uses_env(self, monkeypatch):
+        import asyncio, bot
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert asyncio.run(bot._child_name(None, 111)) == "Motya"
+
+    def test_child_name_explicit_skips_lookup(self):
+        import asyncio, bot
+        from unittest.mock import patch
+        with patch.object(bot, "_db") as m_db:
+            name = asyncio.run(bot._child_name(
+                {"role": "parent", "telegram_id": 500, "family_id": 2},
+                700, child_name="Петя"))
+        assert name == "Петя"
+        m_db.assert_not_called()
+
+    def test_child_name_missing_member_falls_back(self):
+        import asyncio, bot
+        name = asyncio.run(bot._child_name(
+            {"role": "parent", "telegram_id": 500, "family_id": 2}, 999999))
+        assert name == "Ребёнок"
 
 
 if __name__ == "__main__":
