@@ -51,6 +51,11 @@ from database import (
     create_family_with_owner,
     join_by_invite,
     get_family_invite,
+    regenerate_family_invite,
+    list_family_children,
+    list_child_cards,
+    create_invite,
+    delete_invite,
 )
 
 import config as app_config
@@ -973,7 +978,7 @@ async def cb_delete_confirm(callback: types.CallbackQuery, state: FSMContext, me
     await _show_history(callback, page=1, member=member)
 
 
-@router.callback_query(F.data.startswith("del_"))
+@router.callback_query(F.data.startswith("del_") & ~F.data.startswith("del_child_"))
 async def cb_delete(callback: types.CallbackQuery, state: FSMContext, member=None):
     if not _is_parent_member(member, callback.from_user.id):
         await callback.answer("⚠️ Только родители могут удалять.", show_alert=True)
@@ -1011,6 +1016,8 @@ def kb_settings(target: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🎯 Изменить цель ({target})", callback_data="change_target")],
         [InlineKeyboardButton(text="⏰ Напоминания", callback_data="reminders")],
+        [InlineKeyboardButton(text="👨‍👩‍👧 Участники", callback_data="members")],
+        [InlineKeyboardButton(text="🧒 Дети", callback_data="children")],
         [InlineKeyboardButton(text="📥 Экспорт CSV", callback_data="export")],
         [InlineKeyboardButton(text="💾 Скачать бэкап", callback_data="backup")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
@@ -1304,6 +1311,159 @@ async def cb_backup(callback: types.CallbackQuery, member=None):
                 os.remove(dest)
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# FAMILY MANAGEMENT — «Участники» / «Дети» (parents only)
+# ---------------------------------------------------------------------------
+def _parse_child_token(data, prefix: str):
+    """Safely extract the invite token from a callback payload.
+
+    ``parse_callback_int`` cannot be used here: a token is an arbitrary
+    URL-safe string, not an integer. Returns None for missing/empty payloads
+    so a malformed callback cannot crash the handler.
+    """
+    if not data or not isinstance(data, str) or not data.startswith(prefix):
+        return None
+    token = data[len(prefix):]
+    return token or None
+
+
+def _members_text(children: list, invite) -> str:
+    lines = ["👨‍👩‍👧 *Участники семьи*"]
+    lines.append("👨‍👧 Родители: вы")
+    if children:
+        lines.append("👶 Дети:")
+        for c in children:
+            lines.append(f"  • {escape_md(c['name'])}")
+    else:
+        lines.append("👶 Дети: пока нет")
+    lines.append("")
+    token = invite["token"] if invite else None
+    if token:
+        lines.append(f"🔑 Код для приглашения родителя:\n`{escape_md(token)}`")
+    else:
+        lines.append("🔑 Код приглашения родителя отсутствует.")
+    return "\n".join(lines)
+
+
+def kb_members() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Перегенерировать код", callback_data="regen_invite")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="settings")],
+    ])
+
+
+@router.callback_query(F.data == "members")
+async def cb_members(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id = member["family_id"]
+    invite = await _db(get_family_invite, DB_PATH, family_id)
+    children = await _db(list_family_children, DB_PATH, family_id)
+    await respond(callback, _members_text(children, invite), kb=kb_members())
+
+
+@router.callback_query(F.data == "regen_invite")
+async def cb_regen_invite(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id = member["family_id"]
+    token = await _db(regenerate_family_invite, DB_PATH, family_id)
+    await callback.answer("✅ Код обновлён.", show_alert=True)
+    children = await _db(list_family_children, DB_PATH, family_id)
+    invite = await _db(get_family_invite, DB_PATH, family_id)
+    # regenerate already returned the new token; prefer it if the re-read lags.
+    if invite is None:
+        invite = {"token": token}
+    await respond(callback, _members_text(children, invite), kb=kb_members())
+
+
+def _children_text(cards: list) -> str:
+    if not cards:
+        return "🧒 *Дети*\n\nПока нет карточек для добавления детей."
+    lines = ["🧒 *Дети*", "", "Карточки для входа ребёнка:"]
+    for c in cards:
+        name = escape_md(c["name"]) if c.get("name") else "без имени"
+        lines.append(f"  • {name}")
+    return "\n".join(lines)
+
+
+def kb_children(cards: list) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="➕ Добавить ребёнка", callback_data="add_child")]]
+    for c in cards:
+        name = c["name"] if c.get("name") else "без имени"
+        rows.append([InlineKeyboardButton(
+            text=f"🗑️ {name}", callback_data=f"del_child_{c['token']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _show_children(callback: types.CallbackQuery, family_id: int):
+    cards = await _db(list_child_cards, DB_PATH, family_id)
+    await respond(callback, _children_text(cards), kb=kb_children(cards))
+
+
+@router.callback_query(F.data == "children")
+async def cb_children(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    await _show_children(callback, member["family_id"])
+
+
+@router.callback_query(F.data == "add_child")
+async def cb_add_child(callback: types.CallbackQuery, state: FSMContext, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    await state.update_data(family_id=member["family_id"])
+    await state.set_state(Registration.adding_child_name)
+    await answer_callback(callback)
+    await callback.message.answer("🧒 Введите имя ребёнка:", reply_markup=kb_back())
+
+
+@router.message(Registration.adding_child_name, F.text, ~F.text.startswith("/"))
+async def input_child_name(message: types.Message, state: FSMContext, member=None):
+    if not _is_parent_member(member, message.from_user.id):
+        await message.answer("⚠️ Только для родителей.")
+        await state.clear()
+        return
+    name = (message.text or "").strip()[:100]
+    if not name:
+        await message.answer("Введите имя ребёнка:", reply_markup=kb_back())
+        return
+    data = await state.get_data()
+    family_id = data.get("family_id") or member["family_id"]
+    token = await _db(create_invite, DB_PATH, family_id, "child", name)
+    await message.answer(
+        f"✅ Карточка для *{escape_md(name)}* создана.\n\n"
+        f"🔑 Код для входа ребёнка:\n`{escape_md(token)}`",
+        parse_mode="Markdown",
+    )
+    await state.clear()
+    cards = await _db(list_child_cards, DB_PATH, family_id)
+    await message.answer(_children_text(cards), parse_mode="Markdown",
+                         reply_markup=kb_children(cards))
+
+
+@router.callback_query(F.data.startswith("del_child_"))
+async def cb_del_child(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    token = _parse_child_token(callback.data, "del_child_")
+    if not token:
+        await callback.answer("❌ Некорректная карточка.", show_alert=True)
+        return
+    ok = await _db(delete_invite, DB_PATH, token)
+    if ok:
+        await callback.answer("✅ Карточка удалена.", show_alert=True)
+    else:
+        await callback.answer("❌ Карточка не найдена.", show_alert=True)
+    await _show_children(callback, member["family_id"])
 
 
 # ---------------------------------------------------------------------------
