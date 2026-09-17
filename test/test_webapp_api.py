@@ -193,3 +193,17 @@ def test_static_index_has_settings_screen():
     assert 'id="screen-settings"' in r.text
     assert 'data-screen="settings"' in r.text
     assert 'id="tab-settings" hidden' in r.text
+
+
+class TestWebRolesFromDb:
+    def test_member_of_new_family_gets_role_from_db(self):
+        from database import create_family_with_owner
+        _setup_db()
+        create_family_with_owner(TEST_DB, 999, "Новые")
+        body = _client().get("/api/me", headers=_auth(999)).json()
+        assert body["role"] == "parent"
+
+    def test_stranger_forbidden(self):
+        _setup_db()
+        r = _client().get("/api/me", headers=_auth(888))
+        assert r.status_code == 403

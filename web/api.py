@@ -28,6 +28,7 @@ from database import (
     get_reminder_hours,    get_stats,
     get_today_measurements,
     get_effective_target as _db_effective_target,
+    get_member,
     set_note,
     set_setting,
     validate_reminder_hours,
@@ -150,13 +151,19 @@ def create_app(services: dict) -> FastAPI:
         if not user:
             raise HTTPException(403, "Нет доступа")
         uid = user.get("id")
-        if uid == getattr(config, "CHILD_ID", 0):
-            role = "child"
-        elif uid in (getattr(config, "PARENT_IDS", []) or []):
-            role = "parent"
+        member = get_member(config.DB_PATH, uid)
+        if member:
+            role = member["role"]
+            family_id = member["family_id"]
         else:
-            raise HTTPException(403, "Нет доступа")
-        return {"user": user, "role": role}
+            # Fallback for family #1 before its members are read (defensive).
+            if uid == getattr(config, "CHILD_ID", 0):
+                role, family_id = "child", 1
+            elif uid in (getattr(config, "PARENT_IDS", []) or []):
+                role, family_id = "parent", 1
+            else:
+                raise HTTPException(403, "Нет доступа")
+        return {"user": user, "role": role, "family_id": family_id, "member": member}
 
     def require_user(x_telegram_init_data: str | None = Header(None)) -> dict:
         return _resolve_user(x_telegram_init_data)
