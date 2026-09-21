@@ -1,19 +1,18 @@
 """Dry-run a PeakFlow schema migration on a throwaway copy of the database.
 
-The source database is never opened for writing: it is copied to a temp file,
-``init_db`` is run on the copy, and the resulting schema/data are reported.
-Useful to preview what ``init_db`` would do before running it against prod.
+The source database is never written to: it is copied with SQLite's online
+backup API (which reads through a hot WAL), ``init_db`` is run on the copy, and
+the resulting schema/data are reported. Useful to preview what ``init_db`` would
+do before running it against prod.
 
 Usage:
     python -m scripts.migration_dry_run [DB_PATH]
 """
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import tempfile
-from urllib.parse import quote
 
 from database import SCHEMA_VERSION, init_db
 
@@ -24,15 +23,8 @@ _ORPHAN_SQL = (
 )
 
 
-def _read_user_version(db_path: str) -> int:
-    """Read ``PRAGMA user_version`` without taking a write lock on the source."""
-    if not os.path.exists(db_path):
-        raise FileNotFoundError(f"database not found: {db_path}")
-    uri = "file:" + quote(os.path.abspath(db_path)) + "?mode=ro"
-    try:
-        conn = sqlite3.connect(uri, uri=True)
-    except sqlite3.OperationalError:
-        conn = sqlite3.connect(db_path)
+def _user_version(db_path: str) -> int:
+    conn = sqlite3.connect(db_path)
     try:
         return conn.execute("PRAGMA user_version").fetchone()[0]
     finally:
@@ -50,17 +42,32 @@ def _table_counts(conn: sqlite3.Connection) -> dict:
     }
 
 
+def _backup_to(db_path: str, dest_path: str) -> None:
+    """SQLite online backup (WAL-safe), mirroring ``database.backup_db``."""
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(dest_path)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
 def dry_run(db_path: str) -> dict:
     """Run ``init_db`` on a copy of ``db_path`` and return a report.
 
-    The source file is left byte-for-byte untouched; the temp copy and any
-    sidecar files (WAL/journal/backup) are removed in ``finally``.
+    The source is only ever read (via the online backup API). ``version_before``
+    is read from the copy, so the source is never opened read-only (which would
+    create ``-shm``/``-wal`` sidecars beside it). The temp copy and any sidecar
+    files are removed in ``finally``.
     """
-    version_before = _read_user_version(db_path)
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"database not found: {db_path}")
     fd, tmp_path = tempfile.mkstemp(prefix="peakflow_dryrun_", suffix=".db")
     os.close(fd)
     try:
-        shutil.copy2(db_path, tmp_path)
+        _backup_to(db_path, tmp_path)
+        version_before = _user_version(tmp_path)
         init_db(tmp_path)
         conn = sqlite3.connect(tmp_path)
         conn.row_factory = sqlite3.Row

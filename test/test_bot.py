@@ -4619,6 +4619,55 @@ class TestMigrationDryRun:
         assert report["version_after"] == SCHEMA_VERSION
         assert report["tables"]["measurements"] == 1
 
+    @staticmethod
+    def _legacy_measurements_table(conn):
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, pef_value INTEGER, time_of_day TEXT, "
+            "measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by INTEGER, "
+            "note TEXT, source TEXT DEFAULT 'manual')"
+        )
+
+    def test_dry_run_sees_committed_rows_in_a_hot_wal(self, tmp_path):
+        """A row committed to WAL but not yet checkpointed must be reported."""
+        from scripts.migration_dry_run import dry_run
+        db = str(tmp_path / "hot.db")
+        writer = sqlite3.connect(db)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            self._legacy_measurements_table(writer)
+            writer.execute(
+                "INSERT INTO measurements (user_id, pef_value, time_of_day) "
+                "VALUES (111, 245, 'morning')"
+            )
+            writer.commit()
+            assert os.path.exists(db + "-wal"), "setup: expected a hot WAL"
+            before_bytes = open(db, "rb").read()
+            before_sidecars = {p for p in (db + "-wal", db + "-shm") if os.path.exists(p)}
+            report = dry_run(db)
+            assert report["tables"]["measurements"] == 1, "hot WAL row was dropped"
+            assert open(db, "rb").read() == before_bytes
+            after_sidecars = {p for p in (db + "-wal", db + "-shm") if os.path.exists(p)}
+            assert after_sidecars == before_sidecars, "dry_run touched source sidecars"
+        finally:
+            writer.close()
+
+    def test_dry_run_creates_no_sidecar_next_to_clean_source(self, tmp_path):
+        from scripts.migration_dry_run import dry_run
+        db = str(tmp_path / "clean.db")
+        conn = sqlite3.connect(db)
+        conn.execute("PRAGMA journal_mode=WAL")
+        self._legacy_measurements_table(conn)
+        conn.commit()
+        conn.close()  # last close checkpoints, so the source is clean
+        assert not os.path.exists(db + "-wal")
+        assert not os.path.exists(db + "-shm")
+        before = open(db, "rb").read()
+        dry_run(db)
+        assert open(db, "rb").read() == before, "dry_run modified the source database"
+        assert not os.path.exists(db + "-wal"), "dry_run created a -wal beside the source"
+        assert not os.path.exists(db + "-shm"), "dry_run created a -shm beside the source"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
