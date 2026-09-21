@@ -249,7 +249,8 @@ class Measurement(StatesGroup):
 | `pct_of(value, target)` | `value: int, target: int` | `int` | Процент от нормы |
 | `answer_callback(cb)` | `callback: CallbackQuery` | — | ACK + удаление сообщения callback |
 | `respond(cb, text, kb)` | `callback, text, kb, parse_mode` | `Message` | answer_callback + answer |
-| `_user_display_name(uid)` | `user_id: int` | `str` | Имя ребёнка или «Родитель» |
+| `_user_display_name(uid, member=None, child_name=None, members_map=None)` | `...` | `str` | Имя автора записи: при `members_map` — из `members` (иначе «Кто-то»), контекст семьи никогда не читает `.env`; fallback на `.env` только при `member is None` |
+| `_history_line(m, target, member=None, author_roles=None)` | `...` | `str` | Строка истории: значок автора (👨‍👧/👶) по `author_roles` из `members`; `.env` только при `member is None` |
 | `_ctx(member) → (family_id, child_id)` | `member: dict \| None` | `tuple` | Тенант-контекст: семья и активный ребёнок (`member=None` → семья №1 из `.env`) |
 | `_child_name(member, child_id, child_name=None)` | `...` | `str` | Имя активного ребёнка (`member=None` → env `CHILD_NAME`) |
 | `_family_parents(member, family_id)` | `...` | `list[int]` | Telegram ID родителей семьи (fallback — env `PARENT_IDS`) |
@@ -326,20 +327,24 @@ input_pef()
 
 ### Планировщик
 
-```python
-async def on_startup():
-    asyncio.create_task(scheduler_loop())
+`_tick_targets()` собирает пары `(family_id, child)` по **всем** семьям
+(`list_families` → `list_family_children`; для семьи №1 без строк в `members` —
+fallback на `.env`-ребёнка). `scheduler_loop()` тикает раз в минуту и для каждого
+ребёнка каждой семьи:
 
+```python
 async def scheduler_loop():
-    # Цикл каждую минуту:
-    #   10:00 — если нет утреннего замера → напоминание родителям
-    #   22:00 — если нет вечернего замера → напоминание родителям
-    #   Вс 21:00 — недельный отчёт родителям
+    # Цикл каждую минуту, по каждой семье и каждому её ребёнку:
+    #   08:00/20:00 — пинг ребёнку (часы из settings семьи)
+    #   10:00/22:00 — эскалация родителям семьи, если замера нет
+    #   Вс 21:00 — недельный отчёт НА КАЖДОГО ребёнка, родителям его семьи
+    #              (дедуп по (child_id, "weekly"))
 ```
 
-> **Ограничение:** планировщик по-прежнему обслуживает только семью №1 из `.env`
-> (`_ctx(None)`): напоминания ребёнку, эскалация родителям и недельный отчёт не
-> обходят все семьи. Мульти-семейный обход — вне SP3C (2D/Фаза 3).
+> Каждая семья использует собственные `reminder_*` из `settings`; уведомления не
+> выходят за пределы семьи. Семья с двумя детьми получает два независимых
+> недельных отчёта (по одному на ребёнка). Семья №1 остаётся совместимой через
+> `.env`-ребёнка.
 
 ### Главная функция
 
@@ -365,6 +370,7 @@ def main():
 | `add_or_replace_measurement(db, pef, tod, child_id, by, force=False, source='manual', family_id=1)` | `...` | `tuple` | Атомарно добавить/заменить авто-запись, `(id, status)` |
 | `edit_measurement(db, mid, val, child_id, family_id=1)` | `str, int, int, int, int` | `bool` | Редактирование по ID |
 | `delete_measurement(db, mid, child_id, family_id=1)` | `str, int, int, int` | `bool` | Удаление по ID |
+| `get_measurement_by_id(db, mid, family_id=1, child_id=None)` | `str, int, int, int \| None` | `Optional[dict]` | Замер по `id` в семье; при заданном `child_id` — дополнительно scoped по ребёнку |
 | `get_last_measurement(db, child_id, family_id=1)` | `str, int, int` | `Optional[dict]` | Последний замер |
 | `get_all_measurements(db, child_id, include_auto=False, family_id=1)` | `str, int, bool, int` | `list[dict]` | Все замеры (DESC по id) |
 | `get_today_measurements(db, child_id, family_id=1)` | `str, int, int` | `list[dict]` | Замеры за сегодня |
@@ -567,12 +573,23 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 412 passed
+# 444 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
 и dummy-токен. В CI (GitHub Actions) дополнительно прогоняются `pyflakes` и
 `compileall`.
+
+### Dry-run миграции
+
+`scripts/migration_dry_run.py [DB_PATH]` — предпросмотр миграции без записи в
+источник. Делает **файловый** снимок БД (main + `-wal`) во временный файл,
+запускает `init_db` на копии и печатает JSON-отчёт: `user_version` до/после,
+таблицы и число строк, семьи/участники, orphan-`child_id`. Источник никогда не
+открывается SQLite-соединением: read-only соединение трогает `-shm`, а
+read-write при закрытии делает checkpoint, переписывает main-файл и удаляет
+`-wal`/`-shm`. Поэтому `dry_run` не изменяет ни main, ни sidecar'ы источника;
+временная копия и её sidecar'ы удаляются.
 
 ---
 

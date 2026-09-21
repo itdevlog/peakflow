@@ -846,6 +846,132 @@ class TestSchedulerAlignment:
             "escalation flag must not be set if no parent got the message"
 
 
+class TestMultiFamilyScheduler:
+    """SP3D Task 4: one scheduler tick must serve every family, with each
+    family's own reminder hours and no cross-family notifications."""
+
+    @staticmethod
+    def _mocked_bot():
+        from unittest.mock import AsyncMock, MagicMock
+        mb = MagicMock()
+        mb.send_message = AsyncMock()
+        return mb
+
+    @staticmethod
+    def _make_family(child_id, child_name, parent_id, **hours):
+        from database import create_family, add_member, set_setting
+        fid = create_family(TEST_DB, f"family-{child_id}")
+        add_member(TEST_DB, child_id, fid, "child", child_name)
+        add_member(TEST_DB, parent_id, fid, "parent", "Родитель")
+        for key, value in hours.items():
+            set_setting(TEST_DB, f"reminder_{key}", str(value), family_id=fid)
+        return fid
+
+    def _run_tick(self, families, hour, minute, mocked_bot):
+        """One scheduler tick with faked time; returns send_message calls."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+        from datetime import datetime, timedelta, timezone
+
+        tz = timezone(timedelta(hours=5))
+        # 2026-09-13 is a Sunday (weekly report day).
+        fake_now = datetime(2026, 9, 13, hour, minute, 5, tzinfo=tz)
+
+        async def fake_sleep(_s):
+            raise asyncio.CancelledError  # stop loop after first tick
+
+        with patch.object(bot, "now_tz", return_value=fake_now), \
+             patch.object(bot, "list_families",
+                          return_value=[{"id": fid} for fid in families],
+                          create=True), \
+             patch.object(bot, "bot", mocked_bot), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "is_reminder_minute", return_value=minute < 2), \
+             patch.object(bot, "get_last_of_tod", return_value=None), \
+             patch("asyncio.sleep", side_effect=fake_sleep), \
+             patch("asyncio.create_task", lambda coro: coro):
+            try:
+                asyncio.run(bot.scheduler_loop())
+            except asyncio.CancelledError:
+                pass
+        return mocked_bot.send_message.call_args_list
+
+    def test_list_families_returns_all(self):
+        from database import list_families
+        f2 = self._make_family(700, "Маша", 701)
+        ids = [f["id"] for f in list_families(TEST_DB)]
+        assert 1 in ids, "seeded default family must be listed"
+        assert f2 in ids
+
+    def test_two_families_pinged_at_own_hours(self):
+        f2 = self._make_family(700, "Маша", 701, child_morning=8)
+        f3 = self._make_family(800, "Петя", 801, child_morning=9)
+
+        at8 = [c[0][0] for c in self._run_tick([f2, f3], 8, 0, self._mocked_bot())]
+        assert 700 in at8, "family 2's child must be pinged at its own 08:00"
+        assert 800 not in at8, "family 3's child must not be pinged at 08:00"
+
+        at9 = [c[0][0] for c in self._run_tick([f2, f3], 9, 0, self._mocked_bot())]
+        assert 800 in at9, "family 3's child must be pinged at its own 09:00"
+        assert 700 not in at9, "family 2's child must not be pinged at 09:00"
+
+    def test_escalation_only_notifies_its_own_family(self):
+        f2 = self._make_family(700, "Маша", 701, child_morning=8, parent_morning=10)
+        f3 = self._make_family(800, "Петя", 801, child_morning=8, parent_morning=11)
+
+        recipients = [c[0][0]
+                      for c in self._run_tick([f2, f3], 10, 0, self._mocked_bot())]
+        assert 701 in recipients, "family 2's parent must be escalated at 10:00"
+        assert 801 not in recipients, "family 3's parent must not get family 2's escalation"
+
+    def test_weekly_report_delivered_per_family(self):
+        from database import add_measurement
+        f2 = self._make_family(700, "Маша", 701)
+        f3 = self._make_family(800, "Петя", 801)
+        add_measurement(TEST_DB, 250, "morning", 700, 701, family_id=f2)
+        add_measurement(TEST_DB, 240, "evening", 700, 701, family_id=f2)
+        add_measurement(TEST_DB, 300, "morning", 800, 801, family_id=f3)
+        add_measurement(TEST_DB, 310, "evening", 800, 801, family_id=f3)
+
+        by_recipient = {}
+        for c in self._run_tick([f2, f3], 21, 0, self._mocked_bot()):
+            by_recipient.setdefault(c[0][0], []).append(c[0][1])
+
+        assert any("Маша" in t for t in by_recipient.get(701, [])), "family 2 report"
+        assert any("Петя" in t for t in by_recipient.get(801, [])), "family 3 report"
+        assert not any("Петя" in t for t in by_recipient.get(701, [])), "no leak into f2"
+        assert not any("Маша" in t for t in by_recipient.get(801, [])), "no leak into f3"
+
+    def test_weekly_report_sent_per_child_within_a_family(self):
+        """Weekly is per child (controller ruling): a family with two children
+        gets one report per child, delivered to that family's parents only."""
+        from database import add_measurement, add_member
+        f2 = self._make_family(700, "Маша", 701)
+        add_member(TEST_DB, 710, f2, "child", "Саша")
+        f3 = self._make_family(800, "Петя", 801)
+        for child_id in (700, 710):
+            add_measurement(TEST_DB, 250, "morning", child_id, 701, family_id=f2)
+            add_measurement(TEST_DB, 240, "evening", child_id, 701, family_id=f2)
+        add_measurement(TEST_DB, 300, "morning", 800, 801, family_id=f3)
+        add_measurement(TEST_DB, 310, "evening", 800, 801, family_id=f3)
+
+        by_recipient = {}
+        for c in self._run_tick([f2, f3], 21, 0, self._mocked_bot()):
+            by_recipient.setdefault(c[0][0], []).append(c[0][1])
+
+        f2_reports = by_recipient.get(701, [])
+        assert len(f2_reports) == 2, "one weekly report per child of the family"
+        assert sum("Маша" in t for t in f2_reports) == 1, "child 700's report"
+        assert sum("Саша" in t for t in f2_reports) == 1, "child 710's report"
+        assert not any("Петя" in t for t in f2_reports), "no cross-family leak"
+
+        f3_reports = by_recipient.get(801, [])
+        assert len(f3_reports) == 1, "family 3 has a single child"
+        assert "Петя" in f3_reports[0]
+        assert not any("Маша" in t or "Саша" in t for t in f3_reports)
+
+
 class TestRemindersScreen:
     """⏰ Reminders settings screen + hour input FSM."""
 
@@ -1422,6 +1548,25 @@ class TestDatabaseIdHelpers:
         assert row["id"] == mid
         assert row["pef_value"] == 250
         assert get_measurement_by_id(TEST_DB, 999999) is None
+
+
+class TestMeasurementByIdChildScope:
+    """SP3D: optional child_id narrows a by-id lookup to the active child."""
+
+    def test_child_scope_hides_sibling(self):
+        from database import (create_family_with_owner, add_member,
+                              add_measurement, get_measurement_by_id)
+        fid = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+        add_member(TEST_DB, 701, fid, "child", "Петя")
+        mid_a = add_measurement(TEST_DB, 240, "morning", 700, 500, family_id=fid)
+        assert get_measurement_by_id(TEST_DB, mid_a, family_id=fid, child_id=700)["pef_value"] == 240
+        assert get_measurement_by_id(TEST_DB, mid_a, family_id=fid, child_id=701) is None
+
+    def test_no_child_id_keeps_family_behavior(self):
+        from database import add_measurement, get_measurement_by_id
+        mid = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        assert get_measurement_by_id(TEST_DB, mid)["pef_value"] == 250
 
 
 class TestNoteTargeting:
@@ -3943,7 +4088,15 @@ class TestTenantContext:
 
     def test_family_parents_env_fallback(self, monkeypatch):
         import asyncio, bot
+        import sqlite3
         monkeypatch.setattr(bot, "PARENT_IDS", [222, 333])
+        # DB members take precedence (multi-family); env is the legacy fallback
+        # only for the default family when it has no parent rows.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute("DELETE FROM members WHERE family_id = ?",
+                     (bot.DEFAULT_FAMILY_ID,))
+        conn.commit()
+        conn.close()
         assert asyncio.run(bot._family_parents(None, 1)) == [222, 333]
 
 
@@ -4422,6 +4575,121 @@ class TestChildNameLookup:
         assert bot._user_display_name(700, member, "Маша") == "Маша"
 
 
+class TestAuthorFromMembers:
+    """SP3D Task 2: author role/name come from `members`; env only when no member."""
+
+    @staticmethod
+    def _m(added_by):
+        return {"pef_value": 240, "time_of_day": "morning",
+                "measured_at": "2026-08-05 08:00:00", "added_by": added_by,
+                "note": None, "source": "manual"}
+
+    def test_history_line_marks_db_parent(self):
+        from bot import _history_line
+        line = _history_line(
+            self._m(500), 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={500: "parent"})
+        assert "👨" in line
+
+    def test_history_line_marks_db_child(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: True)  # env says parent
+        line = bot._history_line(
+            self._m(700), 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={700: "child"})
+        assert "👶" in line
+
+    def test_history_line_env_fallback_without_member(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: uid == 222)
+        assert "👨" in bot._history_line(self._m(222), 260)
+        assert "👶" in bot._history_line(self._m(500), 260)
+
+    def test_history_line_member_context_ignores_env(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: True)
+        line = bot._history_line(
+            self._m(500), 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={})
+        assert "👶" in line
+
+    def test_format_history_lines_threads_roles(self):
+        from bot import _format_history_lines
+        lines = _format_history_lines(
+            [self._m(500), self._m(700)], 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={500: "parent", 700: "child"})
+        assert "👨" in lines[0] and "👶" in lines[1]
+
+    def test_user_display_name_uses_member_name(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: False)
+        members_map = {500: {"role": "parent", "name": "Олег"}}
+        assert bot._user_display_name(500, members_map=members_map) == "Олег"
+
+    def test_user_display_name_unknown_member_does_not_use_env(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: True)
+        members_map = {500: {"role": "parent", "name": "Олег"}}
+        assert bot._user_display_name(999, members_map=members_map) == "Кто-то"
+
+    def test_user_display_name_without_context_falls_back_env(self, monkeypatch):
+        import bot
+        from config import CHILD_ID
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert bot._user_display_name(CHILD_ID) == "Motya"
+
+    def test_csv_export_uses_member_names(self, monkeypatch):
+        import bot
+        from database import add_member, add_measurement, create_family, get_all_measurements
+        monkeypatch.setattr(bot, "CHILD_NAME", "EnvChild")
+        f2 = create_family(TEST_DB, "Вторая")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_member(TEST_DB, 500, f2, "parent", "Олег")
+        add_measurement(TEST_DB, 250, "morning", 700, 500, family_id=f2)
+        rows = get_all_measurements(TEST_DB, 700, family_id=f2)
+        content = bot.build_csv_content(
+            rows, target=260, include_summary=False,
+            child_id=700, child_name="Маша", family_id=f2)
+        assert "Олег" in content
+        assert "EnvChild" not in content
+
+    def test_show_history_family2_marks_parent_author(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from database import add_member, create_family
+        f2 = create_family(TEST_DB, "Вторая")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_member(TEST_DB, 500, f2, "parent", "Олег")
+        row = {"id": 1, "pef_value": 240, "time_of_day": "morning",
+               "measured_at": "2026-09-01 08:00:00", "added_by": 500,
+               "note": None, "source": "manual"}
+        cb = MagicMock()
+        cb.from_user.id = 500
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.delete = AsyncMock()
+        cb.message.answer = AsyncMock()
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        member = {"telegram_id": 500, "family_id": f2, "role": "parent",
+                  "name": "Олег", "active_child_id": 700}
+        with patch.object(bot, "get_measurements_paginated",
+                          return_value=([row], 1, 1)), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "respond", side_effect=fake_respond):
+            asyncio.run(bot._show_history(cb, page=1, member=member))
+
+        assert "👨" in sent.get("text", "")
+
+
 class TestChildSelector:
     """SP3C Task 6: parents pick the active child when the family has >1."""
 
@@ -4551,6 +4819,144 @@ class TestGateRemoved:
         import bot
         assert not hasattr(bot.MemberMiddleware, "REG_SOON_MESSAGE")
         assert not hasattr(bot, "_is_reg_command")
+
+
+class TestMigrationDryRun:
+    """SP3D: dry-run reports a migration without touching the source DB."""
+
+    def test_dry_run_reports_without_touching_source(self):
+        from database import add_measurement
+        from scripts.migration_dry_run import dry_run
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        before = open(TEST_DB, "rb").read()
+        report = dry_run(TEST_DB)
+        after = open(TEST_DB, "rb").read()
+        assert before == after, "dry_run modified the source database"
+        assert "measurements" in report["tables"]
+        assert report["tables"]["measurements"] == 1
+        assert report["version_before"] == report["version_after"]
+
+    def test_dry_run_reports_orphan_child_ids(self):
+        from database import add_measurement
+        from scripts.migration_dry_run import dry_run
+        add_measurement(TEST_DB, 250, "morning", 987654, 222)
+        report = dry_run(TEST_DB)
+        assert 987654 in report["orphan_child_ids"]
+
+    def test_dry_run_migrates_a_copy_of_a_legacy_db(self, tmp_path):
+        from database import SCHEMA_VERSION
+        from scripts.migration_dry_run import dry_run
+        legacy = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(legacy)
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, pef_value INTEGER, time_of_day TEXT, "
+            "measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by INTEGER, "
+            "note TEXT, source TEXT DEFAULT 'manual')"
+        )
+        conn.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day) "
+            "VALUES (111, 245, 'morning')"
+        )
+        conn.commit()
+        conn.close()
+        before = open(legacy, "rb").read()
+        report = dry_run(legacy)
+        after = open(legacy, "rb").read()
+        assert before == after, "dry_run modified the source database"
+        assert report["version_before"] < SCHEMA_VERSION
+        assert report["version_after"] == SCHEMA_VERSION
+        assert report["tables"]["measurements"] == 1
+
+    @staticmethod
+    def _legacy_measurements_table(conn):
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, pef_value INTEGER, time_of_day TEXT, "
+            "measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by INTEGER, "
+            "note TEXT, source TEXT DEFAULT 'manual')"
+        )
+
+    def test_dry_run_sees_committed_rows_in_a_hot_wal(self, tmp_path):
+        """A row committed to WAL but not yet checkpointed must be reported."""
+        from scripts.migration_dry_run import dry_run
+        db = str(tmp_path / "hot.db")
+        writer = sqlite3.connect(db)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            self._legacy_measurements_table(writer)
+            writer.execute(
+                "INSERT INTO measurements (user_id, pef_value, time_of_day) "
+                "VALUES (111, 245, 'morning')"
+            )
+            writer.commit()
+            assert os.path.exists(db + "-wal"), "setup: expected a hot WAL"
+            before_bytes = open(db, "rb").read()
+            before_sidecars = {p for p in (db + "-wal", db + "-shm") if os.path.exists(p)}
+            report = dry_run(db)
+            assert report["tables"]["measurements"] == 1, "hot WAL row was dropped"
+            assert open(db, "rb").read() == before_bytes
+            after_sidecars = {p for p in (db + "-wal", db + "-shm") if os.path.exists(p)}
+            assert after_sidecars == before_sidecars, "dry_run touched source sidecars"
+        finally:
+            writer.close()
+
+    def test_dry_run_creates_no_sidecar_next_to_clean_source(self, tmp_path):
+        from scripts.migration_dry_run import dry_run
+        db = str(tmp_path / "clean.db")
+        conn = sqlite3.connect(db)
+        conn.execute("PRAGMA journal_mode=WAL")
+        self._legacy_measurements_table(conn)
+        conn.commit()
+        conn.close()  # last close checkpoints, so the source is clean
+        assert not os.path.exists(db + "-wal")
+        assert not os.path.exists(db + "-shm")
+        before = open(db, "rb").read()
+        dry_run(db)
+        assert open(db, "rb").read() == before, "dry_run modified the source database"
+        assert not os.path.exists(db + "-wal"), "dry_run created a -wal beside the source"
+        assert not os.path.exists(db + "-shm"), "dry_run created a -shm beside the source"
+
+    @staticmethod
+    def _snapshot_hot_wal(db):
+        """Build ``db`` as a WAL database with a committed-but-uncheckpointed
+        row and **no open connections**: the triple is snapshotted off a live
+        copy so ``-wal``/``-shm`` outlive the writer, while ``db``'s own close
+        never checkpoints."""
+        import shutil
+        live = db + ".live"
+        writer = sqlite3.connect(live)
+        writer.execute("PRAGMA journal_mode=WAL")
+        TestMigrationDryRun._legacy_measurements_table(writer)
+        writer.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day) "
+            "VALUES (111, 245, 'morning')"
+        )
+        writer.commit()
+        shutil.copyfile(live, db)
+        shutil.copyfile(live + "-wal", db + "-wal")
+        shutil.copyfile(live + "-shm", db + "-shm")
+        writer.close()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(live + suffix):
+                os.remove(live + suffix)
+
+    def test_dry_run_as_only_connection_leaves_hot_wal_source_untouched(self, tmp_path):
+        """Regression: a read-write connect would checkpoint the source when
+        dry_run's connection (the only one) closes, rewriting the main file and
+        deleting ``-wal``/``-shm``."""
+        from scripts.migration_dry_run import dry_run
+        db = str(tmp_path / "only.db")
+        self._snapshot_hot_wal(db)
+        paths = (db, db + "-wal", db + "-shm")
+        assert all(os.path.exists(p) for p in paths), "setup: expected a hot WAL triple"
+        before = {p: open(p, "rb").read() for p in paths}
+
+        report = dry_run(db)
+
+        assert report["tables"]["measurements"] == 1, "hot WAL row was dropped"
+        after = {p: (open(p, "rb").read() if os.path.exists(p) else None) for p in paths}
+        assert after == before, "dry_run modified the source database or its sidecars"
 
 
 if __name__ == "__main__":

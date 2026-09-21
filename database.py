@@ -466,12 +466,24 @@ def delete_measurement(db_path: str, measurement_id: int, child_id: int,
 
 
 def get_measurement_by_id(db_path: str, measurement_id: int,
-                          family_id: int = DEFAULT_FAMILY_ID) -> Optional[dict]:
-    """Fetch a single measurement by primary key within a family."""
+                          family_id: int = DEFAULT_FAMILY_ID,
+                          child_id: Optional[int] = None) -> Optional[dict]:
+    """Fetch a single measurement by primary key within a family.
+
+    When ``child_id`` is given the lookup is additionally narrowed to that
+    child (defense in depth); ``None`` keeps the original family-wide behavior.
+    """
     conn = get_connection(db_path)
-    row = conn.execute(
-        "SELECT * FROM measurements WHERE id = ? AND family_id = ?", (measurement_id, family_id)
-    ).fetchone()
+    if child_id is None:
+        row = conn.execute(
+            "SELECT * FROM measurements WHERE id = ? AND family_id = ?",
+            (measurement_id, family_id)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM measurements WHERE id = ? AND family_id = ? AND child_id = ?",
+            (measurement_id, family_id, child_id)
+        ).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -826,6 +838,13 @@ def list_family_parents(db_path: str, family_id: int) -> list:
         "SELECT * FROM members WHERE family_id = ? AND role = 'parent' ORDER BY telegram_id",
         (family_id,)
     ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_families(db_path: str) -> list:
+    conn = get_connection(db_path)
+    rows = conn.execute("SELECT * FROM families ORDER BY id").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

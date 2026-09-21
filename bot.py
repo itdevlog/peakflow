@@ -52,6 +52,7 @@ from database import (
     join_by_invite,
     get_family_invite,
     regenerate_family_invite,
+    list_families,
     list_family_children,
     list_family_parents,
     resolve_active_child,
@@ -234,16 +235,17 @@ async def _ctx(member):
 async def _child_name(member, child_id, child_name=None) -> str:
     """Display name of the active child.
 
-    ``member=None`` → env ``CHILD_NAME`` (family #1 semantics). For a real
+    ``member=None`` → env ``CHILD_NAME`` (family #1 semantics), unless an
+    explicit ``child_name`` is passed (multi-family scheduler). For a real
     member the child's stored name is looked up from ``members``; callers that
     already have it pass ``child_name`` to skip the query.
     """
+    if child_name:
+        return child_name
     if member is None:
         return CHILD_NAME
     if child_id is None:
         return "Ребёнок"
-    if child_name:
-        return child_name
     row = await _db(get_member, DB_PATH, child_id)
     if row and row.get("name"):
         return row["name"]
@@ -251,9 +253,25 @@ async def _child_name(member, child_id, child_name=None) -> str:
 
 
 async def _family_parents(member, family_id) -> list:
-    if not member:
+    """Parent telegram ids: the family's members, else env fallback (#1 only)."""
+    parents = await _db(list_family_parents, DB_PATH, family_id)
+    if not parents and not member and family_id == DEFAULT_FAMILY_ID:
         return list(PARENT_IDS)
-    return [p["telegram_id"] for p in await _db(list_family_parents, DB_PATH, family_id)]
+    return [p["telegram_id"] for p in parents]
+
+
+def _family_members_map(family_id: int) -> dict:
+    """``{telegram_id: {"role", "name"}}`` for a family, one render's lookup.
+
+    The map is the source of truth for author roles/names (SP3D); ``.env`` is
+    only consulted by callers when no member context exists (family #1 seed).
+    """
+    members = (list_family_parents(DB_PATH, family_id)
+               + list_family_children(DB_PATH, family_id))
+    return {
+        m["telegram_id"]: {"role": m["role"], "name": m.get("name") or ""}
+        for m in members
+    }
 
 
 async def _no_child_reply(target, member):
@@ -1014,18 +1032,32 @@ async def cb_history_page(callback: types.CallbackQuery, state: FSMContext, memb
     await _show_history(callback, page=page, member=member)
 
 
-def _history_line(m: dict, target: int) -> str:
-    """One history row: emoji, timestamp, value, zone, author, auto/note marks."""
+def _history_line(m: dict, target: int, member=None, author_roles=None) -> str:
+    """One history row: emoji, timestamp, value, zone, author, auto/note marks.
+
+    ``author_roles`` maps ``telegram_id -> role`` for the rendered family; when
+    given it is authoritative. ``member=None`` keeps the legacy .env fallback
+    for family #1; a real member context never consults .env.
+    """
     zone, _ = pef_zone(m["pef_value"], target)
     ts = m["measured_at"][5:16].replace("T", " ")
-    who = "👨‍👧" if is_parent(m.get("added_by", 0)) else "👶"
+    who_id = m.get("added_by", 0)
+    if author_roles is not None:
+        role = author_roles.get(who_id)
+    elif member is None:
+        role = "parent" if is_parent(who_id) else "child"
+    else:
+        role = None
+    who = "👨‍👧" if role == "parent" else "👶"
     auto = " 🤖" if m.get("source") == "auto" else ""
     note = f" ℹ️ {escape_md(m['note'])}" if m.get("note") else ""
     return f"{tod_emoji(m['time_of_day'])} {ts} → *{m['pef_value']}* {zone} {who}{auto}{note}"
 
 
-def _format_history_lines(measurements: list, target: int) -> list:
-    return [_history_line(m, target) for m in measurements]
+def _format_history_lines(measurements: list, target: int, member=None,
+                          author_roles=None) -> list:
+    return [_history_line(m, target, member=member, author_roles=author_roles)
+            for m in measurements]
 
 
 async def _show_history(callback: types.CallbackQuery, page: int = 1, member=None):
@@ -1051,7 +1083,12 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1, member=Non
         await respond(callback, "📭 Нет измерений.", kb=kb_back())
         return
 
-    lines = _format_history_lines(measurements, target)
+    author_roles = None
+    if member is not None:
+        members_map = await _db(_family_members_map, family_id)
+        author_roles = {tid: info["role"] for tid, info in members_map.items()}
+    lines = _format_history_lines(measurements, target, member=member,
+                                  author_roles=author_roles)
     kb = kb_pagination(page, total_pages, is_p, measurements)
     name = await _child_name(member, child_id)
 
@@ -1079,7 +1116,8 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext, member=N
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    measurement = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
+    measurement = await _db(get_measurement_by_id, DB_PATH, mid,
+                            family_id=family_id, child_id=child_id)
     if not measurement:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
         return
@@ -1141,7 +1179,8 @@ async def cb_delete(callback: types.CallbackQuery, state: FSMContext, member=Non
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    row = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
+    row = await _db(get_measurement_by_id, DB_PATH, mid,
+                    family_id=family_id, child_id=child_id)
 
     if not row:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
@@ -1364,10 +1403,14 @@ def build_csv_content(rows, target, include_summary=True, child_id=None,
     label = child_name or (CHILD_NAME if child_id is None else "Ребёнок")
     stats = get_stats(DB_PATH, cid, family_id=family_id) if include_summary else None
 
+    # SP3D: for a real family resolve authors from `members`; family #1 keeps
+    # the legacy .env-based labels exactly.
+    members_map = _family_members_map(family_id) if family_id != DEFAULT_FAMILY_ID else None
+
     def _display_name(uid):
         if uid == cid:
             return label
-        return _user_display_name(uid, None)
+        return _user_display_name(uid, None, None, members_map)
 
     return _report_build_csv(rows, target, label, stats=stats,
                              include_summary=include_summary,
@@ -1958,8 +2001,10 @@ async def cb_weekly(callback: types.CallbackQuery, member=None):
     await _send_weekly_report(callback.message, member=member)
 
 
-async def _send_weekly_report(message=None, member=None):
-    family_id, child_id = await _ctx(member)
+async def _send_weekly_report(message=None, member=None, family_id=None,
+                              child_id=None, child_name=None):
+    if family_id is None or child_id is None:
+        family_id, child_id = await _ctx(member)
     if child_id is None:
         if message:
             await _no_child_reply(message, member)
@@ -1987,7 +2032,7 @@ async def _send_weekly_report(message=None, member=None):
     best_m = max(this_week, key=lambda m: m["pef_value"])
     worst_m = min(this_week, key=lambda m: m["pef_value"])
 
-    text = f"📋 *{escape_md(await _child_name(member, child_id))}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
+    text = f"📋 *{escape_md(await _child_name(member, child_id, child_name))}* — неделя {this_week[0]['measured_at'][:10]} — {this_week[-1]['measured_at'][:10]}\n\n"
     text += f"Замеров: {len(this_week)} (🌅 {len(this_morning)} / 🌆 {len(this_evening)})\n"
     text += f"Среднее: {sum(this_vals)/len(this_vals):.0f}\n"
     text += f"🏆 Лучший: {best} ({tod_emoji(best_m['time_of_day'])} {best_m['measured_at'][:10]})\n"
@@ -2115,12 +2160,22 @@ async def catch_all(message: types.Message, state: FSMContext, member=None):
 _scheduler_task = None
 
 
-def _user_display_name(user_id: int, member=None, child_name=None) -> str:
+def _user_display_name(user_id: int, member=None, child_name=None,
+                       members_map=None) -> str:
     """Display label for an author (CSV/plain contexts — stays unescaped).
 
-    A known member without an explicit child name falls back to a generic
-    label instead of leaking family #1's env ``CHILD_NAME``.
+    ``members_map`` (``{telegram_id: {"role", "name"}}``) is authoritative when
+    supplied: names come from the DB and .env is never consulted. A known
+    member without an explicit child name still falls back to a generic label
+    instead of leaking family #1's env ``CHILD_NAME``.
     """
+    if members_map is not None:
+        info = members_map.get(user_id)
+        if info is None:
+            return "Кто-то"
+        if info.get("role") == "child":
+            return child_name or info.get("name") or "Ребёнок"
+        return info.get("name") or "Родитель"
     role = _role(member, user_id)
     if role == "child":
         if child_name:
@@ -2165,9 +2220,17 @@ async def _setup_menu_button():
         logger.error("Не удалось установить кнопку Mini App: %s", e)
 
 
-async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today: str):
-    """Ping the child to do a measurement (child_morning / child_evening)."""
-    family_id, child_id = await _ctx(None)
+async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today: str,
+                            family_id=None, child=None):
+    """Ping the child to do a measurement (child_morning / child_evening).
+
+    ``family_id``/``child`` are passed explicitly by the multi-family scheduler;
+    when omitted the legacy env family (#1) context is used.
+    """
+    if child is None:
+        family_id, child_id = await _ctx(None)
+        child = {"telegram_id": child_id, "name": None}
+    child_id = child["telegram_id"]
     key = "child_morning" if tod == "morning" else "child_evening"
     flag = f"child_{tod}"
     if hour != hours[key] or not is_reminder_minute(minute):
@@ -2182,7 +2245,7 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
     try:
         await bot.send_message(
             child_id,
-            f"{icon} Привет, *{escape_md(await _child_name(None, child_id))}*! Пора сделать "
+            f"{icon} Привет, *{escape_md(await _child_name(None, child_id, child.get('name')))}*! Пора сделать "
             f"{'утренний' if tod == 'morning' else 'вечерний'} замер 💨",
             parse_mode="Markdown",
         )
@@ -2194,9 +2257,17 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
     logger.info("Напоминание ребёнку: %s", tod)
 
 
-async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today: str):
-    """No measurement at deadline → auto-carry record + inform parents."""
-    family_id, child_id = await _ctx(None)
+async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today: str,
+                            family_id=None, child=None):
+    """No measurement at deadline → auto-carry record + inform parents.
+
+    ``family_id``/``child`` are passed explicitly by the multi-family scheduler;
+    when omitted the legacy env family (#1) context is used.
+    """
+    if child is None:
+        family_id, child_id = await _ctx(None)
+        child = {"telegram_id": child_id, "name": None}
+    child_id = child["telegram_id"]
     flag = f"{tod}_missing"
     auto_flag = f"auto_{tod}"
     key = f"parent_{tod}"
@@ -2218,7 +2289,7 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
         logger.info("Авто-запись: %s = %d (%s)", tod, last["pef_value"], today)
 
     icon = "☀️" if tod == "morning" else "🌙"
-    child_name = await _child_name(None, child_id)
+    child_name = await _child_name(None, child_id, child.get("name"))
     if last:
         text = (
             f"⚠️ {icon} *{escape_md(child_name)}* не сделал {'утренний' if tod == 'morning' else 'вечерний'} замер.\n"
@@ -2246,8 +2317,36 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
     logger.info("Эскалация родителям: %s", tod)
 
 
+async def _tick_targets() -> list:
+    """``(family_id, child)`` pairs for one scheduler tick.
+
+    Every family and each of its child members. When no families exist at all,
+    or the seeded family #1 has no member rows, fall back to the env child so
+    legacy single-family setups (and tests) keep working.
+    """
+    families = await _db(list_families, DB_PATH)
+    if not families:
+        family_id, child_id = await _ctx(None)
+        return [(family_id, {"telegram_id": child_id, "name": None})]
+
+    targets = []
+    for family in families:
+        family_id = family["id"]
+        children = await _db(list_family_children, DB_PATH, family_id)
+        if not children and family_id == DEFAULT_FAMILY_ID:
+            _, child_id = await _ctx(None)
+            children = [{"telegram_id": child_id, "name": None}]
+        for child in children:
+            targets.append((family_id, child))
+    return targets
+
+
 async def scheduler_loop():
-    """Main scheduler: child pings, auto-carry + parent escalation, weekly report."""
+    """Main scheduler: child pings, auto-carry + parent escalation, weekly report.
+
+    Ticks once per family so each family's own reminder hours and parents are
+    honoured.
+    """
     logger.info("Планировщик запущен")
     while True:
         try:
@@ -2256,34 +2355,41 @@ async def scheduler_loop():
             hour = now.hour
             minute = now.minute
 
-            family_id, child_id = await _ctx(None)
-            hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
+            for family_id, child in await _tick_targets():
+                hours = await _db(get_reminder_hours, DB_PATH, family_id=family_id)
 
-            # Child pings (08:00 / 20:00 by default)
-            await _maybe_ping_child("morning", hours, hour, minute, today)
-            await _maybe_ping_child("evening", hours, hour, minute, today)
+                # Child pings (08:00 / 20:00 by default)
+                await _maybe_ping_child("morning", hours, hour, minute, today,
+                                        family_id, child)
+                await _maybe_ping_child("evening", hours, hour, minute, today,
+                                        family_id, child)
 
-            # Parent escalation with auto-carry (10:00 / 22:00 by default)
-            await _escalate_parents("morning", hours, hour, minute, today)
-            await _escalate_parents("evening", hours, hour, minute, today)
+                # Parent escalation with auto-carry (10:00 / 22:00 by default)
+                await _escalate_parents("morning", hours, hour, minute, today,
+                                        family_id, child)
+                await _escalate_parents("evening", hours, hour, minute, today,
+                                        family_id, child)
 
-            # Weekly report
-            if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
-                if not await _db(was_reminder_sent, DB_PATH, today, "weekly", child_id):
-                    text = await _send_weekly_report()
-                    if text:
-                        delivered = False
-                        for pid in await _family_parents(None, family_id):
-                            try:
-                                await bot.send_message(pid, text, parse_mode="Markdown")
-                                delivered = True
-                            except Exception:
-                                pass
-                        if delivered:
-                            await _db(mark_reminder_sent, DB_PATH, today, "weekly", child_id)
-                            logger.info("Недельный отчёт отправлен")
-                        else:
-                            logger.error("Недельный отчёт не доставлен, повтор")
+                # Weekly report
+                if now.weekday() == WEEKLY_REPORT_DAY and hour == WEEKLY_REPORT_HOUR and is_reminder_minute(minute):
+                    child_id = child["telegram_id"]
+                    if not await _db(was_reminder_sent, DB_PATH, today, "weekly", child_id):
+                        text = await _send_weekly_report(
+                            family_id=family_id, child_id=child_id,
+                            child_name=child.get("name"))
+                        if text:
+                            delivered = False
+                            for pid in await _family_parents(None, family_id):
+                                try:
+                                    await bot.send_message(pid, text, parse_mode="Markdown")
+                                    delivered = True
+                                except Exception:
+                                    pass
+                            if delivered:
+                                await _db(mark_reminder_sent, DB_PATH, today, "weekly", child_id)
+                                logger.info("Недельный отчёт отправлен")
+                            else:
+                                logger.error("Недельный отчёт не доставлен, повтор")
 
         except Exception as e:
             logger.error("Ошибка планировщика: %s", e)
