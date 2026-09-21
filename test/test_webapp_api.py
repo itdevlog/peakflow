@@ -526,3 +526,8 @@ class TestReportPdfApi:
         r = _client().get("/api/report/pdf?period=month", headers=_auth(999))
         assert r.status_code == 404, "family #2 must not see family #1 data via a shared child id"
 
+    def test_app_js_has_report_button(self):
+        import pathlib
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "/api/report/pdf" in js and "data-report" in js
+
