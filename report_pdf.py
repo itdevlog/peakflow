@@ -3,10 +3,11 @@
 Чистый модуль: stdlib + matplotlib. Не импортирует bot.py/database.py/aiogram.
 Разрешено использовать чистые хелперы из report.py.
 """
+import io
 import threading
 from datetime import date, timedelta
 
-from report import month_title, pef_zone
+from report import month_title, pct_of, pef_zone, tod_label
 
 RENDER_LOCK = threading.Lock()
 
@@ -132,3 +133,94 @@ def draw_chart(ax, rows, target, zone_green, zone_yellow,
         ax.set_title(f"Пикфлоуметрия — {title}")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3)
+
+
+ROWS_PER_PAGE = 35
+_TABLE_HEADERS = ("Дата", "Время", "Период", "ПСВ", "%", "Зона", "Заметка")
+
+
+def _chunks(items: list, size: int) -> list:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _avg_line(label: str, avg) -> str:
+    return f"{label}: —" if avg is None else f"{label}: {avg:.0f} л/мин"
+
+
+def _header_page(rows, target, child_name, period_label, stats, zone_green, zone_yellow):
+    from datetime import datetime
+
+    from matplotlib import pyplot as plt
+
+    fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait, inches
+    fig.text(0.5, 0.955, "Отчёт по пикфлоуметрии", ha="center",
+             fontsize=16, fontweight="bold")
+    fig.text(0.07, 0.915, f"Ребёнок: {child_name}", fontsize=11)
+    fig.text(0.07, 0.888, f"Период: {period_label}", fontsize=11)
+    fig.text(0.07, 0.861, f"Целевая ПСВ: {target} л/мин", fontsize=11)
+    fig.text(0.93, 0.915, f"Сформирован: {datetime.now():%d.%m.%Y}",
+             ha="right", fontsize=9)
+
+    ax = fig.add_axes([0.09, 0.55, 0.84, 0.27])
+    if rows:
+        draw_chart(ax, rows, target, zone_green, zone_yellow, text_labels=True)
+    else:
+        ax.axis("off")
+        ax.text(0.5, 0.5, "Нет данных за период", ha="center", va="center", fontsize=12)
+
+    fig.text(0.07, 0.49, "Статистика за период", fontsize=12, fontweight="bold")
+    lines = [
+        f"Всего замеров: {stats['total']}",
+        f"Среднее: {stats['avg']:.0f} л/мин",
+        f"Минимум: {stats['min']} л/мин    Максимум: {stats['max']} л/мин",
+        _avg_line("Утро", stats["morning_avg"]),
+        _avg_line("Вечер", stats["evening_avg"]),
+        (f"Зоны: зелёная — {stats['zones']['green']}, "
+         f"жёлтая — {stats['zones']['yellow']}, красная — {stats['zones']['red']}"),
+    ]
+    for i, line in enumerate(lines):
+        fig.text(0.07, 0.455 - i * 0.022, line, fontsize=10)
+    return fig
+
+
+def _table_page(rows, target, zone_green, zone_yellow):
+    from matplotlib import pyplot as plt
+
+    fig = plt.figure(figsize=(8.27, 11.69))
+    ax = fig.add_axes([0.05, 0.05, 0.90, 0.90])
+    ax.axis("off")
+    cell = []
+    for r in rows:
+        ts = r["measured_at"].replace("T", " ")
+        zone = pef_zone(r["pef_value"], target, zone_green, zone_yellow)[1]
+        cell.append([
+            ts[:10], ts[11:16], tod_label(r["time_of_day"]),
+            str(r["pef_value"]), f"{pct_of(r['pef_value'], target)}%",
+            zone, (r.get("note") or "—"),
+        ])
+    table = ax.table(cellText=cell, colLabels=_TABLE_HEADERS,
+                     loc="upper center", cellLoc="left")
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.4)
+    return fig
+
+
+def build_pdf(rows, *, target, child_name, period_label,
+              zone_green: int = 80, zone_yellow: int = 60) -> bytes:
+    """Собрать A4-PDF (шапка+график+статистика, затем постраничная таблица)."""
+    from matplotlib import pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    stats = compute_stats(rows, target, zone_green, zone_yellow)
+    buf = io.BytesIO()
+    with RENDER_LOCK, PdfPages(buf) as pdf:
+        fig = _header_page(rows, target, child_name, period_label,
+                           stats, zone_green, zone_yellow)
+        pdf.savefig(fig)
+        plt.close(fig)
+        for chunk in _chunks(rows, ROWS_PER_PAGE):
+            tfig = _table_page(chunk, target, zone_green, zone_yellow)
+            pdf.savefig(tfig)
+            plt.close(tfig)
+    return buf.getvalue()

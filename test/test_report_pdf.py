@@ -1,5 +1,5 @@
 """Тесты PDF-отчётов (SP4A)."""
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -125,3 +125,34 @@ class TestDrawChart:
             plt.close(fig)
         assert texts and all("🏆" not in t and "⚠" not in t for t in texts)
         assert any("Лучший" in t for t in texts)
+
+
+class TestBuildPdf:
+    def _rows(self, n=3):
+        return [
+            {
+                "pef_value": 250 + i,
+                "time_of_day": "morning" if i % 2 == 0 else "evening",
+                "measured_at": (date(2026, 9, 1) + timedelta(days=i)).strftime(
+                    "%Y-%m-%d 08:00:00"),
+                "note": "болел" if i == 0 else "",
+            }
+            for i in range(n)
+        ]
+
+    def test_returns_pdf(self):
+        from report_pdf import build_pdf
+        data = build_pdf(self._rows(), target=260, child_name="Motya",
+                         period_label="Сентябрь 2026")
+        assert data[:5] == b"%PDF-"
+
+    def test_multipage_for_many_rows(self):
+        from report_pdf import build_pdf
+        data = build_pdf(self._rows(80), target=260, child_name="M", period_label="P")
+        assert data[:5] == b"%PDF-"
+        assert data.count(b"/Type /Page") >= 3
+
+    def test_empty_rows(self):
+        from report_pdf import build_pdf
+        data = build_pdf([], target=260, child_name="M", period_label="P")
+        assert data[:5] == b"%PDF-"
