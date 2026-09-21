@@ -163,20 +163,19 @@ class TestDatabase:
         assert h["child_morning"] == 8
         assert h["child_evening"] == 20
 
-    def test_backup_db(self):
+    def test_backup_db(self, tmp_path):
         """Backup copy opens and contains all rows."""
         import sqlite3
         from database import add_measurement, backup_db, init_db
         for v in (240, 250, 260):
             add_measurement(TEST_DB, v, "morning", 111, 222)
-        dest = "/tmp/opencode/backup_test.db"
+        dest = str(tmp_path / "backup_test.db")
         backup_db(TEST_DB, dest)
         conn = sqlite3.connect(dest)
         n = conn.execute("SELECT COUNT(*) FROM measurements WHERE child_id=111").fetchone()[0]
         tables = [r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")]
         conn.close()
-        os.remove(dest)
         assert n == 3
         assert "settings" in tables
 
@@ -610,13 +609,20 @@ class TestRedZoneAuthorExclusion:
     themselves. Informational notify_added already excludes the author;
     the red-zone alert must do the same."""
 
-    def test_red_zone_skips_author_parent(self):
+    def test_red_zone_skips_author_parent(self, monkeypatch):
         import asyncio
         import bot
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        author = bot.PARENT_IDS[0]
-        other = bot.PARENT_IDS[1]
+        # _family_parents reads members from the DB (seeded from .env), so patch
+        # it directly: in CI there is no .env and config defaults to
+        # PARENT_IDS=[0,0], where author and other would collide.
+        author, other = 222, 333
+
+        async def fake_parents(member, family_id):
+            return [author, other]
+
+        monkeypatch.setattr(bot, "_family_parents", fake_parents)
 
         cb = MagicMock()
         cb.from_user.id = author
@@ -1878,11 +1884,14 @@ class TestMarkdownEscaping:
         assert "Ма\\_ша" in text
         assert "Ма_ша" not in text.replace("Ма\\_ша", "")
 
-    def test_display_name_stays_raw(self):
+    def test_display_name_stays_raw(self, monkeypatch):
         """_user_display_name feeds CSV/plain contexts — must stay unescaped."""
         import bot
-        from config import CHILD_ID, CHILD_NAME
-        assert bot._user_display_name(CHILD_ID) == CHILD_NAME
+        # CI has no .env (CHILD_ID=0, PARENT_IDS=[0,0]); make roles explicit.
+        monkeypatch.setattr(bot, "is_child", lambda uid: uid == 111)
+        monkeypatch.setattr(bot, "is_parent", lambda uid: uid in (222, 333))
+        monkeypatch.setattr(bot, "CHILD_NAME", "Ма_ша")
+        assert bot._user_display_name(111) == "Ма_ша"
 
     def test_history_line_escapes_note(self):
         """A note with Markdown chars must be escaped in the history line."""
@@ -4638,9 +4647,11 @@ class TestAuthorFromMembers:
 
     def test_user_display_name_without_context_falls_back_env(self, monkeypatch):
         import bot
-        from config import CHILD_ID
+        # CI has no .env (CHILD_ID=0 collides with PARENT_IDS=[0,0]).
+        monkeypatch.setattr(bot, "is_child", lambda uid: uid == 111)
+        monkeypatch.setattr(bot, "is_parent", lambda uid: uid in (222, 333))
         monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
-        assert bot._user_display_name(CHILD_ID) == "Motya"
+        assert bot._user_display_name(111) == "Motya"
 
     def test_csv_export_uses_member_names(self, monkeypatch):
         import bot
