@@ -154,9 +154,19 @@ async function deleteMeasurement(mid) {
 
 async function loadStats() {
   const s = await api("/api/stats");
+  const g = await api("/api/gamification");
   state.target = s.target_pef || state.target;
   const el = $("screen-stats");
-  if (!s.total) { el.innerHTML = `<div class="hint">Недостаточно данных</div>`; return; }
+  const streakCard = `<div class="card"><div class="label">🔥 Серия</div>` +
+    `<div class="big">${g.streak_current} <span class="label">дн. (рекорд ${g.streak_longest})</span></div></div>`;
+  const badges = `<div class="card"><div class="label">🏅 Достижения</div>` +
+    g.achievements.map((a) =>
+      `<div class="row"><span>${a.unlocked ? "✅" : "⬜"} ${a.emoji} ${esc(a.title)}</span></div>`
+    ).join("") + `</div>`;
+  if (!s.total) {
+    el.innerHTML = `<div class="hint">Недостаточно данных</div>${streakCard}${badges}`;
+    return;
+  }
   const trend = (s.trend == null) ? "—"
     : s.trend > 0 ? `↑ +${s.trend.toFixed(1)}`
     : s.trend < 0 ? `↓ ${Math.abs(s.trend).toFixed(1)}`
@@ -168,7 +178,8 @@ async function loadStats() {
     <div class="card"><div class="label">Мин / Макс</div><div class="big">${s.min} / ${s.max}</div></div>
     <div class="card"><div class="label">Утро (сред.)</div><div class="big">${avg(s.morning_avg)} <span class="label">×${s.morning_count}</span></div></div>
     <div class="card"><div class="label">Вечер (сред.)</div><div class="big">${avg(s.evening_avg)} <span class="label">×${s.evening_count}</span></div></div>
-    <div class="card"><div class="label">Тренд (3 vs 3)</div><div class="big">${trend}</div></div>`;
+    <div class="card"><div class="label">Тренд (3 vs 3)</div><div class="big">${trend}</div></div>
+    ${streakCard}${badges}`;
 }
 
 function renderChildSelector() {

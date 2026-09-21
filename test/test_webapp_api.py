@@ -576,3 +576,8 @@ class TestGamificationApi:
         assert body["total"] == 0
         assert all(a["unlocked"] is False for a in body["achievements"])
 
+    def test_app_js_has_gamification(self):
+        import pathlib
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "/api/gamification" in js and "Серия" in js
+
