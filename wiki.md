@@ -69,6 +69,7 @@ peakflow/
 ├── database.py     # CRUD SQLite: измерения, напоминания, settings, статистика
 ├── report.py       # Чистые хелперы: зоны, CSV, экранирование (общие для бота/веба)
 ├── report_pdf.py   # PDF-отчёт врачу: периоды, статистика, график, A4-вёрстка (SP4A)
+├── gamification.py # Серия дней и достижения: чистые расчёты, без bot/database (SP4B)
 ├── test/           # pytest-тесты (test_bot.py и др.)
 ├── requirements.txt # aiogram, matplotlib, python-dotenv
 ├── .env            # Токен бота, ID семьи (секреты!)
@@ -194,10 +195,11 @@ peakflow/
 
 Подключение (`database.py: get_connection`): `sqlite3.connect` + `row_factory=Row` + `PRAGMA journal_mode=WAL` — **новое соединение на каждый запрос**.
 
-Схема — **v4 (мульти-тенант + регистрация + активный ребёнок)**: `SCHEMA_VERSION = 4`,
-`DEFAULT_FAMILY_ID = 1`. Данные изолированы по семье; замеры принадлежат паре
-`(family_id, child_id)`; таблица `invites` хранит приглашения (родительские и карточки
-детей); `members.active_child_id` — выбранный родителем ребёнок.
+Схема — **v5 (мульти-тенант + регистрация + активный ребёнок + геймификация)**:
+`SCHEMA_VERSION = 5`, `DEFAULT_FAMILY_ID = 1`. Данные изолированы по семье; замеры
+принадлежат паре `(family_id, child_id)`; таблица `invites` хранит приглашения
+(родительские и карточки детей); `members.active_child_id` — выбранный родителем
+ребёнок; `achievements` — заслуженные достижения ребёнка.
 
 ### Правило tenant-aware доступа
 
@@ -248,13 +250,26 @@ peakflow/
 
 Составной ключ `(family_id, key)`. Единственный используемый ключ — `target_pef` (создаётся при `init_db` со значением `260`). Хранит целевую ПСВ, изменяемую родителями через бота.
 
+### Таблица `achievements` (v5, по ребёнку)
+
+| Поле | Описание |
+|------|----------|
+| `child_id` + `code` (составной PK) | Ребёнок и код достижения (`streak_7`, `total_500`, …) |
+| `unlocked_at` | Дата разблокировки `ГГГГ-ММ-ДД` |
+
+Заслуженные бейджи хранятся один раз на `(child_id, code)` (`INSERT OR IGNORE`) —
+повторные уведомления исключены. Каталог и пороги — в `gamification.ACHIEVEMENTS`
+(§26, подраздел SP4B). При апгрейде до v5 `_backfill_achievements` тихо записывает
+уже заслуженные коды всем детям (без рассылки).
+
 ### Миграции в `init_db()`
 
 - `CREATE TABLE IF NOT EXISTS` для `families`, `members` и `measurements` v2.
-- **Версия схемы:** `PRAGMA user_version` = `SCHEMA_VERSION` (4).
+- **Версия схемы:** `PRAGMA user_version` = `SCHEMA_VERSION` (5).
 - **Бэкап:** на непустой v1-БД перед миграцией `backup_db` пишет `<db>.v1.bak`; при ошибке бэкапа миграция прерывается.
 - **Миграция v1→v2:** `measurements.user_id` → `child_id` + `family_id=1`; `settings` и `reminders_sent` перестраиваются паттерном new→copy→drop→rename (SQLite не меняет PK через `ALTER`), данные переносятся в семью №1 / `CHILD_ID`. Всё в одной транзакции, идемпотентно.
 - **Миграция v3→v4 (`_add_active_child_v4`):** `ALTER TABLE members ADD COLUMN active_child_id INTEGER` в try/except — идемпотентно.
+- **Миграция v4→v5 (`_create_achievements_v5` + `_backfill_achievements`):** `CREATE TABLE IF NOT EXISTS achievements`; при первом апгрейде (`old_version < 5`) для каждого ребёнка считаются `longest_streak`/`total` и уже заслуженные коды пишутся **без уведомлений**. Даты с некорректным форматом `measured_at` отсекаются (GLOB-фильтр), чтобы бэкфилл не падал.
 - **Сидинг семьи №1:** из конфига `.env` (`CHILD_ID`/`PARENT_IDS`/`CHILD_NAME`) — **конфиг авторитетен** для перечисленных в нём ID; legacy-таблица `users` лишь добивает ID, которых нет в конфиге (`INSERT OR IGNORE`).
 - Legacy-таблицы (`users`, `parent_child_links`) не удаляются, кодом после миграции не читаются.
 
@@ -276,7 +291,7 @@ peakflow/
 
 | Функция | Возвращает / делает |
 |---------|---------------------|
-| `init_db(path)` | Схема v4, миграции (v1→v2, invites v3, active_child v4), бэкап `*.v1.bak`, сидинг семьи №1, дефолт `target_pef`, индекс `idx_meas_family_child_time` |
+| `init_db(path)` | Схема v5, миграции (v1→v2, invites v3, active_child v4, achievements v5 + тихий бэкфилл), бэкап `*.v1.bak`, сидинг семьи №1, дефолт `target_pef`, индекс `idx_meas_family_child_time` |
 | `add_measurement(db, pef, tod, child_id, by, source, family_id)` | INSERT; возвращает `id` |
 | `add_or_replace_measurement(db, pef, tod, child_id, by, force, source, family_id)` | Атомарно (`BEGIN IMMEDIATE`) вставка/замена авто-записи; `(id, status)` `ok`/`exists` |
 | `edit_measurement(db, mid, val, child_id, family_id)` | UPDATE по `id`+`child_id`+`family_id`; bool |
@@ -300,7 +315,11 @@ peakflow/
 | `list_family_parents(db, family_id)` | Родители семьи (получатели уведомлений) |
 | `count_family_children(db, family_id)` | Число детей семьи |
 | `set_active_child(db, telegram_id, child_id)` / `resolve_active_child(db, member)` | Выбор/резолв активного ребёнка (ребёнок → сам, родитель → выбранный/первый, нет детей → None); `set` валидирует роль и семью |
-| `backup_family_db(db, dest, family_id)` | Family-scoped `.backup`: вся схема, но только строки одной семьи (families/members/measurements/settings/invites/reminders_sent) — не утекают данные других семей |
+| `backup_family_db(db, dest, family_id)` | Family-scoped `.backup`: вся схема, но только строки одной семьи (families/members/measurements/settings/invites/reminders_sent) — не утекают данные других семей. Таблица `achievements` в бэкап **не входит** (её нет в `_FAMILY_BACKUP_DDL`): при восстановлении на v5 достижения пересоздаются тихим бэкфиллом миграции |
+| `get_measurement_dates(db, child_id, family_id)` | Уникальные даты замеров (ISO, по возрастанию) — вход для расчёта серии (v5) |
+| `count_measurements(db, child_id, family_id)` | Всего замеров, включая auto — вход для достижений по количеству (v5) |
+| `get_achievements(db, child_id)` | `{code: unlocked_at}` заслуженных достижений (v5) |
+| `unlock_achievements(db, child_id, codes, when)` | `INSERT OR IGNORE` новых кодов; возвращает только реально вставленные (для одноразового уведомления) (v5) |
 
 ---
 
@@ -369,11 +388,15 @@ peakflow/
 
 Сегодня: ☀️ 240 🟢 | 🌙 —
 Последний: 240 🟢 (+10)
+🔥 Серия: 12 дн.
 ```
 
 - Считывается **всё** из БД: сегодняшние утро/вечер, разница с предыдущим замером.
 - Эмодзи времени суток в коде: ☀️ (утро) / 🌙 (вечер) — `tod_emoji()`.
 - Строка «Последний: …» добавляется только если замеров ≥ 2 (разница `+N`/`-N` л/мин).
+- Строка «🔥 Серия: N дн.» (SP4B) добавляется, если `gamification.current_streak` ≥ 1
+  (grace: серия не рвётся, если последний замер был сегодня или вчера; будущие даты
+  игнорируются).
 
 ### `send_main_menu()`
 
@@ -616,6 +639,7 @@ FSM: `input_context="add"`, `forced_tod=<tod>` — повторный замер
 | Пропуск утра | Планировщик, 10:00, замера нет | Все родители | «⏰ *Motya* ещё не сделал утренний замер! Напомните, пожалуйста» |
 | Пропуск вечера | Планировщик, 22:00, замера нет | Все родители | «⏰ *Motya* ещё не сделал вечерний замер!» |
 | Недельный отчёт | Планировщик, Вс 21:00 | Все родители | Текст `_send_weekly_report()` |
+| Новое достижение | При разблокировке бейджа (`_evaluate_and_notify`, SP4B) | Родители + ребёнок, кроме автора замера | «🎉 Новое достижение!» + список бейджей; один раз на `(child_id, code)` |
 
 Все отправки родителям обёрнуты в `try/except pass` — недоступность одного родителя не роняет логику. Ребёнку напоминания **не** отправляются (только родителям).
 
@@ -692,6 +716,7 @@ loop каждые 60 секунд:
 | `export` | `cb_export` | все (кнопка — в настройках) | CSV-документ |
 | `pick_child` | `cb_pick_child` | родитель | Список детей семьи (отметка ✅ активного) |
 | `set_child_<id>` | `cb_set_child` | родитель | Сделать ребёнка активным → главное меню |
+| `achievements` | `cb_achievements` | все | Экран «🏅 Достижения» (SP4B) |
 | `noop` | `cb_noop` | все | Пустой ACK (кнопка «N/M») |
 
 Регистрация идёт в порядке следования в коде; для `del_`/`del_confirm_` порядок критичен.
@@ -789,10 +814,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 480 тестов
+python -m pytest test/ -v         # 519 тестов
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v4), миграции, dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
@@ -806,7 +831,7 @@ aiogram (отдельного сервиса/порта процессов не�
 
 | Модуль | Что делает |
 |--------|-----------|
-| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`) |
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`); геймификация SP4B (`GET /api/gamification`) |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
 #### Mini App (SP2a): чтение
@@ -893,6 +918,35 @@ aiogram (отдельного сервиса/порта процессов не�
   scoped по `(family_id, child_id)` — фильтр делает вызывающая сторона
   (`get_measurements_between(..., child_id, date_from, date_to, family_id)`);
   web берёт `active_child_id`/`family_id` из `auth`, бот — из `_ctx(member)`.
+
+#### Mini App и бот (SP4B): геймификация — серия и достижения
+
+- `gamification.py` — чистый модуль (только stdlib; без `bot.py`/`database.py`/
+  aiogram). Расчёты:
+  - `current_streak(dates, today)` — длина серии, заканчивающейся **сегодня или
+    вчера** (grace на один день); если последний замер старше — `0`. Будущие даты
+    (`> today`) игнорируются.
+  - `longest_streak(dates)` — максимальная серия подряд идущих дней за всю историю.
+  - `evaluate(streak_longest, total)` — множество заслуженных кодов; бейджи
+    `streak` сравниваются с **рекордной** серией, `total` — с числом замеров.
+  - `achievement_status(code, streak_longest, total)` — `(unlocked, current,
+    threshold)` для прогресса.
+  - Каталог `ACHIEVEMENTS`: `🔥 7/30`, `🏆 100` дней (streak) и `💯 100`, `⭐ 500`,
+    `👑 1000` замеров (total). `_to_dates` принимает `date` и ISO-строки.
+- Бот: строка «🔥 Серия» в статус-блоке; кнопка «🏅 Достижения» (`cb_achievements`)
+  рисует `build_achievements_text` (рекордная серия + прогресс бейджей). При
+  сохранении замера `_evaluate_and_notify` пишет новые коды в `achievements`
+  (`unlock_achievements`) и шлёт один раз уведомление «🎉 Новое достижение!»
+  родителям и ребёнку (кроме автора).
+- Web: `GET /api/gamification` (любая роль) — `streak_current`, `streak_longest`,
+  `total`, `achievements[{code, emoji, title, unlocked, unlocked_at}]`; нет
+  активного ребёнка → 404. Данные scoped по `(family_id, active_child_id)`.
+- Mini App (`app.js`): в статистике карточка «🔥 Серия» (`streak_current`, рекорд)
+  и сетка бейджей (полученные — подсвечены, остальные с прогрессом
+  `current/threshold`); при отсутствии ребёнка — «Недостаточно данных».
+- **Схема v5:** таблица `achievements(child_id, code, unlocked_at)` с составным PK;
+  при первом апгрейде — тихий бэкфилл уже заслуженных достижений без уведомлений
+  (см. §5).
 
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `127.0.0.1`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`

@@ -531,3 +531,53 @@ class TestReportPdfApi:
         js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
         assert "/api/report/pdf" in js and "data-report" in js
 
+
+class TestGamificationApi:
+    def test_gamification_ok(self):
+        _setup_db()
+        conn = sqlite3.connect(TEST_DB)
+        for day in ("2026-09-19", "2026-09-20", "2026-09-21"):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, ?, 250, 'morning', ?, ?, 'manual')",
+                (CHILD_ID, f"{day} 08:00:00", CHILD_ID))
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/gamification", headers=_auth(222)).json()
+        assert body["total"] == 3
+        assert body["streak_longest"] == 3
+        assert len(body["achievements"]) == 6
+        codes = {a["code"] for a in body["achievements"]}
+        assert {"streak_7", "total_100"} <= codes
+        assert all(a["unlocked"] is False for a in body["achievements"])
+
+    def test_gamification_no_child(self):
+        _setup_db()
+        from database import create_family_with_owner
+        create_family_with_owner(TEST_DB, 999, "B")  # no children
+        r = _client().get("/api/gamification", headers=_auth(999))
+        assert r.status_code == 404
+
+    def test_gamification_isolation(self):
+        _setup_db()
+        # Family #2 child reuses family #1's child id; family #1 has 100 rows.
+        from database import create_family_with_owner, add_member
+        f2 = create_family_with_owner(TEST_DB, 999, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 700, 250, 'morning', "
+                "'2026-09-01 08:00:00', 700, 'manual')")
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/gamification", headers=_auth(999)).json()
+        assert body["total"] == 0
+        assert all(a["unlocked"] is False for a in body["achievements"])
+
+    def test_app_js_has_gamification(self):
+        import pathlib
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "/api/gamification" in js and "Серия" in js
+

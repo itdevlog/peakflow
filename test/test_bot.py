@@ -2345,7 +2345,7 @@ class TestFamiliesAndMembers:
     def test_default_family_constants(self):
         import database
         assert database.DEFAULT_FAMILY_ID == 1
-        assert database.SCHEMA_VERSION == 4
+        assert database.SCHEMA_VERSION == 5
 
 
 class TestMeasurementV2:
@@ -2438,7 +2438,7 @@ class TestMigrationV2:
         row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
         setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
         conn.close()
-        assert version == SCHEMA_VERSION == 4
+        assert version == SCHEMA_VERSION == 5
         assert row == (1, 111, 240)
         assert setting[0] == "300"
 
@@ -2620,9 +2620,9 @@ class TestFamilyIsolation:
 
 
 class TestInvites:
-    def test_schema_version_is_4(self):
+    def test_schema_version_is_5(self):
         import database
-        assert database.SCHEMA_VERSION == 4
+        assert database.SCHEMA_VERSION == 5
 
     def test_create_and_get_invite(self):
         from database import create_family, create_invite, get_invite
@@ -4003,9 +4003,9 @@ class TestFamilyManagement:
 
 
 class TestActiveChild:
-    def test_schema_v4(self):
+    def test_schema_v5(self):
         import database
-        assert database.SCHEMA_VERSION == 4
+        assert database.SCHEMA_VERSION == 5
 
     def test_active_child_column(self):
         import sqlite3
@@ -5045,6 +5045,215 @@ class TestReportPdf:
             asyncio.run(bot.cb_report_period(cb, member=member))
         cb.answer.assert_awaited()
         cb.message.answer_document.assert_not_awaited()
+
+
+class TestAchievements:
+    def test_schema_v5(self):
+        import database
+        assert database.SCHEMA_VERSION == 5
+
+    def test_achievements_table(self):
+        from database import init_db
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        conn.close()
+        assert "achievements" in names
+
+    def test_unlock_is_idempotent(self):
+        from database import init_db, unlock_achievements
+        init_db(TEST_DB)
+        first = unlock_achievements(TEST_DB, 111, {"streak_7", "total_100"}, "2026-09-21")
+        second = unlock_achievements(TEST_DB, 111, {"streak_7"}, "2026-09-22")
+        assert first == {"streak_7", "total_100"}
+        assert second == set()
+
+    def test_get_achievements(self):
+        from database import init_db, unlock_achievements, get_achievements
+        init_db(TEST_DB)
+        unlock_achievements(TEST_DB, 111, {"streak_7"}, "2026-09-21")
+        assert get_achievements(TEST_DB, 111) == {"streak_7": "2026-09-21"}
+
+    def test_get_measurement_dates_distinct_sorted(self):
+        from database import init_db, get_measurement_dates
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        for ts in ("2026-09-02 08:00:00", "2026-09-01 08:00:00",
+                   "2026-09-01 20:00:00"):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', ?, 222, 'manual')",
+                (ts,))
+        conn.commit()
+        conn.close()
+        assert get_measurement_dates(TEST_DB, 111) == ["2026-09-01", "2026-09-02"]
+
+    def test_count_measurements_includes_auto(self):
+        from database import init_db, count_measurements
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        for src in ("manual", "auto"):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', "
+                "'2026-09-01 08:00:00', 222, ?)", (src,))
+        conn.commit()
+        conn.close()
+        assert count_measurements(TEST_DB, 111) == 2
+
+    def test_backfill_inserts_earned_without_bot(self):
+        from database import (init_db, add_member, _backfill_achievements,
+                              get_connection, get_achievements)
+        init_db(TEST_DB)
+        add_member(TEST_DB, 111, 1, "child", "Motya")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', "
+                "'2026-09-01 08:00:00', 222, 'manual')")
+        conn.commit()
+        conn.close()
+        c = get_connection(TEST_DB)
+        _backfill_achievements(c)
+        c.commit()
+        c.close()
+        ach = get_achievements(TEST_DB, 111)
+        assert "total_100" in ach
+        assert "streak_7" not in ach  # все замеры в один день
+
+    def test_backfill_runs_only_on_upgrade(self):
+        from database import (init_db, add_member, get_connection,
+                              get_achievements)
+        init_db(TEST_DB)
+        add_member(TEST_DB, 111, 1, "child", "Motya")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', "
+                "'2026-09-01 08:00:00', 222, 'manual')")
+        conn.execute("DELETE FROM achievements")
+        conn.execute("PRAGMA user_version = 4")
+        conn.commit()
+        conn.close()
+        init_db(TEST_DB)  # upgrade 4 -> 5 must backfill
+        assert "total_100" in get_achievements(TEST_DB, 111)
+        # A new child added AFTER the upgrade must NOT be backfilled by init_db.
+        add_member(TEST_DB, 555, 1, "child", "Petya")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 555, 250, 'morning', "
+                "'2026-09-02 08:00:00', 222, 'manual')")
+        conn.commit()
+        conn.close()
+        init_db(TEST_DB)  # already v5 -> no backfill
+        assert get_achievements(TEST_DB, 555) == {}
+
+    def test_backfill_ignores_malformed_dates(self):
+        from database import (init_db, add_member, get_connection,
+                              _backfill_achievements)
+        init_db(TEST_DB)
+        add_member(TEST_DB, 111, 1, "child", "Motya")
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', NULL, 222, 'manual')")
+        conn.commit()
+        conn.close()
+        c = get_connection(TEST_DB)
+        _backfill_achievements(c)  # must not raise
+        c.commit()
+        c.close()
+
+    def test_build_achievements_text_marks_unlocked(self):
+        from bot import build_achievements_text
+        text = build_achievements_text(7, 100)
+        assert "7 дней подряд" in text and "100 замеров" in text
+        assert "30 дней подряд" in text
+        # streak_7 unlocked, streak_30 locked with progress 7/30
+        assert "7/30" in text
+
+    def test_kb_main_has_achievements(self):
+        import bot
+        for is_parent in (True, False):
+            cbs = [b.callback_data for row in bot.kb_main(is_parent).inline_keyboard for b in row]
+            assert "achievements" in cbs
+
+    def test_cb_achievements_scoped(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        seen = {}
+        def fake_dates(db, child_id, family_id=1):
+            seen["child_id"] = child_id; seen["family_id"] = family_id
+            return ["2026-09-20", "2026-09-19"]
+        with patch.object(bot, "get_measurement_dates", side_effect=fake_dates), \
+             patch.object(bot, "count_measurements", return_value=2), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()) as resp:
+            asyncio.run(bot.cb_achievements(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert seen == {"child_id": 700, "family_id": 2}
+        resp.assert_awaited()
+
+    def test_evaluate_and_notify_sends_once(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+        sent = []
+        async def fake_send(pid, text, **kw):
+            sent.append((pid, text))
+        with patch.object(bot, "get_measurement_dates",
+                          return_value=["2026-09-21", "2026-09-20", "2026-09-19",
+                                        "2026-09-18", "2026-09-17", "2026-09-16",
+                                        "2026-09-15"]), \
+             patch.object(bot, "count_measurements", return_value=7), \
+             patch.object(bot, "unlock_achievements", return_value={"streak_7"}), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[222])), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._evaluate_and_notify(111, 1, 999))
+        assert sent, "achievement notification must be sent"
+        assert any("достижение" in t.lower() for _, t in sent)
+
+    def test_evaluate_and_notify_no_new_silent(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+        sent = []
+        async def fake_send(pid, text, **kw):
+            sent.append(pid)
+        with patch.object(bot, "get_measurement_dates", return_value=["2026-09-21"]), \
+             patch.object(bot, "count_measurements", return_value=1), \
+             patch.object(bot, "unlock_achievements", return_value=set()), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[222])), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._evaluate_and_notify(111, 1, 999))
+        assert sent == []
+
+    def test_persist_measurement_triggers_evaluation(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock(); state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock()
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "replace_auto_measurement", return_value=1), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[])), \
+             patch.object(bot, "_evaluate_and_notify", new=AsyncMock()) as ev:
+            asyncio.run(bot._persist_measurement(
+                cb, state, 250, "morning",
+                member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        ev.assert_awaited_once()
 
 
 if __name__ == "__main__":

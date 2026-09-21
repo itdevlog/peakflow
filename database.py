@@ -5,14 +5,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from config import TZ_OFFSET
+import gamification
 
 # Часовой пояс — единый источник (config.py читает TZ_OFFSET из .env)
 _TZ = timezone(timedelta(hours=TZ_OFFSET))
 
 DEFAULT_FAMILY_ID = 1
 
-# Версия схемы БД (PRAGMA user_version). 4 = мульти-тенант + active child.
-SCHEMA_VERSION = 4
+# Версия схемы БД (PRAGMA user_version). 5 = геймификация (achievements).
+SCHEMA_VERSION = 5
 
 
 def _now():
@@ -219,6 +220,45 @@ def _add_active_child_v4(conn):
         pass
 
 
+def _create_achievements_v5(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS achievements (
+            child_id INTEGER NOT NULL,
+            code TEXT NOT NULL,
+            unlocked_at TEXT NOT NULL,
+            PRIMARY KEY (child_id, code)
+        )
+    """)
+
+
+def _backfill_achievements(conn):
+    """Persist already-earned achievements silently (no notifications).
+
+    Runs only on the first upgrade to v5 so a deploy does not spam families.
+    """
+    today = _today_str()
+    children = conn.execute(
+        "SELECT telegram_id FROM members WHERE role = 'child'"
+    ).fetchall()
+    for row in children:
+        child_id = row["telegram_id"]
+        dates = [r["d"] for r in conn.execute(
+            "SELECT DISTINCT substr(measured_at, 1, 10) AS d FROM measurements "
+            "WHERE child_id = ? "
+            "AND measured_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'",
+            (child_id,)
+        ).fetchall()]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM measurements WHERE child_id = ?", (child_id,)
+        ).fetchone()[0]
+        earned = gamification.evaluate(gamification.longest_streak(dates), total)
+        for code in earned:
+            conn.execute(
+                "INSERT OR IGNORE INTO achievements (child_id, code, unlocked_at) "
+                "VALUES (?, ?, ?)", (child_id, code, today)
+            )
+
+
 def _needs_migration(probe) -> bool:
     """True when a non-empty DB does not yet have the v2 schema.
 
@@ -281,10 +321,14 @@ def init_db(db_path: str):
         # Seed + v1->v2 rebuild run atomically so a mid-rebuild failure cannot
         # strand *_v1 tables (Ruling B).
         c.execute("BEGIN IMMEDIATE")
+        old_version = c.execute("PRAGMA user_version").fetchone()[0]
         _seed_default_family(c)
         _migrate_to_v2(c)
         _create_invites_v3(c)
         _add_active_child_v4(c)
+        _create_achievements_v5(c)
+        if old_version < 5:
+            _backfill_achievements(c)
 
         # Default target PEF if not set
         c.execute(
@@ -1117,7 +1161,9 @@ def backup_family_db(db_path: str, dest_path: str, family_id: int) -> None:
         dst.close()
 
 
-# Exact schema for a family-scoped backup (mirrors init_db's v4 tables).
+# Exact schema for a family-scoped backup (mirrors init_db's v4 tables). It
+# intentionally excludes `achievements`: badges are re-derived by the v5 backfill
+# on restore, so they need not be carried in the backup.
 _FAMILY_BACKUP_DDL = """
     CREATE TABLE IF NOT EXISTS families (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1232,3 +1278,56 @@ def get_measurements_between(db_path: str, child_id: int,
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ============================================================================
+# Achievements (gamification, schema v5)
+# ============================================================================
+def get_measurement_dates(db_path: str, child_id: int,
+                          family_id: int = DEFAULT_FAMILY_ID) -> list:
+    """Distinct measurement dates (ISO, ascending), all sources."""
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT DISTINCT substr(measured_at, 1, 10) AS d FROM measurements "
+        "WHERE child_id = ? AND family_id = ? ORDER BY d ASC",
+        (child_id, family_id)
+    ).fetchall()
+    conn.close()
+    return [r["d"] for r in rows]
+
+
+def count_measurements(db_path: str, child_id: int,
+                       family_id: int = DEFAULT_FAMILY_ID) -> int:
+    """Total measurement count, all sources (incl. auto)."""
+    conn = get_connection(db_path)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM measurements WHERE child_id = ? AND family_id = ?",
+        (child_id, family_id)
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def get_achievements(db_path: str, child_id: int) -> dict:
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT code, unlocked_at FROM achievements WHERE child_id = ?", (child_id,)
+    ).fetchall()
+    conn.close()
+    return {r["code"]: r["unlocked_at"] for r in rows}
+
+
+def unlock_achievements(db_path: str, child_id: int, codes, when: str) -> set:
+    """Insert new achievement codes; return only the ones actually inserted."""
+    conn = get_connection(db_path)
+    new = set()
+    for code in codes:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO achievements (child_id, code, unlocked_at) "
+            "VALUES (?, ?, ?)", (child_id, code, when)
+        )
+        if cur.rowcount:
+            new.add(code)
+    conn.commit()
+    conn.close()
+    return new
