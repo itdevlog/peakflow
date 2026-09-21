@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import quote
@@ -509,4 +510,19 @@ class TestReportPdfApi:
         r = _client().get("/api/report/pdf?period=month", headers=_auth(999))
         assert r.status_code == 200
         assert r.content[:5] == b"%PDF-"
+
+    def test_report_pdf_isolated_same_child_id(self):
+        _setup_db()
+        self._family_two_without_data()
+        # Family #1 row that reuses family #2's child id — must not leak.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, 700, 200, 'morning', ?, 700, 'manual')",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+        )
+        conn.commit()
+        conn.close()
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(999))
+        assert r.status_code == 404, "family #2 must not see family #1 data via a shared child id"
 
