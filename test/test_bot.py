@@ -1424,6 +1424,25 @@ class TestDatabaseIdHelpers:
         assert get_measurement_by_id(TEST_DB, 999999) is None
 
 
+class TestMeasurementByIdChildScope:
+    """SP3D: optional child_id narrows a by-id lookup to the active child."""
+
+    def test_child_scope_hides_sibling(self):
+        from database import (create_family_with_owner, add_member,
+                              add_measurement, get_measurement_by_id)
+        fid = create_family_with_owner(TEST_DB, 500, "A")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+        add_member(TEST_DB, 701, fid, "child", "Петя")
+        mid_a = add_measurement(TEST_DB, 240, "morning", 700, 500, family_id=fid)
+        assert get_measurement_by_id(TEST_DB, mid_a, family_id=fid, child_id=700)["pef_value"] == 240
+        assert get_measurement_by_id(TEST_DB, mid_a, family_id=fid, child_id=701) is None
+
+    def test_no_child_id_keeps_family_behavior(self):
+        from database import add_measurement, get_measurement_by_id
+        mid = add_measurement(TEST_DB, 250, "morning", 111, 222)
+        assert get_measurement_by_id(TEST_DB, mid)["pef_value"] == 250
+
+
 class TestNoteTargeting:
     """The note must attach to the exact row written/replaced."""
 

@@ -1079,7 +1079,8 @@ async def cb_edit_any(callback: types.CallbackQuery, state: FSMContext, member=N
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    measurement = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
+    measurement = await _db(get_measurement_by_id, DB_PATH, mid,
+                            family_id=family_id, child_id=child_id)
     if not measurement:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
         return
@@ -1141,7 +1142,8 @@ async def cb_delete(callback: types.CallbackQuery, state: FSMContext, member=Non
     if mid is None:
         await callback.answer("❌ Некорректный ID записи.", show_alert=True)
         return
-    row = await _db(get_measurement_by_id, DB_PATH, mid, family_id=family_id)
+    row = await _db(get_measurement_by_id, DB_PATH, mid,
+                    family_id=family_id, child_id=child_id)
 
     if not row:
         await callback.answer("❌ Запись не найдена.", show_alert=True)
