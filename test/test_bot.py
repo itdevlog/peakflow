@@ -2345,7 +2345,7 @@ class TestFamiliesAndMembers:
     def test_default_family_constants(self):
         import database
         assert database.DEFAULT_FAMILY_ID == 1
-        assert database.SCHEMA_VERSION == 4
+        assert database.SCHEMA_VERSION == 5
 
 
 class TestMeasurementV2:
@@ -2438,7 +2438,7 @@ class TestMigrationV2:
         row = conn.execute("SELECT family_id, child_id, pef_value FROM measurements").fetchone()
         setting = conn.execute("SELECT value FROM settings WHERE key='target_pef' AND family_id=1").fetchone()
         conn.close()
-        assert version == SCHEMA_VERSION == 4
+        assert version == SCHEMA_VERSION == 5
         assert row == (1, 111, 240)
         assert setting[0] == "300"
 
@@ -2620,9 +2620,9 @@ class TestFamilyIsolation:
 
 
 class TestInvites:
-    def test_schema_version_is_4(self):
+    def test_schema_version_is_5(self):
         import database
-        assert database.SCHEMA_VERSION == 4
+        assert database.SCHEMA_VERSION == 5
 
     def test_create_and_get_invite(self):
         from database import create_family, create_invite, get_invite
@@ -4003,9 +4003,9 @@ class TestFamilyManagement:
 
 
 class TestActiveChild:
-    def test_schema_v4(self):
+    def test_schema_v5(self):
         import database
-        assert database.SCHEMA_VERSION == 4
+        assert database.SCHEMA_VERSION == 5
 
     def test_active_child_column(self):
         import sqlite3
@@ -5045,6 +5045,83 @@ class TestReportPdf:
             asyncio.run(bot.cb_report_period(cb, member=member))
         cb.answer.assert_awaited()
         cb.message.answer_document.assert_not_awaited()
+
+
+class TestAchievements:
+    def test_schema_v5(self):
+        import database
+        assert database.SCHEMA_VERSION == 5
+
+    def test_achievements_table(self):
+        from database import init_db
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        names = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")]
+        conn.close()
+        assert "achievements" in names
+
+    def test_unlock_is_idempotent(self):
+        from database import init_db, unlock_achievements
+        init_db(TEST_DB)
+        first = unlock_achievements(TEST_DB, 111, {"streak_7", "total_100"}, "2026-09-21")
+        second = unlock_achievements(TEST_DB, 111, {"streak_7"}, "2026-09-22")
+        assert first == {"streak_7", "total_100"}
+        assert second == set()
+
+    def test_get_achievements(self):
+        from database import init_db, unlock_achievements, get_achievements
+        init_db(TEST_DB)
+        unlock_achievements(TEST_DB, 111, {"streak_7"}, "2026-09-21")
+        assert get_achievements(TEST_DB, 111) == {"streak_7": "2026-09-21"}
+
+    def test_get_measurement_dates_distinct_sorted(self):
+        from database import init_db, get_measurement_dates
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        for ts in ("2026-09-02 08:00:00", "2026-09-01 08:00:00",
+                   "2026-09-01 20:00:00"):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', ?, 222, 'manual')",
+                (ts,))
+        conn.commit()
+        conn.close()
+        assert get_measurement_dates(TEST_DB, 111) == ["2026-09-01", "2026-09-02"]
+
+    def test_count_measurements_includes_auto(self):
+        from database import init_db, count_measurements
+        init_db(TEST_DB)
+        conn = sqlite3.connect(TEST_DB)
+        for src in ("manual", "auto"):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', "
+                "'2026-09-01 08:00:00', 222, ?)", (src,))
+        conn.commit()
+        conn.close()
+        assert count_measurements(TEST_DB, 111) == 2
+
+    def test_backfill_inserts_earned_without_bot(self):
+        from database import (init_db, add_member, _backfill_achievements,
+                              get_connection, get_achievements)
+        init_db(TEST_DB)
+        add_member(TEST_DB, 111, 1, "child", "Motya")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', "
+                "'2026-09-01 08:00:00', 222, 'manual')")
+        conn.commit()
+        conn.close()
+        c = get_connection(TEST_DB)
+        _backfill_achievements(c)
+        c.commit()
+        c.close()
+        ach = get_achievements(TEST_DB, 111)
+        assert "total_100" in ach
+        assert "streak_7" not in ach  # все замеры в один день
 
 
 if __name__ == "__main__":
