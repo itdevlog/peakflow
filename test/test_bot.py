@@ -4977,7 +4977,10 @@ class TestReportPdf:
         cb = MagicMock(); cb.from_user.id = 700; cb.answer = AsyncMock()
         asyncio.run(bot.cb_report(cb, member={"role": "child", "telegram_id": 700,
                                               "family_id": 1}))
-        cb.answer.assert_awaited()
+        cb.answer.assert_awaited_once()
+        args, kwargs = cb.answer.call_args
+        assert "родителей" in args[0]
+        assert kwargs.get("show_alert") is True
 
     def test_cb_report_period_parent_only(self):
         import asyncio
@@ -4988,7 +4991,10 @@ class TestReportPdf:
         cb.message = MagicMock(); cb.message.answer_document = AsyncMock()
         asyncio.run(bot.cb_report_period(cb, member={"role": "child", "telegram_id": 700,
                                                      "family_id": 1}))
-        cb.answer.assert_awaited()
+        cb.answer.assert_awaited_once()
+        args, kwargs = cb.answer.call_args
+        assert "родителей" in args[0]
+        assert kwargs.get("show_alert") is True
         cb.message.answer_document.assert_not_awaited()
 
     def test_cb_report_period_sends_pdf(self):
