@@ -75,9 +75,12 @@ def test_api_stranger_forbidden_when_db_uninitialized(tmp_path):
 
 
 def test_healthz_ok():
+    _setup_db()
     r = _client().get("/healthz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    assert body["status"] == "ok"
+    assert "uptime_seconds" in body
 
 
 def test_unknown_path_404():
@@ -580,4 +583,55 @@ class TestGamificationApi:
         import pathlib
         js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
         assert "/api/gamification" in js and "Серия" in js
+
+
+class TestMetrics:
+    def _metric_config(self, enabled=True, token=""):
+        cfg = _config()
+        cfg.METRICS_ENABLED = enabled
+        cfg.METRICS_TOKEN = token
+        return cfg
+
+    def test_healthz_fields(self):
+        _setup_db()
+        body = _client().get("/healthz").json()
+        assert body["status"] == "ok"
+        assert "uptime_seconds" in body
+        assert body["families"] >= 1
+        assert body["children"] is not None
+        assert body["measurements"] is not None
+
+    def test_healthz_bot_down(self):
+        _setup_db()
+        app = create_app({"config": _config(), "state": {"bot_ok": False}})
+        r = TestClient(app).get("/healthz")
+        assert r.status_code == 503
+        assert r.json() == {"status": "bot down"}
+
+    def test_metrics_disabled_404(self):
+        _setup_db()
+        assert _client(self._metric_config(enabled=False)).get("/metrics").status_code == 404
+
+    def test_metrics_enabled(self):
+        _setup_db()
+        c = _client(self._metric_config(enabled=True))
+        c.get("/healthz")  # middleware counts a prior request
+        r = c.get("/metrics")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/plain")
+        assert "http_requests_total" in r.text
+
+    def test_metrics_token_required(self):
+        _setup_db()
+        c = _client(self._metric_config(enabled=True, token="secret"))
+        assert c.get("/metrics").status_code == 401
+        r = c.get("/metrics", headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 200
+
+    def test_request_counted(self):
+        import metrics
+        metrics.reset()
+        _setup_db()
+        _client().get("/healthz")
+        assert metrics.get_counter("http_requests_total", method="GET", status="200") >= 1
 
