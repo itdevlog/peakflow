@@ -4889,6 +4889,47 @@ class TestMigrationDryRun:
         assert not os.path.exists(db + "-wal"), "dry_run created a -wal beside the source"
         assert not os.path.exists(db + "-shm"), "dry_run created a -shm beside the source"
 
+    @staticmethod
+    def _snapshot_hot_wal(db):
+        """Build ``db`` as a WAL database with a committed-but-uncheckpointed
+        row and **no open connections**: the triple is snapshotted off a live
+        copy so ``-wal``/``-shm`` outlive the writer, while ``db``'s own close
+        never checkpoints."""
+        import shutil
+        live = db + ".live"
+        writer = sqlite3.connect(live)
+        writer.execute("PRAGMA journal_mode=WAL")
+        TestMigrationDryRun._legacy_measurements_table(writer)
+        writer.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day) "
+            "VALUES (111, 245, 'morning')"
+        )
+        writer.commit()
+        shutil.copyfile(live, db)
+        shutil.copyfile(live + "-wal", db + "-wal")
+        shutil.copyfile(live + "-shm", db + "-shm")
+        writer.close()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(live + suffix):
+                os.remove(live + suffix)
+
+    def test_dry_run_as_only_connection_leaves_hot_wal_source_untouched(self, tmp_path):
+        """Regression: a read-write connect would checkpoint the source when
+        dry_run's connection (the only one) closes, rewriting the main file and
+        deleting ``-wal``/``-shm``."""
+        from scripts.migration_dry_run import dry_run
+        db = str(tmp_path / "only.db")
+        self._snapshot_hot_wal(db)
+        paths = (db, db + "-wal", db + "-shm")
+        assert all(os.path.exists(p) for p in paths), "setup: expected a hot WAL triple"
+        before = {p: open(p, "rb").read() for p in paths}
+
+        report = dry_run(db)
+
+        assert report["tables"]["measurements"] == 1, "hot WAL row was dropped"
+        after = {p: (open(p, "rb").read() if os.path.exists(p) else None) for p in paths}
+        assert after == before, "dry_run modified the source database or its sidecars"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

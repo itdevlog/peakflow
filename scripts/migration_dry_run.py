@@ -1,15 +1,17 @@
 """Dry-run a PeakFlow schema migration on a throwaway copy of the database.
 
-The source database is never written to: it is copied with SQLite's online
-backup API (which reads through a hot WAL), ``init_db`` is run on the copy, and
-the resulting schema/data are reported. Useful to preview what ``init_db`` would
-do before running it against prod.
+The source database is never written to: it is snapshotted at the filesystem
+level (main file plus any ``-wal`` frames), ``init_db`` is run on the copy, and
+the resulting schema/data are reported. The source is never opened with SQLite,
+so no ``-shm`` is touched and no checkpoint can rewrite it on close. Useful to
+preview what ``init_db`` would do before running it against prod.
 
 Usage:
     python -m scripts.migration_dry_run [DB_PATH]
 """
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -43,23 +45,26 @@ def _table_counts(conn: sqlite3.Connection) -> dict:
 
 
 def _backup_to(db_path: str, dest_path: str) -> None:
-    """SQLite online backup (WAL-safe), mirroring ``database.backup_db``."""
-    src = sqlite3.connect(db_path)
-    dst = sqlite3.connect(dest_path)
-    try:
-        src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
+    """Snapshot ``db_path`` into ``dest_path`` without opening the source.
+
+    A WAL database is fully described by its main file plus any ``-wal`` frames,
+    so a filesystem copy captures committed rows. Opening the source with SQLite
+    is avoided deliberately: even a read-only connection touches ``-shm``, and a
+    read-write connection checkpoints on close, rewriting the main file and
+    deleting ``-wal``/``-shm`` beside the source.
+    """
+    shutil.copyfile(db_path, dest_path)
+    wal = db_path + "-wal"
+    if os.path.exists(wal):
+        shutil.copyfile(wal, dest_path + "-wal")
 
 
 def dry_run(db_path: str) -> dict:
     """Run ``init_db`` on a copy of ``db_path`` and return a report.
 
-    The source is only ever read (via the online backup API). ``version_before``
-    is read from the copy, so the source is never opened read-only (which would
-    create ``-shm``/``-wal`` sidecars beside it). The temp copy and any sidecar
-    files are removed in ``finally``.
+    The source is only read from the filesystem (its main file and ``-wal``), so
+    it is never opened by SQLite and cannot be checkpointed or otherwise
+    modified. The temp copy and any sidecar files are removed in ``finally``.
     """
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"database not found: {db_path}")
