@@ -64,6 +64,7 @@ from database import (
     delete_invite,
     get_measurement_dates,
     count_measurements,
+    unlock_achievements,
     DEFAULT_FAMILY_ID,
 )
 
@@ -261,6 +262,29 @@ async def _family_parents(member, family_id) -> list:
     if not parents and not member and family_id == DEFAULT_FAMILY_ID:
         return list(PARENT_IDS)
     return [p["telegram_id"] for p in parents]
+
+
+async def _evaluate_and_notify(child_id, family_id, who, member=None):
+    """Unlock newly earned achievements and notify the family once each."""
+    dates = await _db(get_measurement_dates, DB_PATH, child_id, family_id=family_id)
+    total = await _db(count_measurements, DB_PATH, child_id, family_id=family_id)
+    earned = gamification.evaluate(gamification.longest_streak(dates), total)
+    if not earned:
+        return
+    new = await _db(unlock_achievements, DB_PATH, child_id, earned,
+                    now_tz().strftime("%Y-%m-%d"))
+    if not new:
+        return
+    recipients = set(await _family_parents(member, family_id)) | {child_id}
+    recipients.discard(who)
+    titles = [f"{a['emoji']} {a['title']}"
+              for a in gamification.ACHIEVEMENTS if a["code"] in new]
+    text = "🎉 Новое достижение!\n" + "\n".join(titles)
+    for pid in recipients:
+        try:
+            await bot.send_message(pid, text)
+        except Exception:
+            pass
 
 
 def _family_members_map(family_id: int) -> dict:
@@ -825,6 +849,8 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
                 )
             except Exception:
                 pass
+
+    await _evaluate_and_notify(child_id, family_id, who, member)
 
     await state.update_data(note_for_id=mid)
     await state.set_state(Measurement.waiting_note)

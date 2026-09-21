@@ -5202,6 +5202,59 @@ class TestAchievements:
         assert seen == {"child_id": 700, "family_id": 2}
         resp.assert_awaited()
 
+    def test_evaluate_and_notify_sends_once(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+        sent = []
+        async def fake_send(pid, text, **kw):
+            sent.append((pid, text))
+        with patch.object(bot, "get_measurement_dates",
+                          return_value=["2026-09-21", "2026-09-20", "2026-09-19",
+                                        "2026-09-18", "2026-09-17", "2026-09-16",
+                                        "2026-09-15"]), \
+             patch.object(bot, "count_measurements", return_value=7), \
+             patch.object(bot, "unlock_achievements", return_value={"streak_7"}), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[222])), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._evaluate_and_notify(111, 1, 999))
+        assert sent, "achievement notification must be sent"
+        assert any("достижение" in t.lower() for _, t in sent)
+
+    def test_evaluate_and_notify_no_new_silent(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, patch
+        sent = []
+        async def fake_send(pid, text, **kw):
+            sent.append(pid)
+        with patch.object(bot, "get_measurement_dates", return_value=["2026-09-21"]), \
+             patch.object(bot, "count_measurements", return_value=1), \
+             patch.object(bot, "unlock_achievements", return_value=set()), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[222])), \
+             patch.object(bot.bot, "send_message", side_effect=fake_send):
+            asyncio.run(bot._evaluate_and_notify(111, 1, 999))
+        assert sent == []
+
+    def test_persist_measurement_triggers_evaluation(self):
+        import asyncio, bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock(); state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock()
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "replace_auto_measurement", return_value=1), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[])), \
+             patch.object(bot, "_evaluate_and_notify", new=AsyncMock()) as ev:
+            asyncio.run(bot._persist_measurement(
+                cb, state, 250, "morning",
+                member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        ev.assert_awaited_once()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
