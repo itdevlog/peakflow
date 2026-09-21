@@ -842,6 +842,13 @@ def list_family_parents(db_path: str, family_id: int) -> list:
     return [dict(r) for r in rows]
 
 
+def list_families(db_path: str) -> list:
+    conn = get_connection(db_path)
+    rows = conn.execute("SELECT * FROM families ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def count_family_children(db_path: str, family_id: int) -> int:
     conn = get_connection(db_path)
     row = conn.execute(

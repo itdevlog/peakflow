@@ -846,6 +846,104 @@ class TestSchedulerAlignment:
             "escalation flag must not be set if no parent got the message"
 
 
+class TestMultiFamilyScheduler:
+    """SP3D Task 4: one scheduler tick must serve every family, with each
+    family's own reminder hours and no cross-family notifications."""
+
+    @staticmethod
+    def _mocked_bot():
+        from unittest.mock import AsyncMock, MagicMock
+        mb = MagicMock()
+        mb.send_message = AsyncMock()
+        return mb
+
+    @staticmethod
+    def _make_family(child_id, child_name, parent_id, **hours):
+        from database import create_family, add_member, set_setting
+        fid = create_family(TEST_DB, f"family-{child_id}")
+        add_member(TEST_DB, child_id, fid, "child", child_name)
+        add_member(TEST_DB, parent_id, fid, "parent", "Родитель")
+        for key, value in hours.items():
+            set_setting(TEST_DB, f"reminder_{key}", str(value), family_id=fid)
+        return fid
+
+    def _run_tick(self, families, hour, minute, mocked_bot):
+        """One scheduler tick with faked time; returns send_message calls."""
+        import asyncio
+        import bot
+        from unittest.mock import patch
+        from datetime import datetime, timedelta, timezone
+
+        tz = timezone(timedelta(hours=5))
+        # 2026-09-13 is a Sunday (weekly report day).
+        fake_now = datetime(2026, 9, 13, hour, minute, 5, tzinfo=tz)
+
+        async def fake_sleep(_s):
+            raise asyncio.CancelledError  # stop loop after first tick
+
+        with patch.object(bot, "now_tz", return_value=fake_now), \
+             patch.object(bot, "list_families",
+                          return_value=[{"id": fid} for fid in families],
+                          create=True), \
+             patch.object(bot, "bot", mocked_bot), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "is_reminder_minute", return_value=minute < 2), \
+             patch.object(bot, "get_last_of_tod", return_value=None), \
+             patch("asyncio.sleep", side_effect=fake_sleep), \
+             patch("asyncio.create_task", lambda coro: coro):
+            try:
+                asyncio.run(bot.scheduler_loop())
+            except asyncio.CancelledError:
+                pass
+        return mocked_bot.send_message.call_args_list
+
+    def test_list_families_returns_all(self):
+        from database import list_families
+        f2 = self._make_family(700, "Маша", 701)
+        ids = [f["id"] for f in list_families(TEST_DB)]
+        assert 1 in ids, "seeded default family must be listed"
+        assert f2 in ids
+
+    def test_two_families_pinged_at_own_hours(self):
+        f2 = self._make_family(700, "Маша", 701, child_morning=8)
+        f3 = self._make_family(800, "Петя", 801, child_morning=9)
+
+        at8 = [c[0][0] for c in self._run_tick([f2, f3], 8, 0, self._mocked_bot())]
+        assert 700 in at8, "family 2's child must be pinged at its own 08:00"
+        assert 800 not in at8, "family 3's child must not be pinged at 08:00"
+
+        at9 = [c[0][0] for c in self._run_tick([f2, f3], 9, 0, self._mocked_bot())]
+        assert 800 in at9, "family 3's child must be pinged at its own 09:00"
+        assert 700 not in at9, "family 2's child must not be pinged at 09:00"
+
+    def test_escalation_only_notifies_its_own_family(self):
+        f2 = self._make_family(700, "Маша", 701, child_morning=8, parent_morning=10)
+        f3 = self._make_family(800, "Петя", 801, child_morning=8, parent_morning=11)
+
+        recipients = [c[0][0]
+                      for c in self._run_tick([f2, f3], 10, 0, self._mocked_bot())]
+        assert 701 in recipients, "family 2's parent must be escalated at 10:00"
+        assert 801 not in recipients, "family 3's parent must not get family 2's escalation"
+
+    def test_weekly_report_delivered_per_family(self):
+        from database import add_measurement
+        f2 = self._make_family(700, "Маша", 701)
+        f3 = self._make_family(800, "Петя", 801)
+        add_measurement(TEST_DB, 250, "morning", 700, 701, family_id=f2)
+        add_measurement(TEST_DB, 240, "evening", 700, 701, family_id=f2)
+        add_measurement(TEST_DB, 300, "morning", 800, 801, family_id=f3)
+        add_measurement(TEST_DB, 310, "evening", 800, 801, family_id=f3)
+
+        by_recipient = {}
+        for c in self._run_tick([f2, f3], 21, 0, self._mocked_bot()):
+            by_recipient.setdefault(c[0][0], []).append(c[0][1])
+
+        assert any("Маша" in t for t in by_recipient.get(701, [])), "family 2 report"
+        assert any("Петя" in t for t in by_recipient.get(801, [])), "family 3 report"
+        assert not any("Петя" in t for t in by_recipient.get(701, [])), "no leak into f2"
+        assert not any("Маша" in t for t in by_recipient.get(801, [])), "no leak into f3"
+
+
 class TestRemindersScreen:
     """⏰ Reminders settings screen + hour input FSM."""
 
@@ -3962,7 +4060,15 @@ class TestTenantContext:
 
     def test_family_parents_env_fallback(self, monkeypatch):
         import asyncio, bot
+        import sqlite3
         monkeypatch.setattr(bot, "PARENT_IDS", [222, 333])
+        # DB members take precedence (multi-family); env is the legacy fallback
+        # only for the default family when it has no parent rows.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute("DELETE FROM members WHERE family_id = ?",
+                     (bot.DEFAULT_FAMILY_ID,))
+        conn.commit()
+        conn.close()
         assert asyncio.run(bot._family_parents(None, 1)) == [222, 333]
 
 
