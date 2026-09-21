@@ -4572,5 +4572,53 @@ class TestGateRemoved:
         assert not hasattr(bot, "_is_reg_command")
 
 
+class TestMigrationDryRun:
+    """SP3D: dry-run reports a migration without touching the source DB."""
+
+    def test_dry_run_reports_without_touching_source(self):
+        from database import add_measurement
+        from scripts.migration_dry_run import dry_run
+        add_measurement(TEST_DB, 250, "morning", 111, 222)
+        before = open(TEST_DB, "rb").read()
+        report = dry_run(TEST_DB)
+        after = open(TEST_DB, "rb").read()
+        assert before == after, "dry_run modified the source database"
+        assert "measurements" in report["tables"]
+        assert report["tables"]["measurements"] == 1
+        assert report["version_before"] == report["version_after"]
+
+    def test_dry_run_reports_orphan_child_ids(self):
+        from database import add_measurement
+        from scripts.migration_dry_run import dry_run
+        add_measurement(TEST_DB, 250, "morning", 987654, 222)
+        report = dry_run(TEST_DB)
+        assert 987654 in report["orphan_child_ids"]
+
+    def test_dry_run_migrates_a_copy_of_a_legacy_db(self, tmp_path):
+        from database import SCHEMA_VERSION
+        from scripts.migration_dry_run import dry_run
+        legacy = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(legacy)
+        conn.execute(
+            "CREATE TABLE measurements (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER, pef_value INTEGER, time_of_day TEXT, "
+            "measured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, added_by INTEGER, "
+            "note TEXT, source TEXT DEFAULT 'manual')"
+        )
+        conn.execute(
+            "INSERT INTO measurements (user_id, pef_value, time_of_day) "
+            "VALUES (111, 245, 'morning')"
+        )
+        conn.commit()
+        conn.close()
+        before = open(legacy, "rb").read()
+        report = dry_run(legacy)
+        after = open(legacy, "rb").read()
+        assert before == after, "dry_run modified the source database"
+        assert report["version_before"] < SCHEMA_VERSION
+        assert report["version_after"] == SCHEMA_VERSION
+        assert report["tables"]["measurements"] == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
