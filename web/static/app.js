@@ -529,6 +529,14 @@ async function loadSettings() {
       <div class="row" style="flex-wrap:wrap;gap:6px">${periodBtns}</div>
     </div>
     <div class="card">
+      <div class="label">📄 Отчёт врачу (PDF)</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px">
+        <button class="mini" data-report="week">Неделя</button>
+        <button class="mini" data-report="month">Месяц</button>
+        <button class="mini" data-report="quarter">Квартал</button>
+      </div>
+    </div>
+    <div class="card">
       <div class="label">💾 Бэкап БД</div>
       <button class="mini" id="set-backup">Скачать бэкап</button>
     </div>`;
@@ -536,6 +544,9 @@ async function loadSettings() {
   $("set-backup").onclick = () => download("/api/backup", "peakflow_backup.db").catch((e) => showError(e.message));
   el.querySelectorAll("[data-csv]").forEach((b) =>
     b.onclick = () => download(`/api/export/csv?period=${b.dataset.csv}`, "peakflow.csv").catch((e) => showError(e.message)));
+  el.querySelectorAll("[data-report]").forEach((b) =>
+    b.onclick = () => download(`/api/report/pdf?period=${b.dataset.report}`, "peakflow_report.pdf")
+      .catch((e) => showError(e.message)));
   el.querySelectorAll("[data-hour]").forEach((b) =>
     b.onclick = () => changeHour(b.dataset.hour, h));
 }

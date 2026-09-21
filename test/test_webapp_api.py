@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import quote
@@ -462,4 +463,71 @@ class TestExportChartIsolation:
         body = _client().get("/api/export/periods", headers=_auth(999)).json()
         assert body["months"], "family #2 must still expose its own month"
         assert "2020-01" not in body["months"], "family #1 month leaked into periods"
+
+
+class TestReportPdfApi:
+    def _family_two_without_data(self):
+        from database import create_family_with_owner, add_member
+        f2 = create_family_with_owner(TEST_DB, 999, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        return f2
+
+    def test_report_pdf_ok(self):
+        _setup_db()
+        add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID, family_id=1)
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(222))
+        assert r.status_code == 200, r.text
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert r.content[:5] == b"%PDF-"
+
+    def test_report_pdf_bad_period(self):
+        _setup_db()
+        r = _client().get("/api/report/pdf?period=year", headers=_auth(222))
+        assert r.status_code == 422
+
+    def test_report_pdf_child_forbidden(self):
+        _setup_db()
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(CHILD_ID))
+        assert r.status_code == 403
+
+    def test_report_pdf_empty(self):
+        _setup_db()
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(222))
+        assert r.status_code == 404
+
+    def test_report_pdf_isolation_no_leak(self):
+        _setup_db()
+        # family #1 has a measurement this month; family #2 has a child but no data
+        add_measurement(TEST_DB, 111, "morning", CHILD_ID, CHILD_ID, family_id=1)
+        self._family_two_without_data()
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(999))
+        assert r.status_code == 404, "family #2 must not receive family #1 data"
+
+    def test_report_pdf_family_two_own_data(self):
+        _setup_db()
+        f2 = self._family_two_without_data()
+        add_measurement(TEST_DB, 250, "morning", 700, 999, family_id=f2)
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(999))
+        assert r.status_code == 200
+        assert r.content[:5] == b"%PDF-"
+
+    def test_report_pdf_isolated_same_child_id(self):
+        _setup_db()
+        self._family_two_without_data()
+        # Family #1 row that reuses family #2's child id — must not leak.
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, 700, 200, 'morning', ?, 700, 'manual')",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+        )
+        conn.commit()
+        conn.close()
+        r = _client().get("/api/report/pdf?period=month", headers=_auth(999))
+        assert r.status_code == 404, "family #2 must not see family #1 data via a shared child id"
+
+    def test_app_js_has_report_button(self):
+        import pathlib
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "/api/report/pdf" in js and "data-report" in js
 

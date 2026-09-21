@@ -4959,5 +4959,82 @@ class TestMigrationDryRun:
         assert after == before, "dry_run modified the source database or its sidecars"
 
 
+class TestReportPdf:
+    def test_settings_has_report_button(self):
+        import bot
+        cbs = [b.callback_data for row in bot.kb_settings(260).inline_keyboard for b in row]
+        assert "report" in cbs
+
+    def test_report_period_keyboard(self):
+        import bot
+        cbs = [b.callback_data for row in bot.kb_report_periods().inline_keyboard for b in row]
+        assert {"report_week", "report_month", "report_quarter"} <= set(cbs)
+
+    def test_cb_report_parent_only(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock(); cb.from_user.id = 700; cb.answer = AsyncMock()
+        asyncio.run(bot.cb_report(cb, member={"role": "child", "telegram_id": 700,
+                                              "family_id": 1}))
+        cb.answer.assert_awaited_once()
+        args, kwargs = cb.answer.call_args
+        assert "родителей" in args[0]
+        assert kwargs.get("show_alert") is True
+
+    def test_cb_report_period_parent_only(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock(); cb.from_user.id = 700; cb.data = "report_month"
+        cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer_document = AsyncMock()
+        asyncio.run(bot.cb_report_period(cb, member={"role": "child", "telegram_id": 700,
+                                                     "family_id": 1}))
+        cb.answer.assert_awaited_once()
+        args, kwargs = cb.answer.call_args
+        assert "родителей" in args[0]
+        assert kwargs.get("show_alert") is True
+        cb.message.answer_document.assert_not_awaited()
+
+    def test_cb_report_period_sends_pdf(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.data = "report_month"
+        cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        member = {"role": "parent", "telegram_id": 500, "family_id": 1}
+        with patch.object(bot, "get_measurements_between", return_value=[{"pef_value": 250}]) as between, \
+             patch.object(bot, "resolve_active_child", return_value=111), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_member", return_value={"name": "Motya"}), \
+             patch.object(bot, "_build_report_pdf_async",
+                          new=AsyncMock(return_value=b"%PDF-1.4")):
+            asyncio.run(bot.cb_report_period(cb, member=member))
+        cb.message.answer_document.assert_awaited()
+        args, kwargs = between.call_args
+        assert 111 in args, "report must query the active child"
+        assert kwargs.get("family_id") == 1, "report must be scoped to the family"
+
+    def test_cb_report_period_empty_alerts(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.data = "report_month"
+        cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer_document = AsyncMock()
+        cb.message.delete = AsyncMock()
+        member = {"role": "parent", "telegram_id": 500, "family_id": 1}
+        with patch.object(bot, "get_measurements_between", return_value=[]), \
+             patch.object(bot, "resolve_active_child", return_value=111), \
+             patch.object(bot, "_build_report_pdf_async",
+                          new=AsyncMock(return_value=b"%PDF-1.4")):
+            asyncio.run(bot.cb_report_period(cb, member=member))
+        cb.answer.assert_awaited()
+        cb.message.answer_document.assert_not_awaited()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

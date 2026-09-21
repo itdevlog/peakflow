@@ -18,7 +18,6 @@ from aiogram.exceptions import TelegramBadRequest
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
 from config import (
     BOT_TOKEN, DB_PATH, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF,
@@ -33,6 +32,7 @@ from report import (
     build_csv_content as _report_build_csv,
     pef_zone as _report_pef_zone,
 )
+import report_pdf
 from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
@@ -1211,6 +1211,7 @@ def kb_settings(target: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👨‍👩‍👧 Участники", callback_data="members")],
         [InlineKeyboardButton(text="🧒 Дети", callback_data="children")],
         [InlineKeyboardButton(text="📥 Экспорт CSV", callback_data="export")],
+        [InlineKeyboardButton(text="📄 Отчёт врачу", callback_data="report")],
         [InlineKeyboardButton(text="💾 Скачать бэкап", callback_data="backup")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
     ])
@@ -1429,6 +1430,23 @@ def kb_export_periods(months: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def kb_report_periods() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 Неделя", callback_data="report_week")],
+        [InlineKeyboardButton(text="🗓️ Месяц", callback_data="report_month")],
+        [InlineKeyboardButton(text="📆 Квартал", callback_data="report_quarter")],
+        [InlineKeyboardButton(text="⬅️ Настройки", callback_data="settings")],
+    ])
+
+
+async def _build_report_pdf_async(rows, target, child_name, period_label) -> bytes:
+    """Собрать PDF в отдельном потоке (matplotlib CPU-bound)."""
+    return await asyncio.to_thread(
+        report_pdf.build_pdf, rows, target=target, child_name=child_name,
+        period_label=period_label, zone_green=ZONE_GREEN, zone_yellow=ZONE_YELLOW,
+    )
+
+
 @router.callback_query(F.data == "export")
 async def cb_export(callback: types.CallbackQuery, member=None):
     if not _is_parent_member(member, callback.from_user.id):
@@ -1510,6 +1528,54 @@ async def cb_export_month(callback: types.CallbackQuery, member=None):
     await _send_csv(callback, rows, filename,
                     f"📥 Экспорт за {month_title(y, m)}: {len(rows)} записей",
                     member=member)
+
+
+@router.callback_query(F.data == "report")
+async def cb_report(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    await respond(callback, "📄 Отчёт врачу — выберите период:", kb=kb_report_periods())
+
+
+@router.callback_query(F.data.regexp(r"^report_(week|month|quarter)$"))
+async def cb_report_period(callback: types.CallbackQuery, member=None):
+    if not _is_parent_member(member, callback.from_user.id):
+        await callback.answer("⚠️ Только для родителей.", show_alert=True)
+        return
+    period = callback.data[len("report_"):]
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    today = now_tz().date()
+    date_from, date_to = report_pdf.period_bounds(period, today)
+    rows = await _db(get_measurements_between, DB_PATH, child_id, date_from, date_to,
+                     family_id=family_id)
+    if not rows:
+        await callback.answer("📭 Нет записей за период.", show_alert=True)
+        return
+    target = await _db(get_effective_target, family_id=family_id)
+    name = await _child_name(member, child_id)
+    label = report_pdf.period_label(period, today)
+    try:
+        pdf = await _build_report_pdf_async(rows, target, name, label)
+    except Exception as e:
+        logger.error("Ошибка генерации PDF-отчёта: %s", e)
+        await callback.answer("Не удалось создать отчёт.", show_alert=True)
+        return
+    await answer_callback(callback)
+    await callback.message.answer_document(
+        BufferedInputFile(pdf, filename=f"peakflow_report_{name}_{period}.pdf"),
+        caption=f"📄 Отчёт врачу — {label}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")]
+        ]),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1811,52 +1877,16 @@ def next_month_str(year: int, month: int) -> str:
 
 def _render_chart_png(rows: list, target: int, title: str) -> bytes:
     """Render measurements to PNG bytes (matplotlib Agg, in-memory)."""
-    dates = [datetime.strptime(d["measured_at"], "%Y-%m-%d %H:%M:%S") for d in rows]
-    values = [d["pef_value"] for d in rows]
-
-    morning_d = [dates[i] for i, d in enumerate(rows) if d["time_of_day"] == "morning"]
-    morning_v = [values[i] for i, d in enumerate(rows) if d["time_of_day"] == "morning"]
-    evening_d = [dates[i] for i, d in enumerate(rows) if d["time_of_day"] == "evening"]
-    evening_v = [values[i] for i, d in enumerate(rows) if d["time_of_day"] == "evening"]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    try:
-        ax.plot(dates, values, marker="o", linewidth=2, label="ПСВ", color="#2196F3", markersize=4, zorder=3)
-
-        if morning_d:
-            ax.scatter(morning_d, morning_v, color="#FF9800", label="Утро", zorder=5, s=80, edgecolors="white", linewidth=1.5)
-        if evening_d:
-            ax.scatter(evening_d, evening_v, color="#9C27B0", label="Вечер", zorder=5, s=80, edgecolors="white", linewidth=1.5)
-
-        # Best / Worst
-        best_idx = values.index(max(values))
-        worst_idx = values.index(min(values))
-        ax.annotate(f"🏆 {max(values)}", (dates[best_idx], values[best_idx]),
-                    textcoords="offset points", xytext=(0, 12), ha="center",
-                    fontsize=9, fontweight="bold", color="green")
-        ax.annotate(f"⚠️ {min(values)}", (dates[worst_idx], values[worst_idx]),
-                    textcoords="offset points", xytext=(0, -14), ha="center",
-                    fontsize=9, fontweight="bold", color="red")
-
-        if target:
-            ax.axhline(y=target, color="green", linestyle="--", label=f"Норма ({target})", linewidth=1.5, zorder=2)
-            ax.axhline(y=int(target * ZONE_GREEN / 100), color="orange", linestyle=":", alpha=0.5, linewidth=1)
-            ax.axhline(y=int(target * ZONE_YELLOW / 100), color="yellow", linestyle=":", alpha=0.5, linewidth=1)
-
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        ax.set_ylabel("ПСВ (л/мин)")
-        ax.set_title(f"Пикфлоуметрия — {title}")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        fig.autofmt_xdate()
-        plt.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120)
-    finally:
-        # Always release the figure, even if rendering raised.
-        plt.close(fig)
+    with report_pdf.RENDER_LOCK:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        try:
+            report_pdf.draw_chart(ax, rows, target, ZONE_GREEN, ZONE_YELLOW, title=title)
+            fig.autofmt_xdate()
+            plt.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=120)
+        finally:
+            plt.close(fig)
     return buf.getvalue()
 
 
