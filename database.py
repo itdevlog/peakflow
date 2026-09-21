@@ -244,7 +244,9 @@ def _backfill_achievements(conn):
         child_id = row["telegram_id"]
         dates = [r["d"] for r in conn.execute(
             "SELECT DISTINCT substr(measured_at, 1, 10) AS d FROM measurements "
-            "WHERE child_id = ?", (child_id,)
+            "WHERE child_id = ? "
+            "AND measured_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'",
+            (child_id,)
         ).fetchall()]
         total = conn.execute(
             "SELECT COUNT(*) FROM measurements WHERE child_id = ?", (child_id,)

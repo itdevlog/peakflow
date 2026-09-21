@@ -5123,6 +5123,52 @@ class TestAchievements:
         assert "total_100" in ach
         assert "streak_7" not in ach  # все замеры в один день
 
+    def test_backfill_runs_only_on_upgrade(self):
+        from database import (init_db, add_member, get_connection,
+                              get_achievements)
+        init_db(TEST_DB)
+        add_member(TEST_DB, 111, 1, "child", "Motya")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', "
+                "'2026-09-01 08:00:00', 222, 'manual')")
+        conn.execute("DELETE FROM achievements")
+        conn.execute("PRAGMA user_version = 4")
+        conn.commit()
+        conn.close()
+        init_db(TEST_DB)  # upgrade 4 -> 5 must backfill
+        assert "total_100" in get_achievements(TEST_DB, 111)
+        # A new child added AFTER the upgrade must NOT be backfilled by init_db.
+        add_member(TEST_DB, 555, 1, "child", "Petya")
+        conn = sqlite3.connect(TEST_DB)
+        for _ in range(100):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, 555, 250, 'morning', "
+                "'2026-09-02 08:00:00', 222, 'manual')")
+        conn.commit()
+        conn.close()
+        init_db(TEST_DB)  # already v5 -> no backfill
+        assert get_achievements(TEST_DB, 555) == {}
+
+    def test_backfill_ignores_malformed_dates(self):
+        from database import (init_db, add_member, get_connection,
+                              _backfill_achievements)
+        init_db(TEST_DB)
+        add_member(TEST_DB, 111, 1, "child", "Motya")
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, 111, 250, 'morning', NULL, 222, 'manual')")
+        conn.commit()
+        conn.close()
+        c = get_connection(TEST_DB)
+        _backfill_achievements(c)  # must not raise
+        c.commit()
+        c.close()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
