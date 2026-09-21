@@ -54,6 +54,12 @@ class TestRegistry:
         assert uptime_seconds() >= 0
         assert START_TIME <= time.time()
 
+    def test_conflicting_type_rejected(self):
+        from metrics import inc, set_gauge
+        inc("x")
+        with pytest.raises(ValueError):
+            set_gauge("x", 1)
+
 
 class TestRender:
     def test_render_format(self):
@@ -73,6 +79,25 @@ class TestRender:
         from metrics import inc, render_prometheus
         inc("x_total", note='a"b')
         assert 'note="a\\"b"' in render_prometheus()
+
+    def test_label_newline_escaped(self):
+        from metrics import inc, render_prometheus
+        inc("x_total", note="a\nb")
+        assert 'note="a\\nb"' in render_prometheus()
+
+    def test_trailing_newline_name_rejected(self):
+        from metrics import inc
+        with pytest.raises(ValueError):
+            inc("foo\n")
+
+    def test_non_string_name_rejected(self):
+        from metrics import inc
+        with pytest.raises(ValueError):
+            inc(123)
+
+    def test_empty_render(self):
+        from metrics import render_prometheus
+        assert render_prometheus() == ""
 
     def test_invalid_name(self):
         from metrics import inc

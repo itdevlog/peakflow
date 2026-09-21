@@ -14,16 +14,24 @@ _LOCK = threading.Lock()
 _COUNTERS = {}
 _GAUGES = {}
 
-_NAME_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
-_LABEL_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+_NAME_RE = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*")
+_LABEL_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+_TYPES = {}
 
 
 def _check(name, labels):
-    if not _NAME_RE.match(name):
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
         raise ValueError(f"invalid metric name: {name!r}")
     for key in labels:
-        if not _LABEL_RE.match(key):
+        if not isinstance(key, str) or not _LABEL_RE.fullmatch(key):
             raise ValueError(f"invalid label name: {key!r}")
+
+
+def _register(name, kind):
+    existing = _TYPES.get(name)
+    if existing is not None and existing != kind:
+        raise ValueError(f"metric {name!r} already registered as {existing}")
+    _TYPES[name] = kind
 
 
 def _key(name, labels):
@@ -34,12 +42,14 @@ def inc(name, value=1, **labels):
     _check(name, labels)
     key = _key(name, labels)
     with _LOCK:
+        _register(name, "counter")
         _COUNTERS[key] = _COUNTERS.get(key, 0) + value
 
 
 def set_gauge(name, value, **labels):
     _check(name, labels)
     with _LOCK:
+        _register(name, "gauge")
         _GAUGES[_key(name, labels)] = value
 
 
@@ -73,7 +83,8 @@ def _fmt_labels(labels):
         return ""
     parts = []
     for key in sorted(labels):
-        value = str(labels[key]).replace("\\", "\\\\").replace('"', '\\"')
+        value = (str(labels[key]).replace("\\", "\\\\")
+                 .replace('"', '\\"').replace("\n", "\\n"))
         parts.append(f'{key}="{value}"')
     return "{" + ",".join(parts) + "}"
 
@@ -95,10 +106,11 @@ def render_prometheus():
             lines.append(f"# TYPE {name} {kind}")
             for labels, value in series:
                 lines.append(f"{name}{_fmt_labels(dict(labels))} {value}")
-    return "\n".join(lines) + "\n"
+    return ("\n".join(lines) + "\n") if lines else ""
 
 
 def reset():
     with _LOCK:
         _COUNTERS.clear()
         _GAUGES.clear()
+        _TYPES.clear()
