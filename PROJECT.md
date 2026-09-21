@@ -36,6 +36,7 @@
 | Сводка «Сегодня» | Все замеры дня + статистика (родители) |
 | Недельный отчёт | Сравнение с прошлой неделей, тренды утро/вечер |
 | Выбор ребёнка | Родитель переключает активного ребёнка в боте и Mini App |
+| Серия и достижения | 🔥 Серия дней подряд в статусе, экран «🏅 Достижения», одноразовые уведомления о разблокировке (SP4B) |
 | Напоминания | 10:00 / 22:00 — если замер пропущен |
 | Красная зона | Мгновенное уведомление обоим родителям при `< 60%` |
 | Уведомление родителю | При каждом замере — второму родителю |
@@ -51,8 +52,9 @@ peakflow/
 ├── config.py           # Настройки, ID семьи, пороги
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
 ├── report_pdf.py       # PDF-отчёты врачу: периоды, статистика, график, A4-вёрстка (SP4A)
+├── gamification.py     # Геймификация: серия дней и достижения, чистые расчёты (SP4B)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (480)
+├── test/               # Pytest тесты (519)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -81,12 +83,14 @@ peakflow/
 
 ## База данных
 
-Схема — **v4 (мульти-тенант + регистрация + активный ребёнок)**: `SCHEMA_VERSION = 4`,
+Схема — **v5 (мульти-тенант + регистрация + активный ребёнок + геймификация)**: `SCHEMA_VERSION = 5`,
 `DEFAULT_FAMILY_ID = 1`. Данные изолированы по семье (`families`/`members`), замеры
 принадлежат семье и ребёнку. При старте `init_db()` на непустой БД старой версии
 сначала делает резервную копию `<db>.v1.bak` (`backup_db`), затем мигрирует схему до
-v4. Миграция идемпотентна (`ALTER TABLE members ADD COLUMN active_child_id` в
-try/except), выполняется в транзакции, при ошибке бэкапа прерывается.
+v5. Миграции идемпотентны (`ALTER TABLE members ADD COLUMN active_child_id` в
+try/except; `CREATE TABLE IF NOT EXISTS achievements`), выполняются в транзакции, при
+ошибке бэкапа миграция прерывается. При первом апгрейде БД до v5 выполняется **тихий
+бэкфилл** уже заслуженных достижений (без уведомлений).
 
 Роли участников в рантайме берутся из `members` (в боте — через `MemberMiddleware`,
 в Mini App — в `_resolve_user`). Переменные `.env` (`CHILD_ID`/`PARENT_IDS`) используются
@@ -170,6 +174,19 @@ try/except), выполняется в транзакции, при ошибке
 Родительское приглашение — одно на семью (`role='parent'`); карточка ребёнка —
 строка `role='child'` с именем. Отзыв: `regenerate_family_invite` (родительский)
 или `delete_invite` (карточка).
+
+### Таблица `achievements` (v5)
+
+Заслуженные достижения в разрезе ребёнка. Составной ключ `(child_id, code)` —
+повторная разблокировка невозможна (`INSERT OR IGNORE`). Каталог и пороги —
+`gamification.ACHIEVEMENTS` (см. модуль `gamification.py`); бэкфилл при апгрейде на
+v5 записывает уже заслуженные коды без уведомлений.
+
+| Поле | Тип | Ограничения | Описание |
+|------|-----|-------------|----------|
+| `child_id` | INTEGER | NOT NULL, PRIMARY KEY (child_id, code) | ID ребёнка |
+| `code` | TEXT | NOT NULL, PRIMARY KEY (child_id, code) | Код достижения (`streak_7`, `total_500`, …) |
+| `unlocked_at` | TEXT | NOT NULL | Дата разблокировки `YYYY-MM-DD` |
 
 ### SQL-запросы
 
@@ -256,6 +273,8 @@ class Measurement(StatesGroup):
 | `_child_name(member, child_id, child_name=None)` | `...` | `str` | Имя активного ребёнка (`member=None` → env `CHILD_NAME`) |
 | `_family_parents(member, family_id)` | `...` | `list[int]` | Telegram ID родителей семьи (fallback — env `PARENT_IDS`) |
 | `_no_child_reply(target, member)` | `target, member` | — | Подсказка «добавьте ребёнка», когда в семье нет детей |
+| `_evaluate_and_notify(child_id, family_id, who, member=None)` | `...` | — | Разблокировать новые достижения и уведомить семью один раз (SP4B) |
+| `build_achievements_text(streak_longest, total)` | `int, int` | `str` | Текст экрана «🏅 Достижения»: рекордная серия + прогресс по бейджам |
 
 ### Клавиатуры
 
@@ -277,7 +296,12 @@ async def build_status_block() -> str:
 
 Сегодня: 🌅 240 🟢 | 🌆 —
 Последний: 240 🟢 (+10)
+🔥 Серия: 12 дн.
 ```
+
+Строка «🔥 Серия: N дн.» (SP4B) добавляется, если текущая серия ≥ 1
+(`gamification.current_streak`, grace: серия сохраняется, если последний замер был
+сегодня или вчера).
 
 ### Обработчики команд
 
@@ -302,6 +326,7 @@ async def build_status_block() -> str:
 | `stats` | `cb_stats(cb)` | Общая статистика (только ребёнок) |
 | `edit_last` | `cb_edit_last(cb, state)` | Начать редактирование последнего |
 | `back` | `cb_back(cb, state)` | Возврат в главное меню |
+| `achievements` | `cb_achievements(cb)` | Экран «🏅 Достижения»: рекордная серия + список бейджей с прогрессом (SP4B) |
 | `noop` | `cb_noop(cb)` | Пустой callback (для пагинации) |
 
 ### Обработчики текста
@@ -395,6 +420,10 @@ def main():
 | `get_setting(db, key, default='', family_id=1)` / `set_setting(db, key, value, family_id=1)` | `...` | `str` / — | Настройки в разрезе семьи |
 | `get_effective_target(db, fallback, family_id=1)` | `str, int, int` | `int` | Целевая ПСВ (settings → fallback → 300) |
 | `get_reminder_hours(db, family_id=1)` | `str, int` | `dict` | Часы напоминаний |
+| `get_measurement_dates(db, child_id, family_id=1)` | `str, int, int` | `list[str]` | Уникальные даты замеров (ISO, по возрастанию) — для серии (v5) |
+| `count_measurements(db, child_id, family_id=1)` | `str, int, int` | `int` | Всего замеров (включая auto) — для достижений (v5) |
+| `get_achievements(db, child_id)` | `str, int` | `dict` | `{code: unlocked_at}` заслуженных достижений (v5) |
+| `unlock_achievements(db, child_id, codes, when)` | `str, int, iterable, str` | `set` | `INSERT OR IGNORE`; возвращает только реально добавленные коды (v5) |
 
 ### `get_stats()` — структура результата
 
@@ -457,6 +486,38 @@ def main():
 
 ---
 
+## Модуль `gamification.py` (SP4B)
+
+Чистый модуль (только stdlib), не импортирует `bot.py`/`database.py`/aiogram.
+Считает серию дней и достижения из списка дат замеров.
+
+| Функция | Параметры | Возвращает | Описание |
+|---------|-----------|-----------|----------|
+| `current_streak(dates, today)` | `iterable[date\|str], date` | `int` | Длина серии, заканчивающейся сегодня или вчера (grace); иначе 0 |
+| `longest_streak(dates)` | `iterable[date\|str]` | `int` | Максимальная серия подряд идущих дней за всю историю |
+| `evaluate(streak_longest, total)` | `int, int` | `set` | Заслуженные коды достижений (streak — по рекордной серии, total — по числу замеров) |
+| `achievement_status(code, streak_longest, total)` | `str, int, int` | `tuple` | `(unlocked, current, threshold)` для отображения прогресса |
+
+Каталог `ACHIEVEMENTS`: `🔥 7/30 дней`, `🏆 100 дней` (kind `streak`) и
+`💯 100 / ⭐ 500 / 👑 1000 замеров` (kind `total`). Достижения оцениваются по
+**рекордной** серии (`longest_streak`), а не по текущей, чтобы разблокировка не
+терялась при разрыве серии. Функции принимают как `date`, так и строки ISO.
+
+### Серия и достижения в боте и Mini App
+
+- **Бот, статус-блок:** строка «🔥 Серия: N дн.» (`current_streak`).
+- **Бот, экран «🏅 Достижения»** (`achievements`): `build_achievements_text`
+  показывает рекордную серию и прогресс по каждому бейджу (получен/`current/threshold`).
+- **Разблокировка:** `_evaluate_and_notify` вызывается при сохранении замера,
+  пишет новые коды (`unlock_achievements`) и рассылает семье (родителям + ребёнку,
+  кроме автора) одноразовое уведомление «🎉 Новое достижение!». Повторы подавляются
+  ключом `(child_id, code)`.
+- **Mini App:** `GET /api/gamification` отдаёт `streak_current`/`streak_longest`/
+  `total` и список `achievements[{code, emoji, title, unlocked, unlocked_at}]`;
+  в табе статистики — карточка «🔥 Серия» и сетка бейджей.
+
+---
+
 ## Сценарии использования
 
 ### Ребёнок: добавление замера
@@ -513,6 +574,7 @@ def main():
 | Недельный отчёт | Вс 21:00 | Оба родителя |
 | Красная зона | Мгновенно при замере < 60% | Оба родителя |
 | Новый замер | Мгновенно | Другой родитель |
+| Новое достижение | При разблокировке бейджа (`_evaluate_and_notify`, SP4B) | Родители + ребёнок, кроме автора; один раз на код |
 
 ### Регистрация семьи (v3) и выбор ребёнка (v4)
 
@@ -581,7 +643,7 @@ Mini App tenant-aware: `_resolve_user` берёт роль, `family_id`, `active
 отдаёт `children` и `active_child_id`; `GET /api/children` — список детей семьи;
 `PUT /api/active-child` (`{child_id}`, только родитель) меняет активного ребёнка.
 Все data-эндпоинты (`/api/status`, `/api/history`, `/api/chart`, `/api/stats`,
-`/api/settings`, `/api/export/*`, `/api/backup`) scoped по
+`/api/settings`, `/api/export/*`, `/api/backup`, `/api/gamification`) scoped по
 `(family_id, active_child_id)`; бэкап — `backup_family_db` (данные одной семьи).
 В шапке Mini App при >1 ребёнке показывается селектор (`<select>`), при 0 детей —
 подсказка «Добавьте ребёнка в боте»; уведомления уходят родителям семьи.
@@ -591,6 +653,11 @@ PDF-отчёт врачу (SP4A): `GET /api/report/pdf?period=week|month|quarter
 Неизвестный период → 422, нет активного ребёнка → 404, нет записей за период → 404,
 ошибка генерации → 500. Данные scoped по `(family_id, active_child_id)`; в табе
 «⚙️ Настройки» Mini App — карточка с тремя кнопками периодов («📄 Отчёт врачу»).
+
+Геймификация (SP4B): `GET /api/gamification` (любая роль) отдаёт
+`streak_current`, `streak_longest`, `total` и `achievements`
+(`[{code, emoji, title, unlocked, unlocked_at}]`); нет активного ребёнка → 404.
+В табе статистики Mini App — карточка «🔥 Серия» и сетка бейджей.
 
 ### Настройка
 
@@ -609,7 +676,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 480 passed
+# 519 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
