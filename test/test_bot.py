@@ -4441,6 +4441,121 @@ class TestChildNameLookup:
         assert bot._user_display_name(700, member, "Маша") == "Маша"
 
 
+class TestAuthorFromMembers:
+    """SP3D Task 2: author role/name come from `members`; env only when no member."""
+
+    @staticmethod
+    def _m(added_by):
+        return {"pef_value": 240, "time_of_day": "morning",
+                "measured_at": "2026-08-05 08:00:00", "added_by": added_by,
+                "note": None, "source": "manual"}
+
+    def test_history_line_marks_db_parent(self):
+        from bot import _history_line
+        line = _history_line(
+            self._m(500), 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={500: "parent"})
+        assert "👨" in line
+
+    def test_history_line_marks_db_child(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: True)  # env says parent
+        line = bot._history_line(
+            self._m(700), 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={700: "child"})
+        assert "👶" in line
+
+    def test_history_line_env_fallback_without_member(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: uid == 222)
+        assert "👨" in bot._history_line(self._m(222), 260)
+        assert "👶" in bot._history_line(self._m(500), 260)
+
+    def test_history_line_member_context_ignores_env(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: True)
+        line = bot._history_line(
+            self._m(500), 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={})
+        assert "👶" in line
+
+    def test_format_history_lines_threads_roles(self):
+        from bot import _format_history_lines
+        lines = _format_history_lines(
+            [self._m(500), self._m(700)], 260,
+            member={"role": "parent", "family_id": 2, "telegram_id": 999},
+            author_roles={500: "parent", 700: "child"})
+        assert "👨" in lines[0] and "👶" in lines[1]
+
+    def test_user_display_name_uses_member_name(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: False)
+        members_map = {500: {"role": "parent", "name": "Олег"}}
+        assert bot._user_display_name(500, members_map=members_map) == "Олег"
+
+    def test_user_display_name_unknown_member_does_not_use_env(self, monkeypatch):
+        import bot
+        monkeypatch.setattr(bot, "is_parent", lambda uid: True)
+        members_map = {500: {"role": "parent", "name": "Олег"}}
+        assert bot._user_display_name(999, members_map=members_map) == "Кто-то"
+
+    def test_user_display_name_without_context_falls_back_env(self, monkeypatch):
+        import bot
+        from config import CHILD_ID
+        monkeypatch.setattr(bot, "CHILD_NAME", "Motya")
+        assert bot._user_display_name(CHILD_ID) == "Motya"
+
+    def test_csv_export_uses_member_names(self, monkeypatch):
+        import bot
+        from database import add_member, add_measurement, create_family, get_all_measurements
+        monkeypatch.setattr(bot, "CHILD_NAME", "EnvChild")
+        f2 = create_family(TEST_DB, "Вторая")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_member(TEST_DB, 500, f2, "parent", "Олег")
+        add_measurement(TEST_DB, 250, "morning", 700, 500, family_id=f2)
+        rows = get_all_measurements(TEST_DB, 700, family_id=f2)
+        content = bot.build_csv_content(
+            rows, target=260, include_summary=False,
+            child_id=700, child_name="Маша", family_id=f2)
+        assert "Олег" in content
+        assert "EnvChild" not in content
+
+    def test_show_history_family2_marks_parent_author(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from database import add_member, create_family
+        f2 = create_family(TEST_DB, "Вторая")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_member(TEST_DB, 500, f2, "parent", "Олег")
+        row = {"id": 1, "pef_value": 240, "time_of_day": "morning",
+               "measured_at": "2026-09-01 08:00:00", "added_by": 500,
+               "note": None, "source": "manual"}
+        cb = MagicMock()
+        cb.from_user.id = 500
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.delete = AsyncMock()
+        cb.message.answer = AsyncMock()
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        member = {"telegram_id": 500, "family_id": f2, "role": "parent",
+                  "name": "Олег", "active_child_id": 700}
+        with patch.object(bot, "get_measurements_paginated",
+                          return_value=([row], 1, 1)), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "respond", side_effect=fake_respond):
+            asyncio.run(bot._show_history(cb, page=1, member=member))
+
+        assert "👨" in sent.get("text", "")
+
+
 class TestChildSelector:
     """SP3C Task 6: parents pick the active child when the family has >1."""
 

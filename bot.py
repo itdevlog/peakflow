@@ -256,6 +256,20 @@ async def _family_parents(member, family_id) -> list:
     return [p["telegram_id"] for p in await _db(list_family_parents, DB_PATH, family_id)]
 
 
+def _family_members_map(family_id: int) -> dict:
+    """``{telegram_id: {"role", "name"}}`` for a family, one render's lookup.
+
+    The map is the source of truth for author roles/names (SP3D); ``.env`` is
+    only consulted by callers when no member context exists (family #1 seed).
+    """
+    members = (list_family_parents(DB_PATH, family_id)
+               + list_family_children(DB_PATH, family_id))
+    return {
+        m["telegram_id"]: {"role": m["role"], "name": m.get("name") or ""}
+        for m in members
+    }
+
+
 async def _no_child_reply(target, member):
     """Подсказка «добавьте ребёнка», когда у семьи нет детей-участников."""
     text = (
@@ -1014,18 +1028,32 @@ async def cb_history_page(callback: types.CallbackQuery, state: FSMContext, memb
     await _show_history(callback, page=page, member=member)
 
 
-def _history_line(m: dict, target: int) -> str:
-    """One history row: emoji, timestamp, value, zone, author, auto/note marks."""
+def _history_line(m: dict, target: int, member=None, author_roles=None) -> str:
+    """One history row: emoji, timestamp, value, zone, author, auto/note marks.
+
+    ``author_roles`` maps ``telegram_id -> role`` for the rendered family; when
+    given it is authoritative. ``member=None`` keeps the legacy .env fallback
+    for family #1; a real member context never consults .env.
+    """
     zone, _ = pef_zone(m["pef_value"], target)
     ts = m["measured_at"][5:16].replace("T", " ")
-    who = "👨‍👧" if is_parent(m.get("added_by", 0)) else "👶"
+    who_id = m.get("added_by", 0)
+    if author_roles is not None:
+        role = author_roles.get(who_id)
+    elif member is None:
+        role = "parent" if is_parent(who_id) else "child"
+    else:
+        role = None
+    who = "👨‍👧" if role == "parent" else "👶"
     auto = " 🤖" if m.get("source") == "auto" else ""
     note = f" ℹ️ {escape_md(m['note'])}" if m.get("note") else ""
     return f"{tod_emoji(m['time_of_day'])} {ts} → *{m['pef_value']}* {zone} {who}{auto}{note}"
 
 
-def _format_history_lines(measurements: list, target: int) -> list:
-    return [_history_line(m, target) for m in measurements]
+def _format_history_lines(measurements: list, target: int, member=None,
+                          author_roles=None) -> list:
+    return [_history_line(m, target, member=member, author_roles=author_roles)
+            for m in measurements]
 
 
 async def _show_history(callback: types.CallbackQuery, page: int = 1, member=None):
@@ -1051,7 +1079,12 @@ async def _show_history(callback: types.CallbackQuery, page: int = 1, member=Non
         await respond(callback, "📭 Нет измерений.", kb=kb_back())
         return
 
-    lines = _format_history_lines(measurements, target)
+    author_roles = None
+    if member is not None:
+        members_map = await _db(_family_members_map, family_id)
+        author_roles = {tid: info["role"] for tid, info in members_map.items()}
+    lines = _format_history_lines(measurements, target, member=member,
+                                  author_roles=author_roles)
     kb = kb_pagination(page, total_pages, is_p, measurements)
     name = await _child_name(member, child_id)
 
@@ -1366,10 +1399,14 @@ def build_csv_content(rows, target, include_summary=True, child_id=None,
     label = child_name or (CHILD_NAME if child_id is None else "Ребёнок")
     stats = get_stats(DB_PATH, cid, family_id=family_id) if include_summary else None
 
+    # SP3D: for a real family resolve authors from `members`; family #1 keeps
+    # the legacy .env-based labels exactly.
+    members_map = _family_members_map(family_id) if family_id != DEFAULT_FAMILY_ID else None
+
     def _display_name(uid):
         if uid == cid:
             return label
-        return _user_display_name(uid, None)
+        return _user_display_name(uid, None, None, members_map)
 
     return _report_build_csv(rows, target, label, stats=stats,
                              include_summary=include_summary,
@@ -2117,12 +2154,22 @@ async def catch_all(message: types.Message, state: FSMContext, member=None):
 _scheduler_task = None
 
 
-def _user_display_name(user_id: int, member=None, child_name=None) -> str:
+def _user_display_name(user_id: int, member=None, child_name=None,
+                       members_map=None) -> str:
     """Display label for an author (CSV/plain contexts — stays unescaped).
 
-    A known member without an explicit child name falls back to a generic
-    label instead of leaking family #1's env ``CHILD_NAME``.
+    ``members_map`` (``{telegram_id: {"role", "name"}}``) is authoritative when
+    supplied: names come from the DB and .env is never consulted. A known
+    member without an explicit child name still falls back to a generic label
+    instead of leaking family #1's env ``CHILD_NAME``.
     """
+    if members_map is not None:
+        info = members_map.get(user_id)
+        if info is None:
+            return "Кто-то"
+        if info.get("role") == "child":
+            return child_name or info.get("name") or "Ребёнок"
+        return info.get("name") or "Родитель"
     role = _role(member, user_id)
     if role == "child":
         if child_name:
