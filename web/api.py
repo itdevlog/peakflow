@@ -27,6 +27,9 @@ from database import (
     get_measurements_for_month,
     get_measurements_paginated,
     get_previous_of_tod,
+    get_measurement_dates,
+    count_measurements,
+    get_achievements,
     get_reminder_hours,
     get_stats,
     get_today_measurements,
@@ -40,6 +43,7 @@ from database import (
     set_setting,
     validate_reminder_hours,
 )
+import gamification
 import report_pdf
 from report import build_csv_content as _build_csv, parse_month
 from web.auth import get_user_from_init_data
@@ -335,6 +339,31 @@ def create_app(services: dict) -> FastAPI:
         data = await _db(get_stats, config.DB_PATH, auth["active_child_id"], auth["family_id"])
         data["target_pef"] = await _db(_effective_target, config, auth["family_id"])
         return data
+
+    @app.get("/api/gamification")
+    async def gamification_endpoint(auth: dict = Depends(require_user)):
+        child_id = auth["active_child_id"]
+        if child_id is None:
+            raise HTTPException(404, "Нет активного ребёнка")
+        dates = await _db(get_measurement_dates, config.DB_PATH, child_id,
+                          auth["family_id"])
+        total = await _db(count_measurements, config.DB_PATH, child_id,
+                          auth["family_id"])
+        longest = gamification.longest_streak(dates)
+        today = datetime.now(
+            timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))
+        ).date()
+        current = gamification.current_streak(dates, today)
+        earned = gamification.evaluate(longest, total)
+        unlocked = await _db(get_achievements, config.DB_PATH, child_id)
+        achievements = [
+            {"code": a["code"], "emoji": a["emoji"], "title": a["title"],
+             "unlocked": a["code"] in earned,
+             "unlocked_at": unlocked.get(a["code"])}
+            for a in gamification.ACHIEVEMENTS
+        ]
+        return {"streak_current": current, "streak_longest": longest,
+                "total": total, "achievements": achievements}
 
     @app.post("/api/measurements")
     async def add(background: BackgroundTasks, body: MeasurementIn, force: bool = False,
