@@ -52,9 +52,9 @@ compute_stats(rows: list[dict], target: int,
               zone_green: int = 80, zone_yellow: int = 60) -> dict
 build_pdf(rows: list[dict], *, target: int, child_name: str,
           period_label: str, zone_green: int = 80, zone_yellow: int = 60) -> bytes
-render_png(rows: list[dict], target: int, title: str,
-           zone_green: int = 80, zone_yellow: int = 60) -> bytes
-draw_chart(ax, rows, target, zone_green, zone_yellow, text_labels: bool = False) -> None
+RENDER_LOCK: threading.Lock
+draw_chart(ax, rows, target, zone_green, zone_yellow,
+           title: str | None = None, text_labels: bool = False) -> None
 ```
 
 - `compute_stats` возвращает `{"total", "avg", "min", "max", "morning_avg",
@@ -65,21 +65,24 @@ draw_chart(ax, rows, target, zone_green, zone_yellow, text_labels: bool = False)
 ### Потокобезопасность
 
 matplotlib не потокобезопасен, а бот и веб рендерят в `asyncio.to_thread` параллельно.
-Модульный `threading.Lock` (`_RENDER_LOCK`) сериализует **весь** рендер:
-`render_png` и `build_pdf` берут его один раз; `draw_chart` — низкоуровневая функция без
-захвата лока (её зовут только изнутри уже залоченного кода), реентерабельного deadlock нет.
+Модульный `threading.Lock` (`report_pdf.RENDER_LOCK`) сериализует **весь** рендер:
+`build_pdf` берёт его один раз, `bot._render_chart_png` — тоже; `draw_chart` —
+низкоуровневая функция без захвата лока (её зовут только изнутри уже залоченного кода),
+реентерабельного deadlock нет.
 
 ### Рефактор графика
 
-Отрисовка графика переезжает из `bot._render_chart_png` в `report_pdf.draw_chart` с
-флагом `text_labels`:
-- бот (`render_png`) → `text_labels=False`, метки emoji сохраняются (поведение PNG
-  неизменно, существующие тесты проходят);
+Тело отрисовки графика переезжает из `bot._render_chart_png` в
+`report_pdf.draw_chart` с флагом `text_labels`:
+- бот → `text_labels=False`, метки emoji сохраняются (поведение PNG неизменно);
 - PDF → `text_labels=True`, метки «Лучший/Худший» обычным текстом (emoji-глифы в PDF
   ненадёжны со шрифтами matplotlib).
 
-`bot._render_chart_png` становится тонкой обёрткой над `report_pdf.render_png`;
-`bot._render_chart_png_async` сохраняется.
+**Жизненный цикл фигуры PNG остаётся в `bot._render_chart_png`** (`plt.subplots` +
+`try/finally: plt.close(fig)`) — это сохраняет поведение и существующий регрессионный
+тест `test_render_chart_png_closes_figure_on_error`, который патчит `bot.plt`. Меняется
+только тело: вместо inline-plotting вызывается `report_pdf.draw_chart(ax, ...)` под
+`report_pdf.RENDER_LOCK`. `bot._render_chart_png_async` сохраняется.
 
 ---
 
