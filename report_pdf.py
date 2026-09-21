@@ -3,9 +3,12 @@
 Чистый модуль: stdlib + matplotlib. Не импортирует bot.py/database.py/aiogram.
 Разрешено использовать чистые хелперы из report.py.
 """
+import threading
 from datetime import date, timedelta
 
 from report import month_title, pef_zone
+
+RENDER_LOCK = threading.Lock()
 
 PERIODS = ("week", "month", "quarter")
 
@@ -76,3 +79,56 @@ def compute_stats(rows: list[dict], target: int, zone_green: int = 80,
         "evening_avg": sum(evening) / len(evening) if evening else None,
         "zones": zones,
     }
+
+
+def draw_chart(ax, rows, target, zone_green, zone_yellow,
+               title: str | None = None, text_labels: bool = False) -> None:
+    """Нарисовать график ПСВ на переданном ax (без создания/закрытия фигуры)."""
+    from datetime import datetime
+
+    import matplotlib.dates as mdates
+
+    dates = [datetime.strptime(r["measured_at"], "%Y-%m-%d %H:%M:%S") for r in rows]
+    values = [r["pef_value"] for r in rows]
+    morning_d = [dates[i] for i, r in enumerate(rows) if r["time_of_day"] == "morning"]
+    morning_v = [values[i] for i, r in enumerate(rows) if r["time_of_day"] == "morning"]
+    evening_d = [dates[i] for i, r in enumerate(rows) if r["time_of_day"] == "evening"]
+    evening_v = [values[i] for i, r in enumerate(rows) if r["time_of_day"] == "evening"]
+
+    ax.plot(dates, values, marker="o", linewidth=2, label="ПСВ",
+            color="#2196F3", markersize=4, zorder=3)
+    if morning_d:
+        ax.scatter(morning_d, morning_v, color="#FF9800", label="Утро",
+                   zorder=5, s=80, edgecolors="white", linewidth=1.5)
+    if evening_d:
+        ax.scatter(evening_d, evening_v, color="#9C27B0", label="Вечер",
+                   zorder=5, s=80, edgecolors="white", linewidth=1.5)
+
+    best_idx = values.index(max(values))
+    worst_idx = values.index(min(values))
+    if text_labels:
+        best_text, worst_text = f"Лучший {max(values)}", f"Худший {min(values)}"
+    else:
+        best_text, worst_text = f"🏆 {max(values)}", f"⚠️ {min(values)}"
+    ax.annotate(best_text, (dates[best_idx], values[best_idx]),
+                textcoords="offset points", xytext=(0, 12), ha="center",
+                fontsize=9, fontweight="bold", color="green")
+    ax.annotate(worst_text, (dates[worst_idx], values[worst_idx]),
+                textcoords="offset points", xytext=(0, -14), ha="center",
+                fontsize=9, fontweight="bold", color="red")
+
+    if target:
+        ax.axhline(y=target, color="green", linestyle="--",
+                   label=f"Норма ({target})", linewidth=1.5, zorder=2)
+        ax.axhline(y=int(target * zone_green / 100), color="orange",
+                   linestyle=":", alpha=0.5, linewidth=1)
+        ax.axhline(y=int(target * zone_yellow / 100), color="yellow",
+                   linestyle=":", alpha=0.5, linewidth=1)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.set_ylabel("ПСВ (л/мин)")
+    if title:
+        ax.set_title(f"Пикфлоуметрия — {title}")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)

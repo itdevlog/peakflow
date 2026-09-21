@@ -33,6 +33,7 @@ from report import (
     build_csv_content as _report_build_csv,
     pef_zone as _report_pef_zone,
 )
+import report_pdf
 from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
@@ -1811,52 +1812,16 @@ def next_month_str(year: int, month: int) -> str:
 
 def _render_chart_png(rows: list, target: int, title: str) -> bytes:
     """Render measurements to PNG bytes (matplotlib Agg, in-memory)."""
-    dates = [datetime.strptime(d["measured_at"], "%Y-%m-%d %H:%M:%S") for d in rows]
-    values = [d["pef_value"] for d in rows]
-
-    morning_d = [dates[i] for i, d in enumerate(rows) if d["time_of_day"] == "morning"]
-    morning_v = [values[i] for i, d in enumerate(rows) if d["time_of_day"] == "morning"]
-    evening_d = [dates[i] for i, d in enumerate(rows) if d["time_of_day"] == "evening"]
-    evening_v = [values[i] for i, d in enumerate(rows) if d["time_of_day"] == "evening"]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    try:
-        ax.plot(dates, values, marker="o", linewidth=2, label="ПСВ", color="#2196F3", markersize=4, zorder=3)
-
-        if morning_d:
-            ax.scatter(morning_d, morning_v, color="#FF9800", label="Утро", zorder=5, s=80, edgecolors="white", linewidth=1.5)
-        if evening_d:
-            ax.scatter(evening_d, evening_v, color="#9C27B0", label="Вечер", zorder=5, s=80, edgecolors="white", linewidth=1.5)
-
-        # Best / Worst
-        best_idx = values.index(max(values))
-        worst_idx = values.index(min(values))
-        ax.annotate(f"🏆 {max(values)}", (dates[best_idx], values[best_idx]),
-                    textcoords="offset points", xytext=(0, 12), ha="center",
-                    fontsize=9, fontweight="bold", color="green")
-        ax.annotate(f"⚠️ {min(values)}", (dates[worst_idx], values[worst_idx]),
-                    textcoords="offset points", xytext=(0, -14), ha="center",
-                    fontsize=9, fontweight="bold", color="red")
-
-        if target:
-            ax.axhline(y=target, color="green", linestyle="--", label=f"Норма ({target})", linewidth=1.5, zorder=2)
-            ax.axhline(y=int(target * ZONE_GREEN / 100), color="orange", linestyle=":", alpha=0.5, linewidth=1)
-            ax.axhline(y=int(target * ZONE_YELLOW / 100), color="yellow", linestyle=":", alpha=0.5, linewidth=1)
-
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        ax.set_ylabel("ПСВ (л/мин)")
-        ax.set_title(f"Пикфлоуметрия — {title}")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        fig.autofmt_xdate()
-        plt.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=120)
-    finally:
-        # Always release the figure, even if rendering raised.
-        plt.close(fig)
+    with report_pdf.RENDER_LOCK:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        try:
+            report_pdf.draw_chart(ax, rows, target, ZONE_GREEN, ZONE_YELLOW, title=title)
+            fig.autofmt_xdate()
+            plt.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=120)
+        finally:
+            plt.close(fig)
     return buf.getvalue()
 
 

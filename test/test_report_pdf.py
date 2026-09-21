@@ -90,3 +90,38 @@ class TestComputeStats:
         assert s["morning_avg"] is None
         assert s["evening_avg"] is None
         assert s["zones"] == {"green": 0, "yellow": 0, "red": 0}
+
+
+class TestDrawChart:
+    def _rows(self):
+        return [
+            {"pef_value": 240, "time_of_day": "morning", "measured_at": "2026-09-01 08:00:00"},
+            {"pef_value": 260, "time_of_day": "evening", "measured_at": "2026-09-02 20:00:00"},
+        ]
+
+    def test_emoji_labels_by_default(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        from report_pdf import draw_chart
+        fig, ax = plt.subplots()
+        try:
+            draw_chart(ax, self._rows(), 260, 80, 60, title="T")
+            texts = [t.get_text() for t in ax.texts]
+        finally:
+            plt.close(fig)
+        assert any("🏆" in t for t in texts)
+
+    def test_text_labels_for_pdf(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        from report_pdf import draw_chart
+        fig, ax = plt.subplots()
+        try:
+            draw_chart(ax, self._rows(), 260, 80, 60, text_labels=True)
+            texts = [t.get_text() for t in ax.texts]
+        finally:
+            plt.close(fig)
+        assert texts and all("🏆" not in t and "⚠" not in t for t in texts)
+        assert any("Лучший" in t for t in texts)
