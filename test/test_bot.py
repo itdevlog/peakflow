@@ -4979,6 +4979,18 @@ class TestReportPdf:
                                               "family_id": 1}))
         cb.answer.assert_awaited()
 
+    def test_cb_report_period_parent_only(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock(); cb.from_user.id = 700; cb.data = "report_month"
+        cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer_document = AsyncMock()
+        asyncio.run(bot.cb_report_period(cb, member={"role": "child", "telegram_id": 700,
+                                                     "family_id": 1}))
+        cb.answer.assert_awaited()
+        cb.message.answer_document.assert_not_awaited()
+
     def test_cb_report_period_sends_pdf(self):
         import asyncio
         import bot
