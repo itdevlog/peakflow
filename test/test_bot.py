@@ -5006,7 +5006,7 @@ class TestReportPdf:
         cb.message = MagicMock(); cb.message.answer_document = AsyncMock()
         cb.message.delete = AsyncMock()
         member = {"role": "parent", "telegram_id": 500, "family_id": 1}
-        with patch.object(bot, "get_measurements_between", return_value=[{"pef_value": 250}]), \
+        with patch.object(bot, "get_measurements_between", return_value=[{"pef_value": 250}]) as between, \
              patch.object(bot, "resolve_active_child", return_value=111), \
              patch.object(bot, "get_effective_target", return_value=260), \
              patch.object(bot, "get_member", return_value={"name": "Motya"}), \
@@ -5014,6 +5014,9 @@ class TestReportPdf:
                           new=AsyncMock(return_value=b"%PDF-1.4")):
             asyncio.run(bot.cb_report_period(cb, member=member))
         cb.message.answer_document.assert_awaited()
+        args, kwargs = between.call_args
+        assert 111 in args, "report must query the active child"
+        assert kwargs.get("family_id") == 1, "report must be scoped to the family"
 
     def test_cb_report_period_empty_alerts(self):
         import asyncio

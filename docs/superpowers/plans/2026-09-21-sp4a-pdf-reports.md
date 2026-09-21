@@ -338,7 +338,7 @@ class TestDrawChart:
         assert any("Лучший" in t for t in texts)
 ```
 
-Also add one regression test to `test/test_bot.py::TestReportPdf` (created in Task 5) — skip; existing `test_render_chart_png` and `test_render_chart_png_closes_figure_on_error` already cover the refactor.
+Also add one regression test to `test/test_bot.py::TestReportPdf` (created in Task 5) — skip; existing `test_render_chart_png` and `test_figure_closed_on_render_error` already cover the refactor.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -438,7 +438,7 @@ def _render_chart_png(rows: list, target: int, title: str) -> bytes:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest test/test_report_pdf.py test/test_bot.py -q`
-Expected: PASS, включая `test_render_chart_png` и `test_render_chart_png_closes_figure_on_error`.
+Expected: PASS, включая `test_render_chart_png` и `test_figure_closed_on_render_error`.
 
 - [ ] **Step 5: Commit**
 
@@ -776,7 +776,7 @@ async def cb_report_period(callback: types.CallbackQuery, member=None):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python -m pytest test/test_bot.py::TestReportPdf test/test_bot.py::TestChart -q`
+Run: `python -m pytest test/test_bot.py::TestReportPdf test/test_bot.py -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**

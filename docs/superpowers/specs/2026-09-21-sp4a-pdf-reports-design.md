@@ -80,7 +80,7 @@ matplotlib не потокобезопасен, а бот и веб рендер
 
 **Жизненный цикл фигуры PNG остаётся в `bot._render_chart_png`** (`plt.subplots` +
 `try/finally: plt.close(fig)`) — это сохраняет поведение и существующий регрессионный
-тест `test_render_chart_png_closes_figure_on_error`, который патчит `bot.plt`. Меняется
+тест `test_figure_closed_on_render_error`, который патчит `bot.plt`. Меняется
 только тело: вместо inline-plotting вызывается `report_pdf.draw_chart(ax, ...)` под
 `report_pdf.RENDER_LOCK`. `bot._render_chart_png_async` сохраняется.
 

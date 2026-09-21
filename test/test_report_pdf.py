@@ -150,9 +150,23 @@ class TestBuildPdf:
         from report_pdf import build_pdf
         data = build_pdf(self._rows(80), target=260, child_name="M", period_label="P")
         assert data[:5] == b"%PDF-"
-        assert data.count(b"/Type /Page") >= 3
+        pages = data.count(b"/Type /Page") - data.count(b"/Type /Pages")
+        assert pages >= 4, f"80 rows should span header + 3 table pages, got {pages}"
 
     def test_empty_rows(self):
         from report_pdf import build_pdf
         data = build_pdf([], target=260, child_name="M", period_label="P")
         assert data[:5] == b"%PDF-"
+
+    def test_closes_figure_on_render_error(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        from unittest.mock import patch
+        import report_pdf
+        before = len(plt.get_fignums())
+        with patch.object(report_pdf, "draw_chart", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                report_pdf.build_pdf(self._rows(), target=260, child_name="M",
+                                     period_label="P")
+        assert len(plt.get_fignums()) == before

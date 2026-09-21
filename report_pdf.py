@@ -153,33 +153,37 @@ def _header_page(rows, target, child_name, period_label, stats, zone_green, zone
     from matplotlib import pyplot as plt
 
     fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait, inches
-    fig.text(0.5, 0.955, "Отчёт по пикфлоуметрии", ha="center",
-             fontsize=16, fontweight="bold")
-    fig.text(0.07, 0.915, f"Ребёнок: {child_name}", fontsize=11)
-    fig.text(0.07, 0.888, f"Период: {period_label}", fontsize=11)
-    fig.text(0.07, 0.861, f"Целевая ПСВ: {target} л/мин", fontsize=11)
-    fig.text(0.93, 0.915, f"Сформирован: {datetime.now():%d.%m.%Y}",
-             ha="right", fontsize=9)
+    try:
+        fig.text(0.5, 0.955, "Отчёт по пикфлоуметрии", ha="center",
+                 fontsize=16, fontweight="bold")
+        fig.text(0.07, 0.915, f"Ребёнок: {child_name}", fontsize=11)
+        fig.text(0.07, 0.888, f"Период: {period_label}", fontsize=11)
+        fig.text(0.07, 0.861, f"Целевая ПСВ: {target} л/мин", fontsize=11)
+        fig.text(0.93, 0.915, f"Сформирован: {datetime.now():%d.%m.%Y}",
+                 ha="right", fontsize=9)
 
-    ax = fig.add_axes([0.09, 0.55, 0.84, 0.27])
-    if rows:
-        draw_chart(ax, rows, target, zone_green, zone_yellow, text_labels=True)
-    else:
-        ax.axis("off")
-        ax.text(0.5, 0.5, "Нет данных за период", ha="center", va="center", fontsize=12)
+        ax = fig.add_axes([0.09, 0.55, 0.84, 0.27])
+        if rows:
+            draw_chart(ax, rows, target, zone_green, zone_yellow, text_labels=True)
+        else:
+            ax.axis("off")
+            ax.text(0.5, 0.5, "Нет данных за период", ha="center", va="center", fontsize=12)
 
-    fig.text(0.07, 0.49, "Статистика за период", fontsize=12, fontweight="bold")
-    lines = [
-        f"Всего замеров: {stats['total']}",
-        f"Среднее: {stats['avg']:.0f} л/мин",
-        f"Минимум: {stats['min']} л/мин    Максимум: {stats['max']} л/мин",
-        _avg_line("Утро", stats["morning_avg"]),
-        _avg_line("Вечер", stats["evening_avg"]),
-        (f"Зоны: зелёная — {stats['zones']['green']}, "
-         f"жёлтая — {stats['zones']['yellow']}, красная — {stats['zones']['red']}"),
-    ]
-    for i, line in enumerate(lines):
-        fig.text(0.07, 0.455 - i * 0.022, line, fontsize=10)
+        fig.text(0.07, 0.49, "Статистика за период", fontsize=12, fontweight="bold")
+        lines = [
+            f"Всего замеров: {stats['total']}",
+            f"Среднее: {stats['avg']:.0f} л/мин",
+            f"Минимум: {stats['min']} л/мин    Максимум: {stats['max']} л/мин",
+            _avg_line("Утро", stats["morning_avg"]),
+            _avg_line("Вечер", stats["evening_avg"]),
+            (f"Зоны: зелёная — {stats['zones']['green']}, "
+             f"жёлтая — {stats['zones']['yellow']}, красная — {stats['zones']['red']}"),
+        ]
+        for i, line in enumerate(lines):
+            fig.text(0.07, 0.455 - i * 0.022, line, fontsize=10)
+    except Exception:
+        plt.close(fig)
+        raise
     return fig
 
 
@@ -187,22 +191,26 @@ def _table_page(rows, target, zone_green, zone_yellow):
     from matplotlib import pyplot as plt
 
     fig = plt.figure(figsize=(8.27, 11.69))
-    ax = fig.add_axes([0.05, 0.05, 0.90, 0.90])
-    ax.axis("off")
-    cell = []
-    for r in rows:
-        ts = r["measured_at"].replace("T", " ")
-        zone = pef_zone(r["pef_value"], target, zone_green, zone_yellow)[1]
-        cell.append([
-            ts[:10], ts[11:16], tod_label(r["time_of_day"]),
-            str(r["pef_value"]), f"{pct_of(r['pef_value'], target)}%",
-            zone, (r.get("note") or "—"),
-        ])
-    table = ax.table(cellText=cell, colLabels=_TABLE_HEADERS,
-                     loc="upper center", cellLoc="left")
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1, 1.4)
+    try:
+        ax = fig.add_axes([0.05, 0.05, 0.90, 0.90])
+        ax.axis("off")
+        cell = []
+        for r in rows:
+            ts = r["measured_at"].replace("T", " ")
+            zone = pef_zone(r["pef_value"], target, zone_green, zone_yellow)[1]
+            cell.append([
+                ts[:10], ts[11:16], tod_label(r["time_of_day"]),
+                str(r["pef_value"]), f"{pct_of(r['pef_value'], target)}%",
+                zone, (r.get("note") or "—"),
+            ])
+        table = ax.table(cellText=cell, colLabels=_TABLE_HEADERS,
+                         loc="upper center", cellLoc="left")
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.4)
+    except Exception:
+        plt.close(fig)
+        raise
     return fig
 
 
