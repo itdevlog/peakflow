@@ -37,6 +37,13 @@ def setup_db():
                 pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_metrics():
+    import metrics
+    metrics.reset()
+    yield
+
+
 class TestDatabase:
     def test_add_and_get_last(self):
         from database import add_measurement, get_last_measurement

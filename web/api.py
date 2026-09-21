@@ -1,5 +1,6 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -178,7 +179,14 @@ def create_app(services: dict) -> FastAPI:
     @app.middleware("http")
     async def _metrics_middleware(request: Request, call_next):
         start = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = (time.perf_counter() - start) * 1000
+            metrics.inc("http_requests_total", method=request.method, status="500")
+            logger.warning("http method=%s path=%s status=500 duration_ms=%.1f",
+                           request.method, request.url.path, duration_ms)
+            raise
         duration_ms = (time.perf_counter() - start) * 1000
         metrics.inc("http_requests_total", method=request.method,
                     status=str(response.status_code))
@@ -282,8 +290,10 @@ def create_app(services: dict) -> FastAPI:
         if not getattr(config, "METRICS_ENABLED", False):
             raise HTTPException(404, "Not found")
         token = getattr(config, "METRICS_TOKEN", "") or ""
-        if token and request.headers.get("Authorization", "") != f"Bearer {token}":
-            raise HTTPException(401, "Unauthorized")
+        if token:
+            provided = request.headers.get("Authorization", "")
+            if not hmac.compare_digest(provided, f"Bearer {token}"):
+                raise HTTPException(401, "Unauthorized")
         try:
             counts = await _db(get_system_counts, config.DB_PATH)
             metrics.set_gauge("families_count", counts["families"])

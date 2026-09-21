@@ -635,3 +635,25 @@ class TestMetrics:
         _client().get("/healthz")
         assert metrics.get_counter("http_requests_total", method="GET", status="200") >= 1
 
+    def test_middleware_counts_unhandled_500(self):
+        import metrics
+        from unittest.mock import patch
+        metrics.reset()
+        _setup_db()
+        c = TestClient(create_app({"config": _config()}), raise_server_exceptions=False)
+        with patch("web.api.get_stats", side_effect=RuntimeError("boom")):
+            r = c.get("/api/stats", headers=_auth(222))
+        assert r.status_code == 500
+        assert metrics.get_counter("http_requests_total", method="GET", status="500") >= 1
+
+    def test_healthz_db_failure_nulls(self, tmp_path):
+        cfg = _config()
+        cfg.DB_PATH = str(tmp_path / "nodir" / "x.db")
+        r = _client(cfg).get("/healthz")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["families"] is None
+        assert body["children"] is None
+        assert body["measurements"] is None
+

@@ -99,7 +99,7 @@ peakflow/
 | `WEBAPP_PORT` | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
 | `WEBAPP_URL` | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
 | `METRICS_ENABLED` | ❌ | `0` | `1` — включает `GET /metrics`; иначе эндпоинт отдаёт 404 |
-| `METRICS_TOKEN` | ❌ | — | Bearer-токен для `/metrics`; пусто — без авторизации |
+| `METRICS_TOKEN` | ❌ | — | Bearer-токен для `/metrics`; рекомендуется при публичном `WEBAPP_URL` (Caddy проксирует все пути); пусто — без авторизации |
 
 ### Константы `config.py`
 
