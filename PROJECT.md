@@ -53,8 +53,9 @@ peakflow/
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
 ├── report_pdf.py       # PDF-отчёты врачу: периоды, статистика, график, A4-вёрстка (SP4A)
 ├── gamification.py     # Геймификация: серия дней и достижения, чистые расчёты (SP4B)
+├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (519)
+├── test/               # Pytest тесты (546)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -224,6 +225,8 @@ DB_PATH=peakflow.db
 | `WEBAPP_HOST` | string | ❌ | `127.0.0.1` | Адрес прослушивания веб-сервера Mini App (только через reverse proxy) |
 | `WEBAPP_PORT` | int | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
 | `WEBAPP_URL` | string | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
+| `METRICS_ENABLED` | bool | ❌ | `0` | `1` — включает `GET /metrics` (иначе 404) |
+| `METRICS_TOKEN` | string | ❌ | — | Bearer-токен для `/metrics`; пусто — эндпоинт без авторизации |
 
 ### Константы в `config.py`
 
@@ -518,6 +521,43 @@ def main():
 
 ---
 
+## Модуль `metrics.py` (SP4D)
+
+Чистый потокобезопасный модуль (только stdlib), не импортирует
+`bot.py`/`database.py`/aiogram. Держит счётчики и гейджи **в памяти процесса**;
+при рестарте обнуляются (без persistence). Имена/метки валидируются, значения
+Prometheus-меток экранируются.
+
+| Функция | Параметры | Возвращает | Описание |
+|---------|-----------|-----------|----------|
+| `inc(name, value=1, **labels)` | `str, int, **str` | — | Инкремент счётчика (тип закрепляется при регистрации; конфликт типа → `ValueError`) |
+| `set_gauge(name, value, **labels)` | `str, int/float, **str` | — | Установить значение гейджа |
+| `get_counter(name, **labels)` | `str, **str` | `int` | Текущее значение счётчика (0, если нет) |
+| `get_gauge(name, **labels)` | `str, **str` | `float \| None` | Значение гейджа |
+| `uptime_seconds()` | — | `float` | Секунды с импорта модуля |
+| `snapshot()` | — | `list[dict]` | Все ряды `{name, type, labels, value}` (для тестов) |
+| `render_prometheus()` | — | `str` | Prometheus text (`# TYPE …` + `name{labels} value`); пусто — `""` |
+| `reset()` | — | — | Очистить реестр (используется тестами) |
+
+Зарегистрированные метрики: `http_requests_total{method,status}`,
+`http_last_duration_ms`, `families_count`, `children_count`,
+`measurements_count`, `process_uptime_seconds`, `scheduler_ticks_total`,
+`scheduler_last_tick_timestamp`, `measurements_saved_total`,
+`achievement_notifications_total`, `reminders_sent_total{kind}`.
+
+### Точки сбора
+
+| Место | Метрика |
+|-------|---------|
+| HTTP-middleware (`web/api.py`) | `http_requests_total{method,status}`, `http_last_duration_ms` |
+| Сохранение замера (`bot.input_pef`) | `measurements_saved_total` |
+| Разблокировка достижений (`_evaluate_and_notify`) | `achievement_notifications_total` |
+| Планировщик, за тик (`scheduler_loop`) | `scheduler_ticks_total`, `scheduler_last_tick_timestamp` |
+| Напоминания | `reminders_sent_total{kind=child\|escalation\|weekly}` |
+| `/metrics` при сборе | `families_count`, `children_count`, `measurements_count`, `process_uptime_seconds` |
+
+---
+
 ## Сценарии использования
 
 ### Ребёнок: добавление замера
@@ -659,6 +699,14 @@ PDF-отчёт врачу (SP4A): `GET /api/report/pdf?period=week|month|quarter
 (`[{code, emoji, title, unlocked, unlocked_at}]`); нет активного ребёнка → 404.
 В табе статистики Mini App — карточка «🔥 Серия» и сетка бейджей.
 
+Метрики (SP4D): `GET /healthz` отдаёт `status`, `uptime_seconds`,
+`last_scheduler_tick` и счётчики БД `families`/`children`/`measurements`; при
+`state.bot_ok == False` — по-прежнему 503 `{"status": "bot down"}`.
+`GET /metrics` (Prometheus text) включается `METRICS_ENABLED=1`; при заданном
+`METRICS_TOKEN` требует заголовок `Authorization: Bearer <token>` (иначе 401),
+при выключенном — 404. HTTP-middleware считает каждый запрос
+(`http_requests_total`, `http_last_duration_ms`) и пишет текстовый access-лог.
+
 ### Настройка
 
 ```bash
@@ -676,7 +724,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 519 passed
+# 546 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
