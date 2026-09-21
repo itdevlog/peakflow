@@ -5256,5 +5256,28 @@ class TestAchievements:
         ev.assert_awaited_once()
 
 
+class TestSystemCounts:
+    def test_counts(self):
+        from database import (init_db, create_family_with_owner, add_member,
+                              add_measurement, get_system_counts)
+        init_db(TEST_DB)
+        before = get_system_counts(TEST_DB)
+        add_measurement(TEST_DB, 250, "morning", 111, 222, family_id=1)
+        add_measurement(TEST_DB, 260, "evening", 111, 222, family_id=1)
+        f2 = create_family_with_owner(TEST_DB, 500, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        counts = get_system_counts(TEST_DB)
+        assert counts["families"] == before["families"] + 1
+        assert counts["children"] == before["children"] + 1
+        assert counts["measurements"] == before["measurements"] + 2
+
+    def test_empty_db(self):
+        from database import init_db, get_system_counts
+        init_db(TEST_DB)
+        counts = get_system_counts(TEST_DB)
+        assert counts["measurements"] == 0
+        assert set(counts) == {"families", "children", "measurements"}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
