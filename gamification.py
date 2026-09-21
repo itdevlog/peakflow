@@ -2,7 +2,7 @@
 
 Чистый модуль: только stdlib. Не импортирует bot.py/database.py/aiogram.
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 ACHIEVEMENTS = [
     {"code": "streak_7",   "emoji": "🔥", "title": "7 дней подряд",   "kind": "streak", "threshold": 7},
@@ -19,7 +19,15 @@ _BY_CODE = {a["code"]: a for a in ACHIEVEMENTS}
 def _to_dates(dates) -> set:
     out = set()
     for d in dates or []:
-        out.add(d if isinstance(d, date) else date.fromisoformat(str(d)[:10]))
+        if isinstance(d, datetime):
+            out.add(d.date())
+        elif isinstance(d, date):
+            out.add(d)
+        else:
+            try:
+                out.add(date.fromisoformat(str(d)[:10]))
+            except (ValueError, TypeError):
+                continue
     return out
 
 

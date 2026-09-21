@@ -850,7 +850,10 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
             except Exception:
                 pass
 
-    await _evaluate_and_notify(child_id, family_id, who, member)
+    try:
+        await _evaluate_and_notify(child_id, family_id, who, member)
+    except Exception as e:
+        logger.error("Оценка достижений не удалась: %s", e)
 
     await state.update_data(note_for_id=mid)
     await state.set_state(Measurement.waiting_note)

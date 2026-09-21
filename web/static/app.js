@@ -154,7 +154,8 @@ async function deleteMeasurement(mid) {
 
 async function loadStats() {
   const s = await api("/api/stats");
-  const g = await api("/api/gamification");
+  let g = { streak_current: 0, streak_longest: 0, achievements: [] };
+  try { g = await api("/api/gamification"); } catch (e) { /* нет активного ребёнка */ }
   state.target = s.target_pef || state.target;
   const el = $("screen-stats");
   const streakCard = `<div class="card"><div class="label">🔥 Серия</div>` +

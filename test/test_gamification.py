@@ -63,6 +63,18 @@ class TestLongestStreak:
         assert longest_streak([_d(-2), _d(-1), _d(0)]) == 3
 
 
+class TestToDatesRobustness:
+    def test_skips_unparseable(self):
+        from gamification import current_streak, longest_streak
+        assert longest_streak(["2026-13-40", "not-a-date", "2026-09-21"]) == 1
+        assert current_streak(["garbage"], TODAY) == 0
+
+    def test_normalizes_datetime(self):
+        from datetime import datetime
+        from gamification import longest_streak
+        assert longest_streak([datetime(2026, 9, 21, 8, 0)]) == 1
+
+
 class TestEvaluate:
     def test_below_threshold(self):
         from gamification import evaluate

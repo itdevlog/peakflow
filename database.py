@@ -1161,7 +1161,9 @@ def backup_family_db(db_path: str, dest_path: str, family_id: int) -> None:
         dst.close()
 
 
-# Exact schema for a family-scoped backup (mirrors init_db's v4 tables).
+# Exact schema for a family-scoped backup (mirrors init_db's v4 tables). It
+# intentionally excludes `achievements`: badges are re-derived by the v5 backfill
+# on restore, so they need not be carried in the backup.
 _FAMILY_BACKUP_DDL = """
     CREATE TABLE IF NOT EXISTS families (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
