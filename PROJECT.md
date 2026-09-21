@@ -50,8 +50,9 @@ peakflow/
 ├── database.py         # SQLite CRUD + миграции (PRAGMA user_version)
 ├── config.py           # Настройки, ID семьи, пороги
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
+├── report_pdf.py       # PDF-отчёты врачу: периоды, статистика, график, A4-вёрстка (SP4A)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (412)
+├── test/               # Pytest тесты (480)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -296,6 +297,8 @@ async def build_status_block() -> str:
 | `chart` | `cb_chart(cb)` | График за 30 дней |
 | `summary` | `cb_summary(cb)` | Сводка за сегодня (только родители) |
 | `weekly` | `cb_weekly(cb)` | Недельный отчёт (только родители) |
+| `report` | `cb_report(cb)` | Кнопка «📄 Отчёт врачу» — экран выбора периода (только родители) |
+| `report_week` / `report_month` / `report_quarter` | `cb_report_period(cb)` | PDF-отчёт врачу за неделю/месяц/квартал (только родители, при пустом периоде — alert) |
 | `stats` | `cb_stats(cb)` | Общая статистика (только ребёнок) |
 | `edit_last` | `cb_edit_last(cb, state)` | Начать редактирование последнего |
 | `back` | `cb_back(cb, state)` | Возврат в главное меню |
@@ -424,6 +427,33 @@ def main():
 
 Целевая ПСВ читается единой функцией `database.get_effective_target(db_path, fallback)`
 (`settings.target_pef` → `TARGET_PEF` из `.env` → 300); используется и ботом, и Mini App.
+
+---
+
+## Модуль `report_pdf.py` (SP4A)
+
+Чистый модуль (stdlib + matplotlib), не импортирует `bot.py`/`database.py`/aiogram;
+использует хелперы из `report.py`. Формирует **A4-PDF-отчёт врачу**: шапка + график
+ПСВ + статистика за период + постраничная таблица замеров. Отчёт чёрно-белый
+(текстовые метки «Лучший/Худший» вместо эмодзи), пустой период даёт страницу
+«Нет данных за период».
+
+| Функция | Параметры | Возвращает | Описание |
+|---------|-----------|-----------|----------|
+| `period_bounds(period, today)` | `str, date` | `tuple[str, str]` | ISO-границы `[date_from, date_to]` включительно (неделя с понедельника, месяц, квартал) |
+| `period_label(period, today)` | `str, date` | `str` | Подпись периода для шапки (напр. `Июнь 2026`, `II квартал 2026`) |
+| `compute_stats(rows, target, zone_green=80, zone_yellow=60)` | `list[dict], int` | `dict` | Статистика **за период** (`total/avg/min/max/morning_avg/evening_avg/zones`) |
+| `draw_chart(ax, rows, target, zone_green, zone_yellow, title=None, text_labels=False)` | `...` | — | Рисует график на переданном `ax` (без создания/закрытия фигуры) |
+| `build_pdf(rows, *, target, child_name, period_label, zone_green=80, zone_yellow=60)` | `...` | `bytes` | Собирает PDF (шапка+график+статистика, затем таблицы по `ROWS_PER_PAGE=35` строк) |
+
+- `RENDER_LOCK` — module-level `threading.Lock`; сериализует рендер matplotlib, т.к.
+  `build_pdf` вызывается из `asyncio.to_thread` (бот и web) и matplotlib не
+  потокобезопасен.
+- `PERIODS = ("week", "month", "quarter")` — допустимые периоды; неизвестный период —
+  `ValueError` (web отдаёт 422, бот не показывает такой кнопки).
+- Изоляция: модуль оперирует только переданными `rows`, поэтому данные всегда
+  scoped по `(family_id, child_id)` — фильтрация выполняется вызывающей стороной
+  (`get_measurements_between(..., child_id, family_id)`).
 
 ---
 
@@ -556,6 +586,12 @@ Mini App tenant-aware: `_resolve_user` берёт роль, `family_id`, `active
 В шапке Mini App при >1 ребёнке показывается селектор (`<select>`), при 0 детей —
 подсказка «Добавьте ребёнка в боте»; уведомления уходят родителям семьи.
 
+PDF-отчёт врачу (SP4A): `GET /api/report/pdf?period=week|month|quarter` (только
+родители, `application/pdf`, filename `peakflow_report_<child>_<period>_<stamp>.pdf`).
+Неизвестный период → 422, нет активного ребёнка → 404, нет записей за период → 404,
+ошибка генерации → 500. Данные scoped по `(family_id, active_child_id)`; в табе
+«⚙️ Настройки» Mini App — карточка с тремя кнопками периодов («📄 Отчёт врачу»).
+
 ### Настройка
 
 ```bash
@@ -573,7 +609,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 444 passed
+# 480 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

@@ -67,6 +67,8 @@ peakflow/
 │                   #   уведомления, планировщик, singleton-lock, main()
 ├── config.py       # Чтение .env, ID семьи, константы (зоны, часы напоминаний)
 ├── database.py     # CRUD SQLite: измерения, напоминания, settings, статистика
+├── report.py       # Чистые хелперы: зоны, CSV, экранирование (общие для бота/веба)
+├── report_pdf.py   # PDF-отчёт врачу: периоды, статистика, график, A4-вёрстка (SP4A)
 ├── test/           # pytest-тесты (test_bot.py и др.)
 ├── requirements.txt # aiogram, matplotlib, python-dotenv
 ├── .env            # Токен бота, ID семьи (секреты!)
@@ -775,7 +777,8 @@ loop каждые 60 секунд:
 - ✅ Мёртвый код удалён: `safe_delete`, `_show_history_from_message`, `Measurement.waiting_delete_confirm`, `PEF_NORM_BY_AGE`, `get_week_measurements`.
 - ✅ Версионирование схемы БД (`PRAGMA user_version`, `SCHEMA_VERSION`).
 - ✅ CI (GitHub Actions: pyflakes + compileall + pytest); тесты запускаются без `.env` (dummy-токен в `test/conftest.py`).
-- Подпроект B (streak/геймификация) и C (PDF-отчёт врачу) — в очереди; план трансформации в публичный сервис — в `roadmap.md`.
+- ✅ PDF-отчёт врачу (SP4A): `report_pdf.py`, кнопка «📄 Отчёт врачу» в боте и Mini App, `GET /api/report/pdf` (неделя/месяц/квартал).
+- Подпроект B (streak/геймификация) — в очереди; план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
 
@@ -786,10 +789,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 444 тестов
+python -m pytest test/ -v         # 480 тестов
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v4), миграции, dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v4), миграции, dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
@@ -803,7 +806,7 @@ aiogram (отдельного сервиса/порта процессов не�
 
 | Модуль | Что делает |
 |--------|-----------|
-| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`) |
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`) |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
 #### Mini App (SP2a): чтение
@@ -837,6 +840,7 @@ aiogram (отдельного сервиса/порта процессов не�
 - `report.py` — общие чистые хелперы (`pef_zone`, `pct_of`, `month_title`,
   `parse_month`, `build_csv_content`, `display_name`); `bot.py` ре-экспортирует
   их для совместимости.
+- `report_pdf.py` — чистый модуль PDF-отчёта врачу (см. SP4A ниже).
 - Фронтенд: таб «⚙️ Настройки» (скрыт у ребёнка), скачивание через fetch+blob.
 
 #### Mini App (SP3C): активный ребёнок и tenant-aware данные
@@ -854,6 +858,41 @@ aiogram (отдельного сервиса/порта процессов не�
 - Фронтенд (`app.js`): из `/api/me` сохраняются `state.children`/`state.activeChildId`;
   при >1 ребёнке (родитель) в шапке `<select>`, смена → `PUT /api/active-child` →
   перезагрузка текущего экрана; при 0 детей — подсказка «Добавьте ребёнка в боте».
+
+#### Mini App и бот (SP4A): PDF-отчёт врачу
+
+- `report_pdf.py` — чистый модуль (stdlib + matplotlib, без `bot.py`/`database.py`/
+  aiogram; использует хелперы `report.py`). Хелперы:
+  - `period_bounds(period, today)` — ISO-границы `[from, to]` включительно
+    (`week` — с понедельника, `month`, `quarter`); `period_label(period, today)` —
+    подпись для шапки (`Июнь 2026`, `II квартал 2026`).
+  - `compute_stats(rows, target, zone_green=80, zone_yellow=60)` — статистика
+    **за период** (`total/avg/min/max/morning_avg/evening_avg/zones`), не all-time
+    `get_stats`.
+  - `draw_chart(ax, rows, target, zone_green, zone_yellow, title=None,
+    text_labels=False)` — рисует график ПСВ на переданном `ax` (общий для PNG
+    графика бота и PDF); `RENDER_LOCK` — module-level `threading.Lock`,
+    сериализует matplotlib-рендер, т.к. `build_pdf`/график вызываются через
+    `asyncio.to_thread`.
+  - `build_pdf(rows, *, target, child_name, period_label, zone_green=80,
+    zone_yellow=60) -> bytes` — A4-отчёт: шапка (ребёнок/период/целевая ПСВ),
+    график, статистика, затем постраничная таблица (`ROWS_PER_PAGE=35`).
+    Чёрно-белая вёрстка (`text_labels=True` → «Лучший/Худший» без эмодзи);
+    пустой период → страница «Нет данных за период».
+- Бот: «⚙️ Настройки» → «📄 Отчёт врачу» (`cb_report`, `kb_report_periods`) →
+  выбор периода (`report_week`/`report_month`/`report_quarter`, `cb_report_period`)
+  → документ-вложение PDF. Только родители; при пустом периоде — alert; генерация
+  через `asyncio.to_thread` (`_build_report_pdf_async`).
+- Web: `GET /api/report/pdf?period=week|month|quarter` (только родители,
+  `application/pdf`). Неизвестный период → 422, нет активного ребёнка → 404, нет
+  записей → 404, ошибка генерации → 500. Ответ `Content-Disposition` —
+  `peakflow_report_<child>_<period>_<stamp>.pdf`.
+- Mini App (`app.js`): в табе «⚙️ Настройки» карточка «📄 Отчёт врачу» с кнопками
+  неделя/месяц/квартал → `download('/api/report/pdf?period=…')`.
+- **Изоляция:** модуль работает только с переданными `rows`, поэтому данные всегда
+  scoped по `(family_id, child_id)` — фильтр делает вызывающая сторона
+  (`get_measurements_between(..., child_id, date_from, date_to, family_id)`);
+  web берёт `active_child_id`/`family_id` из `auth`, бот — из `_ctx(member)`.
 
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `127.0.0.1`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`
