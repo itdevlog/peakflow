@@ -5169,6 +5169,39 @@ class TestAchievements:
         c.commit()
         c.close()
 
+    def test_build_achievements_text_marks_unlocked(self):
+        from bot import build_achievements_text
+        text = build_achievements_text(7, 100)
+        assert "7 дней подряд" in text and "100 замеров" in text
+        assert "30 дней подряд" in text
+        # streak_7 unlocked, streak_30 locked with progress 7/30
+        assert "7/30" in text
+
+    def test_kb_main_has_achievements(self):
+        import bot
+        for is_parent in (True, False):
+            cbs = [b.callback_data for row in bot.kb_main(is_parent).inline_keyboard for b in row]
+            assert "achievements" in cbs
+
+    def test_cb_achievements_scoped(self):
+        import asyncio
+        import bot
+        from unittest.mock import AsyncMock, MagicMock, patch
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        seen = {}
+        def fake_dates(db, child_id, family_id=1):
+            seen["child_id"] = child_id; seen["family_id"] = family_id
+            return ["2026-09-20", "2026-09-19"]
+        with patch.object(bot, "get_measurement_dates", side_effect=fake_dates), \
+             patch.object(bot, "count_measurements", return_value=2), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "respond", new=AsyncMock()) as resp:
+            asyncio.run(bot.cb_achievements(
+                cb, member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert seen == {"child_id": 700, "family_id": 2}
+        resp.assert_awaited()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

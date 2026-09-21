@@ -33,6 +33,7 @@ from report import (
     pef_zone as _report_pef_zone,
 )
 import report_pdf
+import gamification
 from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
@@ -61,6 +62,8 @@ from database import (
     list_child_cards,
     create_invite,
     delete_invite,
+    get_measurement_dates,
+    count_measurements,
     DEFAULT_FAMILY_ID,
 )
 
@@ -369,6 +372,7 @@ def kb_main(is_parent_user: bool, show_child_button: bool = False) -> InlineKeyb
             InlineKeyboardButton(text="📊 Сводка", callback_data="summary"),
             InlineKeyboardButton(text="📈 Неделя", callback_data="weekly"),
         ])
+        rows.append([InlineKeyboardButton(text="🏅 Достижения", callback_data="achievements")])
         rows.append([
             InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
         ])
@@ -379,6 +383,7 @@ def kb_main(is_parent_user: bool, show_child_button: bool = False) -> InlineKeyb
             InlineKeyboardButton(text="📊 Мой график", callback_data="chart"),
             InlineKeyboardButton(text="📈 Моя статистика", callback_data="stats"),
         ])
+        rows.append([InlineKeyboardButton(text="🏅 Достижения", callback_data="achievements")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -466,11 +471,15 @@ async def build_status_block(member=None) -> str:
         zone, _ = pef_zone(recent[0]["pef_value"], target)
         diff = f"\nПоследний: {recent[0]['pef_value']} {zone} ({sign}{d})"
 
+    dates = await _db(get_measurement_dates, DB_PATH, child_id, family_id=family_id)
+    streak = gamification.current_streak(dates, now_tz().date())
+    streak_line = f"\n🔥 Серия: {streak} дн." if streak >= 1 else ""
+
     name = await _child_name(member, child_id)
     return (
         f"👋 *{escape_md(name)}* | Целевая: {target} л/мин\n\n"
         f"Сегодня: {morning_display} | {evening_display}"
-        f"{diff}"
+        f"{diff}{streak_line}"
     )
 
 
@@ -2128,6 +2137,30 @@ async def cb_stats(callback: types.CallbackQuery, member=None):
         f"Последний: {stats['latest']} {zone}{tod_info}{trend}",
         kb=kb_back(),
     )
+
+
+def build_achievements_text(streak_longest: int, total: int) -> str:
+    lines = ["🏅 *Достижения*", "", f"🔥 Рекордная серия: {streak_longest} дн.", ""]
+    for a in gamification.ACHIEVEMENTS:
+        unlocked, current, threshold = gamification.achievement_status(
+            a["code"], streak_longest, total)
+        if unlocked:
+            lines.append(f"✅ {a['emoji']} {a['title']}")
+        else:
+            lines.append(f"⬜ {a['emoji']} {a['title']} — {current}/{threshold}")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "achievements")
+async def cb_achievements(callback: types.CallbackQuery, member=None):
+    family_id, child_id = await _ctx(member)
+    if child_id is None:
+        await _no_child_reply(callback, member)
+        return
+    dates = await _db(get_measurement_dates, DB_PATH, child_id, family_id=family_id)
+    total = await _db(count_measurements, DB_PATH, child_id, family_id=family_id)
+    await respond(callback, build_achievements_text(
+        gamification.longest_streak(dates), total), kb=kb_back())
 
 
 # ---------------------------------------------------------------------------
