@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import time
 import fcntl
 import logging
 import asyncio
@@ -34,6 +35,7 @@ from report import (
 )
 import report_pdf
 import gamification
+import metrics
 from database import (
     init_db, add_measurement, edit_measurement, delete_measurement,
     get_last_measurement, get_all_measurements, get_today_measurements,
@@ -275,6 +277,7 @@ async def _evaluate_and_notify(child_id, family_id, who, member=None):
                     now_tz().strftime("%Y-%m-%d"))
     if not new:
         return
+    metrics.inc("achievement_notifications_total", value=len(new))
     recipients = set(await _family_parents(member, family_id)) | {child_id}
     recipients.discard(who)
     titles = [f"{a['emoji']} {a['title']}"
@@ -793,6 +796,7 @@ async def _persist_measurement(callback: types.CallbackQuery, state: FSMContext,
     else:
         mid = await _db(add_measurement, DB_PATH, pef, tod, child_id, who,
                         family_id=family_id)
+    metrics.inc("measurements_saved_total")
 
     target = await _db(get_effective_target, family_id=family_id)
     zone_emoji, zone_name = pef_zone(pef, target)
@@ -2345,6 +2349,7 @@ async def _maybe_ping_child(tod: str, hours: dict, hour: int, minute: int, today
         # Do not set the flag: retry on the next tick (the 2-minute window).
         logger.error("Не удалось напомнить ребёнку (%s): %s", tod, e)
         return
+    metrics.inc("reminders_sent_total", kind="child")
     await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
     logger.info("Напоминание ребёнку: %s", tod)
 
@@ -2405,6 +2410,7 @@ async def _escalate_parents(tod: str, hours: dict, hour: int, minute: int, today
         # No parent received it — allow a retry on the next tick.
         logger.error("Эскалация родителям (%s) не доставлена, повтор", tod)
         return
+    metrics.inc("reminders_sent_total", kind="escalation")
     await _db(mark_reminder_sent, DB_PATH, today, flag, child_id)
     logger.info("Эскалация родителям: %s", tod)
 
@@ -2443,6 +2449,8 @@ async def scheduler_loop():
     while True:
         try:
             now = now_tz()
+            metrics.inc("scheduler_ticks_total")
+            metrics.set_gauge("scheduler_last_tick_timestamp", time.time())
             today = now.strftime("%Y-%m-%d")
             hour = now.hour
             minute = now.minute
@@ -2478,6 +2486,7 @@ async def scheduler_loop():
                                 except Exception:
                                     pass
                             if delivered:
+                                metrics.inc("reminders_sent_total", kind="weekly")
                                 await _db(mark_reminder_sent, DB_PATH, today, "weekly", child_id)
                                 logger.info("Недельный отчёт отправлен")
                             else:
