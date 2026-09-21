@@ -40,6 +40,7 @@ from database import (
     set_setting,
     validate_reminder_hours,
 )
+import report_pdf
 from report import build_csv_content as _build_csv, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
@@ -471,6 +472,43 @@ def create_app(services: dict) -> FastAPI:
         return Response(
             content=content.encode("utf-8-sig"),
             media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(filename)},
+        )
+
+    @app.get("/api/report/pdf")
+    async def report_pdf_endpoint(period: str = "month",
+                                  auth: dict = Depends(require_parent)):
+        if period not in report_pdf.PERIODS:
+            raise HTTPException(422, "Неверный период")
+        child_id = auth["active_child_id"]
+        if child_id is None:
+            raise HTTPException(404, "Нет активного ребёнка")
+        today = datetime.now(timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))).date()
+        date_from, date_to = report_pdf.period_bounds(period, today)
+        rows = await _db(get_measurements_between, config.DB_PATH, child_id,
+                         date_from, date_to, auth["family_id"])
+        if not rows:
+            raise HTTPException(404, "Нет записей за период")
+        target = await _db(_effective_target, config, auth["family_id"])
+        child = _child_name(auth)
+        label = report_pdf.period_label(period, today)
+        try:
+            pdf = await asyncio.to_thread(
+                report_pdf.build_pdf, rows, target=target, child_name=child,
+                period_label=label,
+                zone_green=getattr(config, "ZONE_GREEN", 80),
+                zone_yellow=getattr(config, "ZONE_YELLOW", 60),
+            )
+        except Exception as e:
+            logger.error("Ошибка генерации PDF-отчёта: %s", e)
+            raise HTTPException(500, "Не удалось создать отчёт")
+        stamp = datetime.now(
+            timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))
+        ).strftime("%Y%m%d_%H%M")
+        filename = f"peakflow_report_{child}_{period}_{stamp}.pdf"
+        return Response(
+            content=pdf,
+            media_type="application/pdf",
             headers={"Content-Disposition": _content_disposition(filename)},
         )
 
