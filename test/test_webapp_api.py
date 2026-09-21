@@ -417,3 +417,49 @@ class TestWebTenantScoping:
         assert c.get("/api/stats", headers=_auth(999)).json()["total"] == 0
         assert c.get("/api/history", headers=_auth(999)).json()["total"] == 0
 
+
+class TestExportChartIsolation:
+    """SP3D: chart/export endpoints must never leak another family's data."""
+
+    @staticmethod
+    def _family_two():
+        from database import add_member, add_measurement, create_family_with_owner
+        f2 = create_family_with_owner(TEST_DB, 999, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        add_measurement(TEST_DB, 250, "morning", 700, 999, family_id=f2)
+        add_measurement(TEST_DB, 111, "morning", CHILD_ID, CHILD_ID, family_id=1)
+        return f2
+
+    def test_chart_isolated(self):
+        _setup_db()
+        self._family_two()
+        body = _client().get("/api/chart", headers=_auth(999)).json()
+        assert [p["pef"] for p in body["points"]] == [250]
+
+    def test_export_csv_isolated(self):
+        import csv
+        import io
+        _setup_db()
+        self._family_two()
+        r = _client().get("/api/export/csv", headers=_auth(999))
+        assert r.status_code == 200, r.text
+        rows = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+        pef_values = [row[3] for row in rows if len(row) == 9 and row[3].isdigit()]
+        assert pef_values == ["250"], "family #2 CSV leaked family #1 data"
+
+    def test_export_periods_isolated(self):
+        _setup_db()
+        self._family_two()
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, ?, 200, 'morning', "
+            "'2020-01-05 08:00:00', ?, 'manual')",
+            (CHILD_ID, CHILD_ID),
+        )
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/export/periods", headers=_auth(999)).json()
+        assert body["months"], "family #2 must still expose its own month"
+        assert "2020-01" not in body["months"], "family #1 month leaked into periods"
+
