@@ -57,8 +57,12 @@ for family_id in list_families():
     for child in list_family_children(family_id):
         _maybe_ping_child(child, hours, family_id, hour, minute, today)
         _escalate_parents(child, hours, family_id, hour, minute, today)
-    weekly(family_id) if due
+        _weekly_report(child) if due  # weekly — НА КАЖДОГО ребёнка, не на семью
 ```
+Недельный отчёт формируется **на каждого ребёнка** и отправляется всем
+родителям его семьи; флаг дедупликации — `(child_id, "weekly")`, поэтому у
+семьи с двумя детьми будет два независимых недельных отчёта (по одному на
+ребёнка), а не один общий на семью.
 Семья №1 остаётся совместимой (её `.env`-child — участник после миграции).
 
 Риски: объём БД-запросов на тик растёт с числом семей; для 2D приемлемо (in-process, семей десятки). Оптимизация/вынос в отдельный процесс — Фаза 3.
@@ -109,7 +113,7 @@ for family_id in list_families():
 1. `get_measurement_by_id` child-scoped.
 2. Автор записи из `members` для семьи 2; env-fallback при `member=None`.
 3. Изоляция chart/export (две семьи).
-4. Планировщик: две семьи, разные `hours` → оба ребёнка получают пинг; weekly — каждой семье.
+4. Планировщик: две семьи (у одной два ребёнка), разные `hours` → все дети получают пинг; weekly — на каждого ребёнка каждой семьи, своим родителям.
 5. Dry-run: отчёт на копии тестовой БД, оригинал не изменён.
 6. Регрессия: полный прогон.
 

@@ -943,6 +943,34 @@ class TestMultiFamilyScheduler:
         assert not any("Петя" in t for t in by_recipient.get(701, [])), "no leak into f2"
         assert not any("Маша" in t for t in by_recipient.get(801, [])), "no leak into f3"
 
+    def test_weekly_report_sent_per_child_within_a_family(self):
+        """Weekly is per child (controller ruling): a family with two children
+        gets one report per child, delivered to that family's parents only."""
+        from database import add_measurement, add_member
+        f2 = self._make_family(700, "Маша", 701)
+        add_member(TEST_DB, 710, f2, "child", "Саша")
+        f3 = self._make_family(800, "Петя", 801)
+        for child_id in (700, 710):
+            add_measurement(TEST_DB, 250, "morning", child_id, 701, family_id=f2)
+            add_measurement(TEST_DB, 240, "evening", child_id, 701, family_id=f2)
+        add_measurement(TEST_DB, 300, "morning", 800, 801, family_id=f3)
+        add_measurement(TEST_DB, 310, "evening", 800, 801, family_id=f3)
+
+        by_recipient = {}
+        for c in self._run_tick([f2, f3], 21, 0, self._mocked_bot()):
+            by_recipient.setdefault(c[0][0], []).append(c[0][1])
+
+        f2_reports = by_recipient.get(701, [])
+        assert len(f2_reports) == 2, "one weekly report per child of the family"
+        assert sum("Маша" in t for t in f2_reports) == 1, "child 700's report"
+        assert sum("Саша" in t for t in f2_reports) == 1, "child 710's report"
+        assert not any("Петя" in t for t in f2_reports), "no cross-family leak"
+
+        f3_reports = by_recipient.get(801, [])
+        assert len(f3_reports) == 1, "family 3 has a single child"
+        assert "Петя" in f3_reports[0]
+        assert not any("Маша" in t or "Саша" in t for t in f3_reports)
+
 
 class TestRemindersScreen:
     """⏰ Reminders settings screen + hour input FSM."""
