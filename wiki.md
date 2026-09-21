@@ -315,7 +315,7 @@ peakflow/
 | `list_family_parents(db, family_id)` | Родители семьи (получатели уведомлений) |
 | `count_family_children(db, family_id)` | Число детей семьи |
 | `set_active_child(db, telegram_id, child_id)` / `resolve_active_child(db, member)` | Выбор/резолв активного ребёнка (ребёнок → сам, родитель → выбранный/первый, нет детей → None); `set` валидирует роль и семью |
-| `backup_family_db(db, dest, family_id)` | Family-scoped `.backup`: вся схема, но только строки одной семьи (families/members/measurements/settings/invites/reminders_sent/achievements) — не утекают данные других семей |
+| `backup_family_db(db, dest, family_id)` | Family-scoped `.backup`: вся схема, но только строки одной семьи (families/members/measurements/settings/invites/reminders_sent) — не утекают данные других семей. Таблица `achievements` в бэкап **не входит** (её нет в `_FAMILY_BACKUP_DDL`): при восстановлении на v5 достижения пересоздаются тихим бэкфиллом миграции |
 | `get_measurement_dates(db, child_id, family_id)` | Уникальные даты замеров (ISO, по возрастанию) — вход для расчёта серии (v5) |
 | `count_measurements(db, child_id, family_id)` | Всего замеров, включая auto — вход для достижений по количеству (v5) |
 | `get_achievements(db, child_id)` | `{code: unlocked_at}` заслуженных достижений (v5) |
