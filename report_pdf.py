@@ -5,7 +5,7 @@
 """
 from datetime import date, timedelta
 
-from report import month_title
+from report import month_title, pef_zone
 
 PERIODS = ("week", "month", "quarter")
 
@@ -51,3 +51,28 @@ def period_label(period: str, today: date) -> str:
     if period == "quarter":
         return f"{_ROMAN[(today.month - 1) // 3]} квартал {today.year}"
     raise ValueError(f"Неизвестный период: {period}")
+
+
+_ZONE_KEYS = {"Зелёная": "green", "Жёлтая": "yellow", "Красная": "red"}
+
+
+def compute_stats(rows: list[dict], target: int, zone_green: int = 80,
+                  zone_yellow: int = 60) -> dict:
+    """Статистика за период из уже выбранных rows (не all-time get_stats)."""
+    values = [r["pef_value"] for r in rows]
+    morning = [r["pef_value"] for r in rows if r["time_of_day"] == "morning"]
+    evening = [r["pef_value"] for r in rows if r["time_of_day"] == "evening"]
+    zones = {"green": 0, "yellow": 0, "red": 0}
+    for r in rows:
+        key = _ZONE_KEYS.get(pef_zone(r["pef_value"], target, zone_green, zone_yellow)[1])
+        if key:
+            zones[key] += 1
+    return {
+        "total": len(values),
+        "avg": sum(values) / len(values) if values else 0,
+        "min": min(values) if values else 0,
+        "max": max(values) if values else 0,
+        "morning_avg": sum(morning) / len(morning) if morning else None,
+        "evening_avg": sum(evening) / len(evening) if evening else None,
+        "zones": zones,
+    }

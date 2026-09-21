@@ -61,3 +61,32 @@ class TestPeriodLabel:
     def test_quarter(self):
         from report_pdf import period_label
         assert period_label("quarter", date(2026, 9, 21)) == "III квартал 2026"
+
+
+class TestComputeStats:
+    def _rows(self):
+        return [
+            {"pef_value": 260, "time_of_day": "morning"},
+            {"pef_value": 240, "time_of_day": "evening"},
+            {"pef_value": 130, "time_of_day": "morning"},
+        ]
+
+    def test_basic(self):
+        from report_pdf import compute_stats
+        s = compute_stats(self._rows(), target=260)
+        assert s["total"] == 3
+        assert s["min"] == 130 and s["max"] == 260
+        assert s["avg"] == pytest.approx((260 + 240 + 130) / 3)
+        assert s["morning_avg"] == pytest.approx(195)
+        assert s["evening_avg"] == pytest.approx(240)
+        # target 260, zone_green 80 -> >=208, zone_yellow 60 -> >=156
+        assert s["zones"] == {"green": 2, "yellow": 0, "red": 1}
+
+    def test_empty(self):
+        from report_pdf import compute_stats
+        s = compute_stats([], target=260)
+        assert s["total"] == 0
+        assert s["avg"] == 0
+        assert s["morning_avg"] is None
+        assert s["evening_avg"] is None
+        assert s["zones"] == {"green": 0, "yellow": 0, "red": 0}
