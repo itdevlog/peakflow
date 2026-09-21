@@ -1,15 +1,17 @@
 """REST API Mini App. SP2a: чтение данных дневника ПСВ."""
 import asyncio
+import hmac
 import json
 import logging
 import os
 import sqlite3
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -32,6 +34,7 @@ from database import (
     get_achievements,
     get_reminder_hours,
     get_stats,
+    get_system_counts,
     get_today_measurements,
     get_effective_target as _db_effective_target,
     get_member,
@@ -44,6 +47,7 @@ from database import (
     validate_reminder_hours,
 )
 import gamification
+import metrics
 import report_pdf
 from report import build_csv_content as _build_csv, parse_month
 from web.auth import get_user_from_init_data
@@ -172,6 +176,26 @@ def create_app(services: dict) -> FastAPI:
     app = FastAPI(title="Peakflow Bot Mini App API", docs_url=None, redoc_url=None)
     config = services.get("config")
 
+    @app.middleware("http")
+    async def _metrics_middleware(request: Request, call_next):
+        start = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = (time.perf_counter() - start) * 1000
+            metrics.inc("http_requests_total", method=request.method, status="500")
+            logger.warning("http method=%s path=%s status=500 duration_ms=%.1f",
+                           request.method, request.url.path, duration_ms)
+            raise
+        duration_ms = (time.perf_counter() - start) * 1000
+        metrics.inc("http_requests_total", method=request.method,
+                    status=str(response.status_code))
+        metrics.set_gauge("http_last_duration_ms", duration_ms)
+        log = logger.warning if response.status_code >= 500 else logger.info
+        log("http method=%s path=%s status=%s duration_ms=%.1f",
+            request.method, request.url.path, response.status_code, duration_ms)
+        return response
+
     async def _resolve_user(init_data: str | None) -> dict:
         token = getattr(config, "BOT_TOKEN", "") or ""
         if not token or not init_data:
@@ -249,7 +273,37 @@ def create_app(services: dict) -> FastAPI:
         state = services.get("state")
         if state is not None and not state.get("bot_ok", True):
             return JSONResponse(status_code=503, content={"status": "bot down"})
-        return {"status": "ok"}
+        counts = {"families": None, "children": None, "measurements": None}
+        try:
+            counts = await _db(get_system_counts, config.DB_PATH)
+        except Exception as e:
+            logger.warning("healthz: не удалось посчитать БД: %s", e)
+        return {
+            "status": "ok",
+            "uptime_seconds": round(metrics.uptime_seconds(), 1),
+            "last_scheduler_tick": metrics.get_gauge("scheduler_last_tick_timestamp"),
+            **counts,
+        }
+
+    @app.get("/metrics")
+    async def prometheus_metrics(request: Request):
+        if not getattr(config, "METRICS_ENABLED", False):
+            raise HTTPException(404, "Not found")
+        token = getattr(config, "METRICS_TOKEN", "") or ""
+        if token:
+            provided = request.headers.get("Authorization", "")
+            if not hmac.compare_digest(provided, f"Bearer {token}"):
+                raise HTTPException(401, "Unauthorized")
+        try:
+            counts = await _db(get_system_counts, config.DB_PATH)
+            metrics.set_gauge("families_count", counts["families"])
+            metrics.set_gauge("children_count", counts["children"])
+            metrics.set_gauge("measurements_count", counts["measurements"])
+        except Exception as e:
+            logger.warning("metrics: не удалось посчитать БД: %s", e)
+        metrics.set_gauge("process_uptime_seconds", metrics.uptime_seconds())
+        return PlainTextResponse(metrics.render_prometheus(),
+                                 media_type="text/plain; version=0.0.4")
 
     @app.get("/api/children")
     async def children(auth: dict = Depends(require_user)):

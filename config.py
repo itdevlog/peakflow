@@ -32,6 +32,10 @@ WEBAPP_HOST = os.getenv("WEBAPP_HOST", "127.0.0.1")
 WEBAPP_PORT = _parse_int(os.getenv("WEBAPP_PORT", "8080") or "0", 0)
 WEBAPP_URL = normalize_webapp_url(os.getenv("WEBAPP_URL", ""))
 
+# Метрики (SP4D): /metrics выключен по умолчанию; токен — опциональная защита.
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "0") == "1"
+METRICS_TOKEN = os.getenv("METRICS_TOKEN", "")
+
 # Часовой пояс (смещение от UTC в часах). По умолчанию UTC+5 (Екатеринбург).
 # Примеры: Москва=3, Екатеринбург=5, Владивосток=10
 TZ_OFFSET = int(os.getenv("TZ_OFFSET", "5"))

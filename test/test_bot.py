@@ -37,6 +37,13 @@ def setup_db():
                 pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_metrics():
+    import metrics
+    metrics.reset()
+    yield
+
+
 class TestDatabase:
     def test_add_and_get_last(self):
         from database import add_measurement, get_last_measurement
@@ -5254,6 +5261,71 @@ class TestAchievements:
                 cb, state, 250, "morning",
                 member={"role": "parent", "telegram_id": 500, "family_id": 2}))
         ev.assert_awaited_once()
+
+
+class TestSystemCounts:
+    def test_counts(self):
+        from database import (init_db, create_family_with_owner, add_member,
+                              add_measurement, get_system_counts)
+        init_db(TEST_DB)
+        before = get_system_counts(TEST_DB)
+        add_measurement(TEST_DB, 250, "morning", 111, 222, family_id=1)
+        add_measurement(TEST_DB, 260, "evening", 111, 222, family_id=1)
+        f2 = create_family_with_owner(TEST_DB, 500, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        counts = get_system_counts(TEST_DB)
+        assert counts["families"] == before["families"] + 1
+        assert counts["children"] == before["children"] + 1
+        assert counts["measurements"] == before["measurements"] + 2
+
+    def test_empty_db(self):
+        from database import init_db, get_system_counts
+        init_db(TEST_DB)
+        counts = get_system_counts(TEST_DB)
+        assert counts["measurements"] == 0
+        assert set(counts) == {"families", "children", "measurements"}
+
+
+class TestBotMetrics:
+    def test_persist_measurement_counts(self):
+        import asyncio, bot, metrics
+        from unittest.mock import AsyncMock, MagicMock, patch
+        metrics.reset()
+        cb = MagicMock(); cb.from_user.id = 500; cb.answer = AsyncMock()
+        cb.message = MagicMock(); cb.message.answer = AsyncMock(); cb.message.delete = AsyncMock()
+        state = MagicMock(); state.get_data = AsyncMock(return_value={})
+        state.update_data = AsyncMock(); state.set_state = AsyncMock()
+        with patch.object(bot, "respond", new=AsyncMock()), \
+             patch.object(bot, "replace_auto_measurement", return_value=1), \
+             patch.object(bot, "get_effective_target", return_value=260), \
+             patch.object(bot, "get_previous_of_tod", return_value=None), \
+             patch.object(bot, "resolve_active_child", return_value=700), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[])), \
+             patch.object(bot, "_evaluate_and_notify", new=AsyncMock()):
+            asyncio.run(bot._persist_measurement(
+                cb, state, 250, "morning",
+                member={"role": "parent", "telegram_id": 500, "family_id": 2}))
+        assert metrics.get_counter("measurements_saved_total") == 1
+
+    def test_scheduler_tick_counts(self):
+        import asyncio, bot, metrics
+        from datetime import datetime, timezone, timedelta
+        from unittest.mock import AsyncMock, patch
+        metrics.reset()
+        fake_now = datetime(2026, 9, 12, 12, 0, 5, tzinfo=timezone(timedelta(hours=5)))
+
+        async def fake_sleep(s):
+            raise asyncio.CancelledError
+
+        with patch.object(bot, "now_tz", return_value=fake_now), \
+             patch.object(bot, "_tick_targets", new=AsyncMock(return_value=[])), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            try:
+                asyncio.run(bot.scheduler_loop())
+            except asyncio.CancelledError:
+                pass
+        assert metrics.get_counter("scheduler_ticks_total") == 1
+        assert metrics.get_gauge("scheduler_last_tick_timestamp") is not None
 
 
 if __name__ == "__main__":

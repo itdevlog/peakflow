@@ -28,10 +28,10 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Lint (pyflakes)
-        run: python -m pyflakes bot.py database.py config.py report.py report_pdf.py gamification.py web/*.py
+        run: python -m pyflakes bot.py database.py config.py report.py report_pdf.py gamification.py metrics.py web/*.py
 
       - name: Compile check
-        run: python -m compileall -q bot.py database.py config.py report.py report_pdf.py gamification.py web
+        run: python -m compileall -q bot.py database.py config.py report.py report_pdf.py gamification.py metrics.py web
 
       - name: Run tests
         env:

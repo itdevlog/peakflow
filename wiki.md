@@ -70,6 +70,7 @@ peakflow/
 ├── report.py       # Чистые хелперы: зоны, CSV, экранирование (общие для бота/веба)
 ├── report_pdf.py   # PDF-отчёт врачу: периоды, статистика, график, A4-вёрстка (SP4A)
 ├── gamification.py # Серия дней и достижения: чистые расчёты, без bot/database (SP4B)
+├── metrics.py      # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── test/           # pytest-тесты (test_bot.py и др.)
 ├── requirements.txt # aiogram, matplotlib, python-dotenv
 ├── .env            # Токен бота, ID семьи (секреты!)
@@ -97,6 +98,8 @@ peakflow/
 | `WEBAPP_HOST` | ❌ | `127.0.0.1` | Адрес прослушивания веб-сервера Mini App (только через reverse proxy) |
 | `WEBAPP_PORT` | ❌ | `8080` | Порт веб-сервера; `0` — веб-сервер выключен |
 | `WEBAPP_URL` | ❌ | — | Публичный HTTPS-URL Mini App; пусто — кнопка Mini App не добавляется |
+| `METRICS_ENABLED` | ❌ | `0` | `1` — включает `GET /metrics`; иначе эндпоинт отдаёт 404 |
+| `METRICS_TOKEN` | ❌ | — | Bearer-токен для `/metrics`; рекомендуется при публичном `WEBAPP_URL` (Caddy проксирует все пути); пусто — без авторизации |
 
 ### Константы `config.py`
 
@@ -803,7 +806,9 @@ loop каждые 60 секунд:
 - ✅ Версионирование схемы БД (`PRAGMA user_version`, `SCHEMA_VERSION`).
 - ✅ CI (GitHub Actions: pyflakes + compileall + pytest); тесты запускаются без `.env` (dummy-токен в `test/conftest.py`).
 - ✅ PDF-отчёт врачу (SP4A): `report_pdf.py`, кнопка «📄 Отчёт врачу» в боте и Mini App, `GET /api/report/pdf` (неделя/месяц/квартал).
-- Подпроект B (streak/геймификация) — в очереди; план трансформации в публичный сервис — в `roadmap.md`.
+- ✅ Геймификация (SP4B): `gamification.py`, streak в статусе, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, схема v5.
+- ✅ Метрики (SP4D): `metrics.py` (реестр + Prometheus-рендер), расширенный `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware/access-лог.
+- Дальше: Фаза 5 (развитие Mini App); план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
 
@@ -814,10 +819,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 519 тестов
+python -m pytest test/ -v         # 546 тестов
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
@@ -831,7 +836,7 @@ aiogram (отдельного сервиса/порта процессов не�
 
 | Модуль | Что делает |
 |--------|-----------|
-| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check); read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`); геймификация SP4B (`GET /api/gamification`) |
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check + uptime/счётчики БД); `GET /metrics` (Prometheus text, env-gated + токен); HTTP-middleware метрик/access-лога; read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`); геймификация SP4B (`GET /api/gamification`) |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
 #### Mini App (SP2a): чтение
@@ -947,6 +952,40 @@ aiogram (отдельного сервиса/порта процессов не�
 - **Схема v5:** таблица `achievements(child_id, code, unlocked_at)` с составным PK;
   при первом апгрейде — тихий бэкфилл уже заслуженных достижений без уведомлений
   (см. §5).
+
+#### Метрики (SP4D): реестр, `/healthz`, `/metrics`, логи
+
+- `metrics.py` — чистый потокобезопасный модуль (только stdlib; без
+  `bot.py`/`database.py`/aiogram). Метрики живут **в памяти процесса** и
+  обнуляются при рестарте.
+  - `inc(name, value=1, **labels)` — счётчик; `set_gauge(name, value, **labels)` —
+    гейдж; `get_counter`/`get_gauge` — чтение; `uptime_seconds()` — секунды с
+    импорта; `snapshot()` — все ряды (тесты); `render_prometheus()` — Prometheus
+    text (`# TYPE`, `name{labels} value`); `reset()` — очистка (тесты).
+  - Валидация имён/меток (`_NAME_RE`/`_LABEL_RE`), закрепление типа метрики
+    (конфликт counter/gauge → `ValueError`), экранирование значений меток
+    (`\`, `"`, `\n`).
+- **Точки сбора:**
+  - HTTP-middleware (`web/api.py`) — `http_requests_total{method,status}` и
+    `http_last_duration_ms` на каждый запрос.
+  - Сохранение замера (`bot.input_pef`) — `measurements_saved_total`.
+  - Разблокировка достижений (`_evaluate_and_notify`) — `achievement_notifications_total`.
+  - `scheduler_loop` за тик — `scheduler_ticks_total` и
+    `scheduler_last_tick_timestamp` (gauge, `time.time()`).
+  - Напоминания — `reminders_sent_total{kind="child"|"escalation"|"weekly"}`.
+- **`GET /healthz`** (без авторизации): `status:"ok"`, `uptime_seconds`,
+  `last_scheduler_tick` (gauge, `None` до первого тика) и счётчики БД
+  `families`/`children`/`measurements` (`database.get_system_counts`; при ошибке —
+  остаются `None`). Если `state["bot_ok"]` ложно → **503** `{"status":"bot down"}`.
+- **`GET /metrics`**: при `METRICS_ENABLED != 1` → **404**; если задан
+  `METRICS_TOKEN`, требуется `Authorization: Bearer <token>` (иначе **401**).
+  Перед отдачей обновляет гейджи `families_count`/`children_count`/
+  `measurements_count`/`process_uptime_seconds`; `Content-Type:
+  text/plain; version=0.0.4`.
+- **Текстовые логи:** формат остаётся stdout-строками, стабильные поля
+  `key=value` (напр. access-лог middleware:
+  `http method=GET path=/api/me status=200 duration_ms=1.2`; 5xx — уровень
+  warning). JSON-логи и Sentry — вне scope SP4D.
 
 Конфигурация — переменные `.env` (`config.py`): `WEBAPP_HOST` (по умолчанию
 `127.0.0.1`), `WEBAPP_PORT` (по умолчанию `8080`; `0` — выключено), `WEBAPP_URL`

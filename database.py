@@ -1308,6 +1308,22 @@ def count_measurements(db_path: str, child_id: int,
     return n
 
 
+def get_system_counts(db_path: str) -> dict:
+    """Aggregate counts for health/metrics (no personal data)."""
+    conn = get_connection(db_path)
+    try:
+        families = conn.execute("SELECT COUNT(*) FROM families").fetchone()[0]
+        children = conn.execute(
+            "SELECT COUNT(*) FROM members WHERE role = 'child'"
+        ).fetchone()[0]
+        measurements = conn.execute(
+            "SELECT COUNT(*) FROM measurements"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {"families": families, "children": children, "measurements": measurements}
+
+
 def get_achievements(db_path: str, child_id: int) -> dict:
     conn = get_connection(db_path)
     rows = conn.execute(
