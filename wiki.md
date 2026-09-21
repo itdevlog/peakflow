@@ -806,7 +806,9 @@ loop каждые 60 секунд:
 - ✅ Версионирование схемы БД (`PRAGMA user_version`, `SCHEMA_VERSION`).
 - ✅ CI (GitHub Actions: pyflakes + compileall + pytest); тесты запускаются без `.env` (dummy-токен в `test/conftest.py`).
 - ✅ PDF-отчёт врачу (SP4A): `report_pdf.py`, кнопка «📄 Отчёт врачу» в боте и Mini App, `GET /api/report/pdf` (неделя/месяц/квартал).
-- Подпроект B (streak/геймификация) — в очереди; план трансформации в публичный сервис — в `roadmap.md`.
+- ✅ Геймификация (SP4B): `gamification.py`, streak в статусе, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, схема v5.
+- ✅ Метрики (SP4D): `metrics.py` (реестр + Prometheus-рендер), расширенный `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware/access-лог.
+- Дальше: Фаза 5 (развитие Mini App); план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
 
