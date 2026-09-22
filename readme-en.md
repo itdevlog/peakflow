@@ -2,14 +2,14 @@
 
 # 🫁 Peakflow Monitor
 
-**Telegram Bot for Peak Expiratory Flow (PEF) Monitoring**
+**Telegram Bot and Mini App for Peak Expiratory Flow (PEF) monitoring**
 
-*1 child + 2 parents · Auto-registration · Smart reminders*
+*Multi-family · Multiple children · Mini App · Doctor PDF · Gamification · Analytics · PWA*
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-0078D4.svg)](https://docs.aiogram.dev)
-[![SQLite](https://img.shields.io/badge/SQLite-3-003B57.svg)](https://sqlite.org)
-[![Tests](https://img.shields.io/badge/Tests-171%20passed-brightgreen.svg)](test/)
+[![SQLite](https://img.shields.io/badge/SQLite-schema%20v5-003B57.svg)](https://sqlite.org)
+[![Tests](https://img.shields.io/badge/Tests-598%20passed-brightgreen.svg)](test/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
@@ -18,24 +18,37 @@
 
 ## 📖 About
 
-Peak flowmetry measures the maximum speed of exhalation (PEF — Peak Expiratory Flow), a key metric for monitoring asthma and other respiratory conditions. This bot helps families track readings, spot trends, and never miss a measurement.
+Peak flowmetry measures the maximum speed of exhalation (PEF), a key metric for monitoring
+asthma and other respiratory conditions. The service helps families track readings, spot
+trends, and never miss a measurement: a **bot** for quick actions and alerts, and a
+**Telegram Mini App** for charts, analytics, and settings.
+
+The service is multi-family: each family is isolated (`family_id`), a family has one or
+more children, and each parent has their own active child. Registration is self-service:
+create a family or join by invite code.
 
 ### ✨ Features
 
 | Feature | Description |
 |---------|-------------|
-| 🤖 **Auto-registration** | All 3 family members known by ID from `.env` — no setup needed |
-| 🕐 **Auto morning/evening** | Time of day detected automatically: `< 12:00` → 🌅, `≥ 12:00` → 🌆 |
-| 📊 **Status block** | In main menu: today's readings, last result, trend |
-| 📥 **Quick input** | Button → number → done. Minimum taps |
-| ✏️ **Edit last** | "✏️ Edit last" button — no delete-and-re-enter |
-| 📈 **Today's summary** | All today's readings + morning/evening stats (parents only) |
-| 📊 **Week vs last week** | Weekly comparison with separate morning/evening trends |
-| 🏆 **Best / Worst** | Best and worst results annotated on the chart |
-| 🔔 **Missed reading alerts** | 10:00 / 22:00 — if child forgot to measure |
-| 📋 **Weekly report** | Every Sunday at 21:00 — full summary to both parents |
-| 📲 **Parent notifications** | Each new reading notified to the other parent |
-| 🚨 **Red zone alerts** | Instant alert to both parents when PEF < 60% of target |
+| 🏠 **Families & invites** | Create a family or join by code (`/start`, deep-link) |
+| 👨‍👩‍👧 **Multiple children** | Active child per parent (bot and Mini App) |
+| 🕐 **Auto morning/evening** | Time of day: `< 12:00` → 🌅, `≥ 12:00` → 🌆 |
+| 📊 **Status block** | Today's readings, last result, trend, 🔥 day streak |
+| 📥 **Quick input** | Button → number → done (stepwise hundreds/tens), range 100–690 |
+| ✏️ **Edit last** | "✏️ Edit last" — no delete-and-re-enter |
+| 📈 **Summary & week** | Today's readings with stats; week vs last week by morning/evening |
+| 📊 **Chart (Mini App)** | Types line/bars/points, range week/month, tooltip with note, "Compare" mode |
+| 🏅 **Gamification** | Day streak; achievements 7/30/100 days and 100/500/1000 readings |
+| 📄 **Doctor PDF** | A4 report (chart + stats + table) for week/month/quarter from bot and Mini App |
+| 📈 **Analytics** | Zones (pie), average PEF by weekday (heatmap), 14-day trend, note correlation |
+| 📲 **PWA** | Install Mini App to home screen, offline app shell |
+| 🔔 **Reminders** | For child and parents; hours configurable per family |
+| 📋 **Weekly report** | Every Sunday at 21:00, per child |
+| 📲 **Notifications** | Each new reading — to the family's parents |
+| 🚨 **Red zone alerts** | Instant alert when PEF < 60% (except the author) |
+| 📥 **Export & backup** | CSV by period; single-family DB backup |
+| 🩺 **Metrics** | Extended `/healthz` and optional `GET /metrics` (Prometheus) |
 
 ---
 
@@ -43,11 +56,11 @@ Peak flowmetry measures the maximum speed of exhalation (PEF — Peak Expiratory
 
 ### 1. Get a Bot Token
 
-Open [@BotFather](https://t.me/BotFather) → `/newbot` → follow instructions → copy the token.
+Open [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
 
 ### 2. Find Telegram IDs
 
-Open [@userinfobot](https://t.me/userinfobot) → send any message → copy the `Id` for each family member.
+Open [@userinfobot](https://t.me/userinfobot) → send a message → copy the `Id`.
 
 ### 3. Configure `.env`
 
@@ -57,12 +70,22 @@ cp .env.example .env
 
 ```env
 BOT_TOKEN=123456789:AAExxxxxxxxxxxxxxxxxxxxxxxxxx
-CHILD_ID=123456789
-PARENT_IDS=987654321,111222333
+CHILD_ID=123456789              # seed/fallback for family #1 child
+PARENT_IDS=987654321,111222333  # seed/fallback for family #1 parents
 CHILD_NAME=Emma
 TARGET_PEF=260
 DB_PATH=peakflow.db
+TZ_OFFSET=5
+
+WEBAPP_HOST=127.0.0.1
+WEBAPP_PORT=8080
+WEBAPP_URL=
+METRICS_ENABLED=0
+METRICS_TOKEN=
 ```
+
+> Direct IDs in `.env` are only needed for family #1 (migration seed and fallback).
+> Other families register in the bot: "🏠 Create family" or "🔑 Join by code".
 
 ### 4. Run
 
@@ -75,54 +98,21 @@ python bot.py
 
 ---
 
-## 📱 What It Looks Like
+## 📱 Mini App
 
-### Main Menu
+When `WEBAPP_URL` is set, the bot adds a "💨 Diary" menu button. Tabs:
 
-```
-👋 Emma | Target: 260 L/min
+- **Today** — today's readings, quick input with a note;
+- **History** — paginated, edit/delete (parents);
+- **Chart** — canvas without libraries: types line/bars/points, range week/month,
+  tooltip (value, %, zone, note), "Compare" mode (current vs previous period);
+- **Stats** — averages, trend, 🔥 streak and badge grid;
+- **Analytics** — zones (pie), weekday heatmap, 14-day trend, note correlation;
+- **⚙️ Settings** (parents) — target PEF, reminder hours, doctor PDF, CSV export, DB backup.
 
-Today: 🌅 240 🟢 | 🌆 —
-Last: 240 🟢 (+10)
-
-┌─────────────────────────────┐
-│  💨 Measurement             │
-│  📋 History  │  📊 Chart    │
-│  📊 Summary  │  📈 Week     │
-│  ✏️ Edit last               │
-└─────────────────────────────┘
-```
-
-### Adding a Reading
-
-```
-💨 Enter PEF (L/min)
-🌅 Morning (auto-detected)
-Range: 50–800
-
-> 245
-```
-
-```
-✅ 🌅 Morning: 245 L/min 🟢
-Zone: Green (94% of target)
-📈 Change: +5 L/min
-```
-
-### Weekly Report
-
-```
-📋 Emma — week 2026-04-07 — 2026-04-13
-
-Readings: 12 (🌅 7 / 🌆 5)
-Average: 248
-🏆 Best: 270 (🌆 12.04)
-⚠️ Worst: 225 (🌅 09.04)
-
-📈 This week vs last:
-🌅 Morning: 240 → 246 (+6) 🟢
-🌆 Evening: 255 → 251 (-4) 🟡
-```
+Access is limited to the child and parents: Telegram initData signature is verified and
+data older than 24 hours is rejected. PWA: the Mini App installs to the home screen and a
+service worker caches the app shell (API data is never cached).
 
 ---
 
@@ -140,28 +130,35 @@ Average: 248
 
 | Event | When | Who |
 |-------|------|-----|
-| ⏰ Morning reading missed | 10:00, if no 🌅 | Both parents |
-| ⏰ Evening reading missed | 22:00, if no 🌆 | Both parents |
-| 📋 Weekly report | Sun 21:00 | Both parents |
-| 🚨 Red zone | Instant | Both parents |
-| 📝 New reading | Instant | Other parent |
+| ⏰ Missed reading (morning/evening) | Per family hours (default 10:00 / 22:00) | Family parents |
+| 🤖 Auto-carry record | Same, if a previous value exists | Family parents |
+| 📋 Weekly report | Sun 21:00 | Family parents (per child) |
+| 🚨 Red zone | Instant | Parents (except the author) |
+| 📝 New reading | Instant | Other parents |
+| 🎉 Achievement | On unlock (once) | Family parents |
 
 ---
 
 ## 🗂 Project Structure
 
 ```
-picklo/
-├── bot.py              # Main bot logic (~790 lines)
-├── database.py         # SQLite CRUD (~275 lines)
-├── config.py           # Settings, family IDs, thresholds (~70 lines)
-├── test/               # Pytest tests (test/test_bot.py etc.)
-├── requirements.txt    # Python dependencies
-├── .env                # Environment variables
+peakflow/
+├── bot.py              # Bot logic (handlers, FSM, scheduler)
+├── database.py         # SQLite CRUD + migrations (PRAGMA user_version, schema v5)
+├── config.py           # Settings and thresholds
+├── report.py           # Pure helpers and CSV
+├── report_pdf.py       # Doctor PDF reports (A4)
+├── gamification.py     # Day streak and achievements
+├── analytics.py        # Zones, weekdays, trend, note correlation
+├── metrics.py          # In-process metrics + Prometheus render
+├── web/                # Mini App: api.py, server.py, auth.py, notify.py, static/ (PWA)
+├── scripts/            # migration_dry_run.py
+├── test/               # Pytest tests
+├── manage.sh           # Install & operations
 ├── .env.example        # .env template
-├── readme-en.md        # This file
-├── readme-ru.md        # Russian version
-└── PROJECT.md          # Full technical documentation
+├── PROJECT.md          # Full technical documentation
+├── wiki.md             # Code-level logic documentation
+└── roadmap.md          # Historical audit and roadmap
 ```
 
 ---
@@ -173,14 +170,12 @@ python -m pytest test/ -v
 ```
 
 ```
-19 passed in ~9s
+598 passed
 ```
 
-| Category | Tests |
-|----------|:---:|
-| Database | 11 |
-| Config | 4 |
-| Bot helpers | 4 |
+Tests run without `.env` (`test/conftest.py` sets a test DB and dummy token). CI
+([GitHub Actions](.github/workflows/ci.yml)) additionally runs `pyflakes` and `compileall`
+on Python 3.11 and 3.12.
 
 ---
 
@@ -191,52 +186,35 @@ python -m pytest test/ -v
 | Variable | Type | Req. | Default | Description |
 |----------|------|:---:|:---:|-------------|
 | `BOT_TOKEN` | string | ✅ | — | Bot token from BotFather |
-| `CHILD_ID` | int | ✅ | — | Child's Telegram ID |
-| `PARENT_IDS` | string | ✅ | — | Parents' IDs, comma-separated |
-| `CHILD_NAME` | string | ❌ | `Child` | Child's display name |
-| `TARGET_PEF` | int | ❌ | `260` | Target PEF from doctor (L/min) |
+| `CHILD_ID` | int | ❌ | `0` | Family #1 child Telegram ID (seed/fallback) |
+| `PARENT_IDS` | string | ❌ | `0,0` | Family #1 parent IDs, comma-separated (seed/fallback) |
+| `CHILD_NAME` | string | ❌ | `Ребёнок` | Family #1 child display name |
+| `TARGET_PEF` | int | ❌ | `260` | Default target PEF |
 | `DB_PATH` | string | ❌ | `peakflow.db` | SQLite database path |
+| `TZ_OFFSET` | int | ❌ | `5` | Time zone (UTC offset) |
+| `WEBAPP_HOST` | string | ❌ | `127.0.0.1` | Mini App web server host |
+| `WEBAPP_PORT` | int | ❌ | `8080` | Port (0 = disable web) |
+| `WEBAPP_URL` | string | ❌ | — | Public HTTPS URL of the Mini App |
+| `METRICS_ENABLED` | bool | ❌ | `0` | `1` — enable `GET /metrics` |
+| `METRICS_TOKEN` | string | ❌ | — | Bearer token for `/metrics` |
 
 ### Constants (in `config.py`)
 
 | Constant | Value | Description |
 |----------|:---:|-------------|
 | `ZONE_GREEN` | `80` | Green zone threshold, % |
-| `ZONE_YELLOW` | `60` | Yellow zone threshold, % |
-| `REMINDER_MORNING_DEADLINE` | `10` | Morning reading deadline (hour) |
-| `REMINDER_EVENING_DEADLINE` | `22` | Evening reading deadline (hour) |
+| `ZONE_YELLOW` | `60` | Yellow zone threshold, %; red is below |
 | `WEEKLY_REPORT_DAY` | `6` | Report day (0=Mon, 6=Sun) |
 | `WEEKLY_REPORT_HOUR` | `21` | Report hour |
 
----
-
-## 📊 PEF Norms by Age
-
-Reference values (do not replace medical advice):
-
-| Age | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 |
-|-----|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| PEF, L/min | 140 | 170 | 200 | 230 | 260 | 290 | 320 | 350 | 380 | 410 | 440 | 470 | 500 | 530 | 560 |
-
----
-
-## 📸 Chart
-
-The 30-day chart includes:
-
-- 📈 Line of all readings
-- 🟠 Morning reading dots
-- 🟣 Evening reading dots
-- 🟢 Target norm line
-- 🏆 Best result annotation
-- ⚠️ Worst result annotation
+> Reminder hours are per family (set by a parent).
 
 ---
 
 ## ⚠️ Disclaimer
 
-> **This bot is not a medical device.**  
-> It is designed solely for monitoring and tracking data.  
+> **This bot is not a medical device.**
+> It is designed solely for monitoring and tracking data.
 > All treatment decisions must be made in consultation with a qualified healthcare professional.
 
 ---
@@ -244,11 +222,3 @@ The 30-day chart includes:
 ## 📄 License
 
 MIT
-
----
-
-<div align="center">
-
-**Made with ❤️ for health**
-
-</div>
