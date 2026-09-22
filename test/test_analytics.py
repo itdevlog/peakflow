@@ -89,6 +89,17 @@ class TestMatchNoteGroups:
         got = match_note_groups("болел, не спал")
         assert "sick" in got and "night" in got
 
+    def test_no_false_positives(self):
+        from analytics import match_note_groups
+        assert match_note_groups("более менее нормально") == []
+        assert match_note_groups("поехал на транспорте") == []
+        assert match_note_groups("новый паспорт") == []
+
+    def test_word_start_forms(self):
+        from analytics import match_note_groups
+        assert match_note_groups("заболел вчера") == ["sick"]
+        assert match_note_groups("болела голова") == ["sick"]
+
 
 class TestNoteCorrelation:
     def test_avg_count_delta(self):
@@ -117,3 +128,16 @@ class TestNoteCorrelation:
         out = note_correlation([])
         assert out["baseline"] == {"avg": None, "count": 0}
         assert all(g["count"] == 0 for g in out["groups"])
+
+    def test_multi_group_row_counted_in_each(self):
+        from analytics import note_correlation
+        rows = [
+            {"pef_value": 250, "note": ""},
+            {"pef_value": 200, "note": "болел, не спал"},
+        ]
+        out = note_correlation(rows)
+        assert out["baseline"] == {"avg": 250.0, "count": 1}
+        sick = next(g for g in out["groups"] if g["key"] == "sick")
+        night = next(g for g in out["groups"] if g["key"] == "night")
+        assert sick["count"] == 1 and night["count"] == 1
+        assert sick["delta"] == -50.0

@@ -195,10 +195,14 @@ async function loadStats() {
 
 function notesCard(notes) {
   const base = notes && notes.baseline;
+  const groups = (notes && notes.groups) || [];
+  if (!groups.some((g) => g.count)) {
+    return `<div class="card"><div class="label">Заметки</div><div class="hint">Нет данных</div></div>`;
+  }
   const baseLine = (base && base.avg != null)
     ? `Обычно: ${Math.round(base.avg)} (${base.count})`
     : "Нет данных";
-  const rows = ((notes && notes.groups) || []).map((g) => {
+  const rows = groups.map((g) => {
     if (!g.count) {
       return `<div class="row"><span>${esc(g.title)}</span><span class="label">—</span></div>`;
     }

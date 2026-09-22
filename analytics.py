@@ -3,6 +3,7 @@
 Чистый модуль: только stdlib + report.pef_zone. Не импортирует
 bot.py/database.py/aiogram/matplotlib.
 """
+import re
 from datetime import date
 
 from report import pef_zone
@@ -57,7 +58,8 @@ def linear_fit(values) -> tuple:
 
 
 NOTE_GROUPS = [
-    {"key": "sick",    "title": "Болел",     "roots": ["боле", "температ", "просту"]},
+    {"key": "sick",    "title": "Болел",
+     "roots": ["болел", "болит", "болезн", "болеет", "болею", "заболе", "температ", "просту"]},
     {"key": "sport",   "title": "Спорт",     "roots": ["спорт", "трениров"]},
     {"key": "meds",    "title": "Лекарства", "roots": ["лекарств", "ингаляц", "беродуал", "вентолин"]},
     {"key": "allergy", "title": "Аллергия",  "roots": ["аллерг"]},
@@ -65,12 +67,16 @@ NOTE_GROUPS = [
 ]
 
 
-def match_note_groups(note) -> list:
-    """Group keys whose roots occur in the note (case-insensitive)."""
+def _matches(text, root) -> bool:
+    return re.search(r"(?<![а-яё])" + re.escape(root), text) is not None
+
+
+def match_note_groups(note) -> list[str]:
+    """Group keys whose roots occur at a word start in the note (case-insensitive)."""
     text = (note or "").lower()
     if not text:
         return []
-    return [g["key"] for g in NOTE_GROUPS if any(root in text for root in g["roots"])]
+    return [g["key"] for g in NOTE_GROUPS if any(_matches(text, root) for root in g["roots"])]
 
 
 def note_correlation(rows) -> dict:
