@@ -444,9 +444,15 @@ function toggleCompare() {
   document.querySelectorAll("[data-chart-type]").forEach((b) => { b.style.display = on ? "none" : ""; });
   $("chart-compare").classList.toggle("active", on);
   if (on) {
+    $("chart-prev").disabled = true;
+    $("chart-next").disabled = true;
     loadCompare().catch((e) => showError(e.message));
   } else {
     if (state.chartData && state.chartData.title) $("chart-title").textContent = state.chartData.title;
+    if (state.chartData) {
+      $("chart-prev").disabled = !state.chartData.can_prev;
+      $("chart-next").disabled = !state.chartData.can_next;
+    }
     redrawChart();
   }
 }
