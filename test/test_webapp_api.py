@@ -718,6 +718,13 @@ class TestMiniAppChartUi:
         assert "state.months" in js
         assert "note-save" in js and "disabled" in js
 
+    def test_compare_ui(self):
+        js = self._js()
+        html = self._html()
+        assert "chart-compare" in html and "chart-compare" in js
+        assert "chartCompare" in js
+        assert "drawCompare" in js and "/api/chart/compare" in js
+
 
 class TestDailyAverageSeries:
     def test_average_per_day(self):
