@@ -51,7 +51,7 @@ def linear_fit(values) -> tuple[float, float]
   "zones": {"green": 12, "yellow": 4, "red": 1},
   "weekday": [{"avg": 250.0, "count": 3, "zone": "green"}, null, null, null, null, null, null],
   "trend": {
-    "n": 10, "slope": 1.1, "per_week": 7.7,
+    "n": 10, "slope": 1.1, "intercept": 240.0, "per_week": 7.7,
     "daily": [{"date": "2026-09-08", "avg": 248.0}, {"date": "2026-09-09", "avg": 250.0}]
   }
 }
@@ -60,7 +60,7 @@ def linear_fit(values) -> tuple[float, float]
 - `zones` и `weekday` — по всем замерам: `get_measurements_between(child, "2000-01-01", today, family_id)`.
 - `trend` — по последним **14 дням** (`today-13..today`): `report.daily_average_series`
   по списку дат; пустые дни (None) пропускаются; `linear_fit` средних; `slope` — на день,
-  `per_week = slope * 7`; `daily` — только дни с данными.
+  `intercept` — свободный член фита, `per_week = slope * 7`; `daily` — только дни с данными.
 - Данные — строго по активному ребёнку/семье; новых зависимостей нет.
 
 ---
