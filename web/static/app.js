@@ -401,7 +401,7 @@ function drawCompare(data) {
     ctx.fillText(String(Math.round(v)), 4, yToPx(v) + 3);
   }
   if (target) {
-    ctx.strokeStyle = "#2ea6ff"; ctx.setLineDash([4, 4]); ctx.beginPath();
+    ctx.strokeStyle = "#9aa0a6"; ctx.setLineDash([4, 4]); ctx.beginPath();
     ctx.moveTo(padL, yToPx(target)); ctx.lineTo(cssW - padR, yToPx(target)); ctx.stroke();
     ctx.setLineDash([]);
   }
@@ -419,7 +419,7 @@ function drawCompare(data) {
       ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xToPx(i), yToPx(v), 3, 0, Math.PI * 2); ctx.fill();
     });
   };
-  drawSeries(data.previous, "#9aa0a6", [5, 4]);
+  drawSeries(data.previous, "#c0c4c8", [5, 4]);
   drawSeries(data.current, "#2ea6ff", []);
   ctx.fillStyle = "#777";
   data.labels.forEach((lab, i) => {
@@ -434,7 +434,21 @@ async function loadCompare() {
   state.compareData = data;
   $("chart-title").textContent = data.title;
   $("chart-tip").hidden = true;
+  const empty = data.current.every((v) => v == null) && data.previous.every((v) => v == null);
+  const oldHint = $("screen-chart").querySelector(".hint");
+  if (empty) {
+    initChart().ctx.clearRect(0, 0, 9999, 9999);
+    $("chart").style.display = "none";
+    if (!oldHint) {
+      const h = document.createElement("div");
+      h.className = "hint";
+      h.textContent = "Нет данных для сравнения";
+      $("screen-chart").appendChild(h);
+    }
+    return;
+  }
   $("chart").style.display = "block";
+  if (oldHint) oldHint.remove();
   drawCompare(data);
 }
 
@@ -492,7 +506,16 @@ function chartClick(ev) {
   } else { tip.hidden = true; }
 }
 
+function resetCompare() {
+  state.chartCompare = false;
+  state.compareData = null;
+  document.querySelectorAll("[data-chart-type]").forEach((b) => { b.style.display = ""; });
+  const cb = $("chart-compare");
+  if (cb) cb.classList.remove("active");
+}
+
 async function loadChart(year, month) {
+  resetCompare();
   const q = (year && month) ? `?year=${year}&month=${month}` : "";
   const data = await api(`/api/chart${q}`);
   state.target = data.target_pef || state.target;
@@ -526,6 +549,7 @@ let _resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(_resizeTimer);
   _resizeTimer = setTimeout(() => {
+    if (state.chartCompare && state.compareData) { drawCompare(state.compareData); return; }
     const d = state.chartData;
     if (d && d.points && d.points.length && $("chart").offsetParent) {
       redrawChart();

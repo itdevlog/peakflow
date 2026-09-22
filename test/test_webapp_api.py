@@ -724,6 +724,8 @@ class TestMiniAppChartUi:
         assert "chart-compare" in html and "chart-compare" in js
         assert "chartCompare" in js
         assert "drawCompare" in js and "/api/chart/compare" in js
+        assert "resetCompare" in js
+        assert "Нет данных для сравнения" in js
 
 
 class TestDailyAverageSeries:
