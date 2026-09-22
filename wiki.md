@@ -808,6 +808,7 @@ loop каждые 60 секунд:
 - ✅ PDF-отчёт врачу (SP4A): `report_pdf.py`, кнопка «📄 Отчёт врачу» в боте и Mini App, `GET /api/report/pdf` (неделя/месяц/квартал).
 - ✅ Геймификация (SP4B): `gamification.py`, streak в статусе, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, схема v5.
 - ✅ Метрики (SP4D): `metrics.py` (реестр + Prometheus-рендер), расширенный `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware/access-лог.
+- ✅ PWA (SP5C): `manifest.json` + SVG-иконка, офлайн app-shell через `sw.js`, `/api/`/`healthz`/`metrics` не кэшируются.
 - Дальше: Фаза 5 (развитие Mini App); план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
@@ -819,10 +820,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 561 тестов
+python -m pytest test/ -v         # 565 тестов
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), PWA SP5C (манифест/иконка, линковка и регистрация SW, токены SW: версия/`/api/`-байпас/`skipWaiting`/`clients.claim`/`addAll`/`navigate`), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
@@ -847,7 +848,8 @@ aiogram (отдельного сервиса/порта процессов не�
 - `web/api.py` — read-only эндпоинты: `/api/me`, `/api/status`,
   `/api/history`, `/api/chart`, `/api/stats`.
 - `web/static/` — `index.html`, `app.js` (vanilla JS + Telegram WebApp SDK,
-  интерактивный график на `<canvas>`), `style.css`.
+  интерактивный график на `<canvas>`), `style.css`, PWA-файлы
+  `manifest.json`/`icon.svg`/`sw.js` (SP5C).
 - Кнопка «💨 Дневник» ставится в `bot._setup_menu_button()`, если задан
   `WEBAPP_URL`. Наружу биндить только за Caddy (HTTPS обязателен для initData).
 
@@ -995,6 +997,26 @@ aiogram (отдельного сервиса/порта процессов не�
   «День <label> · текущий: … · прошлый: …» (`null` → `—`). Выключение режима
   восстанавливает заголовок/навигацию и вызывает `redrawChart()`. При смене
   диапазона (`week`/`month`) в режиме сравнения `loadCompare()` перезапрашивается.
+
+#### Mini App (SP5C): PWA — установка и офлайн app-shell
+
+- `web/static/manifest.json` — `name`/`short_name` «Пикфлоуметр»,
+  `start_url`/`scope` `./`, `display: standalone`, `theme_color #2ea6ff`,
+  SVG-иконка `icon.svg` (`sizes: any`, `purpose: any maskable`).
+- `web/static/index.html` — `<link rel="manifest" href="/manifest.json">`,
+  `<meta name="theme-color" content="#2ea6ff">`, `<link rel="icon" … icon.svg>`
+  и регистрация `/sw.js` под guard'ом (`"serviceWorker" in navigator` +
+  `.catch(() => {})`).
+- `web/static/sw.js` — нативный Cache API (без workbox/`importScripts`):
+  `CACHE = "peakflow-v1"`,
+  `SHELL = ["/", "/index.html", "/app.js", "/style.css", "/manifest.json", "/icon.svg"]`.
+  `install` — `addAll(SHELL)` + `skipWaiting`; `activate` — удаление всех кэшей
+  кроме `CACHE` + `clients.claim`; `fetch` (только GET, same-origin):
+  `/api/`, `/healthz`, `/metrics` **не перехватываются** (network-only),
+  навигация — network-first с fallback на `index.html`, прочая статика —
+  cache-first с дозаписью в кэш.
+- Progressive enhancement: без HTTPS/в Telegram WebView SW не регистрируется,
+  приложение работает как раньше; данные замеров (API) в кэш не попадают.
 
 #### Метрики (SP4D): реестр, `/healthz`, `/metrics`, логи
 
