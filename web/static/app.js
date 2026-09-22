@@ -359,7 +359,7 @@ function redrawChart() {
 function pointZone(p, data) {
   const t = (data && data.target_pef) || 0;
   if (!t) return { pct: null, emoji: "" };
-  const pct = Math.round((p.pef / t) * 100);
+  const pct = Math.floor((p.pef / t) * 100);
   const zones = (data && data.zones) || {};
   if (pct >= (zones.green || 80)) return { pct, emoji: "🟢" };
   if (pct >= (zones.yellow || 60)) return { pct, emoji: "🟡" };
