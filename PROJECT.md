@@ -55,7 +55,7 @@ peakflow/
 ├── gamification.py     # Геймификация: серия дней и достижения, чистые расчёты (SP4B)
 ├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (546)
+├── test/               # Pytest тесты (554)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -699,6 +699,17 @@ PDF-отчёт врачу (SP4A): `GET /api/report/pdf?period=week|month|quarter
 (`[{code, emoji, title, unlocked, unlocked_at}]`); нет активного ребёнка → 404.
 В табе статистики Mini App — карточка «🔥 Серия» и сетка бейджей.
 
+Интерактивный график (SP5A): `GET /api/chart` в каждой точке отдаёт `note`
+(заметка к замеру), а также `available_months` для навигации по месяцам. В табе
+графика Mini App — переключатели типа (`line`/`bars`/`points`) и диапазона
+(`week`/`month`; неделя — клиентский фильтр последних 7 дней от последней точки,
+без межмесячного диапазона). Тап по графику открывает тултип с полной
+информацией: значение (л/мин), дата, время суток, `%` от цели с эмодзи зоны
+(🟢/🟡/🔴, `%` округляется вниз как в карточках) и заметка (`note`). UX-мелочи:
+busy-guard на сохранении заметки (кнопка блокируется на время запроса),
+кэш месяцев (`state.months`) в `shiftMonth`, баннер-подсказка «откройте
+приложение через Telegram» при истёкшем initData (HTTP 401 → `showAuthHint`).
+
 Метрики (SP4D): `GET /healthz` отдаёт `status`, `uptime_seconds`,
 `last_scheduler_tick` и счётчики БД `families`/`children`/`measurements`; при
 `state.bot_ok == False` — по-прежнему 503 `{"status": "bot down"}`.
@@ -724,7 +735,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 546 passed
+# 554 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
