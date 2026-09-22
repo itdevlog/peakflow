@@ -53,10 +53,10 @@ peakflow/
 ├── report.py           # Чистые хелперы и CSV (общие для бота и Mini App)
 ├── report_pdf.py       # PDF-отчёты врачу: периоды, статистика, график, A4-вёрстка (SP4A)
 ├── gamification.py     # Геймификация: серия дней и достижения, чистые расчёты (SP4B)
-├── analytics.py        # Аналитика ПСВ: зоны, средние по дням недели, МНК-тренд (SP5D)
+├── analytics.py        # Аналитика ПСВ: зоны, дни недели, тренд, корреляция заметок (SP5D, SP5E)
 ├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (578)
+├── test/               # Pytest тесты (587)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -522,7 +522,7 @@ def main():
 
 ---
 
-## Модуль `analytics.py` (SP5D)
+## Модуль `analytics.py` (SP5D, SP5E)
 
 Чистый модуль (только stdlib + `report.pef_zone`), не импортирует
 `bot.py`/`database.py`/aiogram/matplotlib. Считает агрегаты ПСВ для вкладки
@@ -533,6 +533,14 @@ def main():
 | `zone_distribution(rows, target, zone_green=80, zone_yellow=60)` | `iterable[dict], int, int, int` | `dict` | Число замеров по зонам `{green, yellow, red}` |
 | `weekday_averages(rows, target, zone_green=80, zone_yellow=60)` | `iterable[dict], int, int, int` | `list` | 7 элементов (Пн=0…Вс=6): `{avg, count, zone}` или `None`, если в этот день недели замеров не было |
 | `linear_fit(values)` | `iterable[float]` | `tuple` | МНК-прямая `(slope, intercept)` по `x=0..n-1`; пусто → `(0.0, 0.0)`, один элемент → `(0.0, v)` |
+| `match_note_groups(note)` | `str \| None` | `list` | Ключи групп `NOTE_GROUPS`, чьи корни встречаются в заметке (нижний регистр, подстрока); пусто/`None` → `[]` |
+| `note_correlation(rows)` | `iterable[dict]` | `dict` | `baseline` (`{avg, count}` — замеры без групп) и `groups` (`[{key, title, avg, count, delta}]`); `delta = avg − baseline.avg` или `None` |
+
+`NOTE_GROUPS` — список групп с ключом, названием и корнями слов: «Болел»
+(`боле`/`температ`/`просту`), «Спорт» (`спорт`/`трениров`), «Лекарства»
+(`лекарств`/`ингаляц`/`беродуал`/`вентолин`), «Аллергия» (`аллерг`), «Ночь»
+(`ночь`/`ночн`/`не спал`). Замер, попавший в несколько групп, учитывается в
+каждой.
 
 `row["measured_at"]` парсится как ISO-дата (невалидные пропускаются); зона
 определяется общим `report.pef_zone` по целевой ПСВ. В Mini App модуль питает
@@ -762,15 +770,18 @@ Service worker `web/static/sw.js` (нативный Cache API без workbox) к
 поддержка Service Worker; в окружениях без него (часть WebView) она просто не
 выполняется, ничего не ломая.
 
-Аналитика (SP5D): `GET /api/analytics` (любая роль) отдаёт
+Аналитика (SP5D, SP5E): `GET /api/analytics` (любая роль) отдаёт
 `zones` (`{green, yellow, red}` — распределение всех замеров ребёнка по зонам),
 `weekday` (`[{avg, count, zone}|null]` × 7, Пн=0) и `trend`
 (`{n, slope, intercept, per_week, daily:[{date, avg}]}` — МНК по средним за
 день за последние 14 дней, `per_week = slope × 7`); нет активного ребёнка →
-404, данные scoped по `(family_id, active_child_id)`. В Mini App — вкладка
-«Аналитика» (`loadAnalytics`): круговая диаграмма зон (`drawPie`), heatmap
-среднего ПСВ по дням недели (`drawHeatmap`) и линия тренда за 14 дней
-(`drawTrend`).
+404, данные scoped по `(family_id, active_child_id)`. SP5E добавляет `notes`
+(`{baseline:{avg,count}, groups:[{key,title,avg,count,delta}]}` — корреляция
+заметок с ПСВ: базовый уровень по замерам без групп и отклонение Δ по каждой
+группе). В Mini App — вкладка «Аналитика» (`loadAnalytics`): круговая диаграмма
+зон (`drawPie`), heatmap среднего ПСВ по дням недели (`drawHeatmap`), линия
+тренда за 14 дней (`drawTrend`) и секция «Заметки» (`notesCard`) с «Обычно:
+`avg` (`count`)» и Δ по группам (🟢 при `delta ≥ 0`, 🔴 при `delta < 0`).
 
 Метрики (SP4D): `GET /healthz` отдаёт `status`, `uptime_seconds`,
 `last_scheduler_tick` и счётчики БД `families`/`children`/`measurements`; при
@@ -797,7 +808,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 578 passed
+# 587 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

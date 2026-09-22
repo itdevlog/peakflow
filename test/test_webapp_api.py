@@ -863,7 +863,7 @@ class TestAnalyticsApi:
         conn.commit()
         conn.close()
         body = _client().get("/api/analytics", headers=_auth(CHILD_ID)).json()
-        assert set(body) == {"zones", "weekday", "trend"}
+        assert set(body) == {"zones", "weekday", "trend", "notes"}
         assert body["zones"]["green"] == 2
         assert len(body["weekday"]) == 7
         assert body["trend"]["n"] == 1
@@ -898,3 +898,28 @@ class TestAnalyticsApi:
         assert "screen-analytics" in html and 'data-screen="analytics"' in html
         for token in ("loadAnalytics", "drawPie", "drawHeatmap", "drawTrend", "/api/analytics"):
             assert token in js
+
+    def test_notes_ui(self):
+        import pathlib
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "notesCard" in js and "Заметки" in js
+
+
+class TestNotesAnalytics:
+    def test_notes_field(self):
+        _setup_db()
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(TEST_DB)
+        for pef, note in ((250, ""), (200, "болел")):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source, note) VALUES (1, ?, ?, 'morning', ?, ?, "
+                "'manual', ?)", (CHILD_ID, pef, now, CHILD_ID, note))
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/analytics", headers=_auth(CHILD_ID)).json()
+        assert "notes" in body
+        assert body["notes"]["baseline"]["count"] == 1
+        sick = next(g for g in body["notes"]["groups"] if g["key"] == "sick")
+        assert sick["count"] == 1 and sick["delta"] == -50.0

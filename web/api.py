@@ -49,7 +49,7 @@ from database import (
 import gamification
 import metrics
 import report_pdf
-from analytics import linear_fit, weekday_averages, zone_distribution
+from analytics import linear_fit, note_correlation, weekday_averages, zone_distribution
 from report import build_csv_content as _build_csv, daily_average_series, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
@@ -466,6 +466,7 @@ def create_app(services: dict) -> FastAPI:
             "weekday": weekday_averages(rows, target, zg, zy),
             "trend": {"n": len(daily), "slope": slope, "intercept": intercept,
                       "per_week": slope * 7, "daily": daily},
+            "notes": note_correlation(rows),
         }
 
     @app.get("/api/gamification")
