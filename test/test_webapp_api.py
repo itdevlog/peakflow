@@ -733,3 +733,70 @@ class TestDailyAverageSeries:
         from report import daily_average_series
         assert daily_average_series([], ["2026-09-21"]) == [None]
 
+
+
+class TestChartCompare:
+    def _today(self):
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).date()
+
+    def _rand(self, day, pef):
+        import sqlite3
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, ?, ?, 'morning', ?, ?, 'manual')",
+            (CHILD_ID, pef, f"{day} 08:00:00", CHILD_ID))
+        conn.commit()
+        conn.close()
+
+    def test_week_compare(self):
+        _setup_db()
+        import report_pdf
+        today = self._today()
+        cur_start, cur_end = report_pdf.period_bounds("week", today)
+        from datetime import date, timedelta
+        prev_day = (date.fromisoformat(cur_start) - timedelta(days=1)).isoformat()
+        next_day = (date.fromisoformat(cur_start) + timedelta(days=1)).isoformat()
+        self._rand(cur_start, 240)
+        self._rand(next_day, 260)
+        self._rand(prev_day, 200)
+        body = _client().get("/api/chart/compare?period=week", headers=_auth(CHILD_ID)).json()
+        assert body["period"] == "week"
+        assert body["labels"] == ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        assert len(body["current"]) == 7 and len(body["previous"]) == 7
+        assert body["current"][0] == 240.0
+        assert body["current"][1] == 260.0
+        assert body["current"][2] is None
+        assert body["previous"][6] == 200.0  # prev Sunday
+
+    def test_month_alignment(self):
+        _setup_db()
+        body = _client().get("/api/chart/compare?period=month", headers=_auth(CHILD_ID)).json()
+        assert body["period"] == "month"
+        assert len(body["labels"]) == len(body["current"]) == len(body["previous"])
+        assert body["labels"][0] == "1"
+        assert set(body) == {"period", "labels", "current", "previous",
+                             "target_pef", "zones", "title"}
+
+    def test_compare_bad_period(self):
+        _setup_db()
+        assert _client().get("/api/chart/compare?period=year",
+                             headers=_auth(CHILD_ID)).status_code == 422
+
+    def test_compare_isolation(self):
+        _setup_db()
+        from database import create_family_with_owner, add_member
+        f2 = create_family_with_owner(TEST_DB, 999, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        # family #1 row reusing family #2's child id must not leak
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, 700, 250, 'morning', "
+            "'2026-09-01 08:00:00', 700, 'manual')")
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/chart/compare?period=month", headers=_auth(999)).json()
+        assert all(v is None for v in body["current"])
+        assert all(v is None for v in body["previous"])

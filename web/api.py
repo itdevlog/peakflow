@@ -7,7 +7,7 @@ import os
 import sqlite3
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -49,7 +49,7 @@ from database import (
 import gamification
 import metrics
 import report_pdf
-from report import build_csv_content as _build_csv, parse_month
+from report import build_csv_content as _build_csv, daily_average_series, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
 
@@ -149,6 +149,15 @@ def _month_bounds(year: int, month: int) -> tuple[str, str]:
     first_next = (datetime(year, month, 28) + timedelta(days=4)).replace(day=1)
     last_day = first_next - timedelta(days=1)
     return start, last_day.strftime("%Y-%m-%d")
+
+
+def _date_list(start_iso: str, end_iso: str) -> list:
+    d, e = date.fromisoformat(start_iso), date.fromisoformat(end_iso)
+    out = []
+    while d <= e:
+        out.append(d.isoformat())
+        d += timedelta(days=1)
+    return out
 
 
 def _shape_children(children: list) -> list:
@@ -387,6 +396,42 @@ def create_app(services: dict) -> FastAPI:
             "can_prev": any(m < requested for m in available),
             "can_next": any(m > requested for m in available),
             "available_months": [f"{y:04d}-{m:02d}" for y, m in available],
+        }
+
+    @app.get("/api/chart/compare")
+    async def chart_compare(period: str = "week", auth: dict = Depends(require_user)):
+        if period not in ("week", "month"):
+            raise HTTPException(422, "Неверный период")
+        child_id = auth["active_child_id"]
+        if child_id is None:
+            raise HTTPException(404, "Нет активного ребёнка")
+        today = datetime.now(
+            timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))
+        ).date()
+        cur_start, cur_end = report_pdf.period_bounds(period, today)
+        prev_ref = date.fromisoformat(cur_start) - timedelta(days=1)
+        prev_start, prev_end = report_pdf.period_bounds(period, prev_ref)
+        cur_rows = await _db(get_measurements_between, config.DB_PATH, child_id,
+                             cur_start, cur_end, auth["family_id"])
+        prev_rows = await _db(get_measurements_between, config.DB_PATH, child_id,
+                              prev_start, prev_end, auth["family_id"])
+        current = daily_average_series(cur_rows, _date_list(cur_start, cur_end))
+        previous = daily_average_series(prev_rows, _date_list(prev_start, prev_end))
+        length = max(len(current), len(previous))
+        current += [None] * (length - len(current))
+        previous += [None] * (length - len(previous))
+        labels = (["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][:length]
+                  if period == "week" else [str(i + 1) for i in range(length)])
+        return {
+            "period": period,
+            "labels": labels,
+            "current": current,
+            "previous": previous,
+            "target_pef": await _db(_effective_target, config, auth["family_id"]),
+            "zones": {"green": getattr(config, "ZONE_GREEN", 80),
+                      "yellow": getattr(config, "ZONE_YELLOW", 60)},
+            "title": (f"{report_pdf.period_label(period, today)} vs "
+                      f"{report_pdf.period_label(period, prev_ref)}"),
         }
 
     @app.get("/api/stats")
