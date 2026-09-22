@@ -819,7 +819,7 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 554 тестов
+python -m pytest test/ -v         # 561 тестов
 ```
 
 Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
@@ -974,6 +974,27 @@ aiogram (отдельного сервиса/порта процессов не�
   однократно), т.к. initData истекает.
 - **Вне scope:** zoom/pan (pinch), межмесячный диапазон, сторонние
   chart-библиотеки.
+
+#### Mini App (SP5B): сравнение периодов
+
+- `report.daily_average_series(rows, dates)` — чистая функция: средний ПСВ по
+  каждому ISO-дню из `dates` (`None`, если за день нет замеров).
+- `GET /api/chart/compare?period=week|month` (любая роль) →
+  `{period, labels, current, previous, target_pef, zones, title}`. Текущий период
+  считается от сегодня (`report_pdf.period_bounds`), предыдущий — от дня перед
+  его началом (`prev_ref = cur_start - 1 день`); оба ряда — `daily_average_series`
+  и добиты `None` до одной длины. Подписи: `week` → `Пн..Вс`, `month` → `1..N`
+  (выравнивание по числам). `title` — «<текущий> vs <предыдущий>». Неизвестный
+  период → 422, нет активного ребёнка → 404; строки scoped по
+  `(family_id, active_child_id)` (`get_measurements_between`).
+- `app.js`: `state.chartCompare`/`state.compareData`; кнопка `#chart-compare`
+  «Сравнить» → `toggleCompare()` (активный класс, скрытие `[data-chart-type]`,
+  отключение `chart-prev`/`chart-next`) → `loadCompare()` →
+  `drawCompare(data)` на том же canvas: прошлый ряд — серый пунктир, текущий —
+  синий, пунктирная линия цели. `chartClick` в режиме сравнения показывает тултип
+  «День <label> · текущий: … · прошлый: …» (`null` → `—`). Выключение режима
+  восстанавливает заголовок/навигацию и вызывает `redrawChart()`. При смене
+  диапазона (`week`/`month`) в режиме сравнения `loadCompare()` перезапрашивается.
 
 #### Метрики (SP4D): реестр, `/healthz`, `/metrics`, логи
 

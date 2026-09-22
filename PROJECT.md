@@ -55,7 +55,7 @@ peakflow/
 ├── gamification.py     # Геймификация: серия дней и достижения, чистые расчёты (SP4B)
 ├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (554)
+├── test/               # Pytest тесты (561)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -712,6 +712,20 @@ busy-guard на сохранении заметки (кнопка блокиру
 приложение заново из Telegram» при истёкшем initData (HTTP 403 «Нет доступа» →
 `showAuthHint`).
 
+Сравнение периодов (SP5B): `GET /api/chart/compare?period=week|month` (любая роль)
+отдаёт `{period, labels, current, previous, target_pef, zones, title}` — два
+выровненных по дням ряда средних за день (`report.daily_average_series`; `null`
+для дня без замеров, ряды добиты до одной длины). Текущий период считается от
+сегодня (`period_bounds`), предыдущий — от дня перед его началом: неделя — «эта
+vs прошлая» (подписи `Пн..Вс`), месяц выровнен по числам (подписи `1..N`).
+Неизвестный период → 422, нет активного ребёнка → 404; данные scoped по
+`(family_id, active_child_id)`. В табе графика Mini App — кнопка «Сравнить»
+(`toggleCompare`): режим рисует два ряда (`drawCompare`, текущий — синий,
+прошлый — серый пунктир) и линию цели, переключатель типа графика скрывается,
+навигация по месяцам отключается; тап по точке открывает тултип с обоими
+периодами (текущий и прошлый, среднее за день). Повторное нажатие возвращает
+обычный график.
+
 Метрики (SP4D): `GET /healthz` отдаёт `status`, `uptime_seconds`,
 `last_scheduler_tick` и счётчики БД `families`/`children`/`measurements`; при
 `state.bot_ok == False` — по-прежнему 503 `{"status": "bot down"}`.
@@ -737,7 +751,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 554 passed
+# 561 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

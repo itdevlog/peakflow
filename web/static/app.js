@@ -22,6 +22,7 @@ const state = {
   children: [], activeChildId: null,
   chart: { year: null, month: null }, chartData: null, history: { page: 1 },
   chartType: "line", chartRange: "month", months: [],
+  chartCompare: false, compareData: null,
   form: { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false },
 };
 
@@ -374,18 +375,141 @@ function pointZone(p, data) {
   return { pct, emoji: "🔴" };
 }
 
+function drawCompare(data) {
+  const { c, ctx, cssW, cssH } = initChart();
+  ctx.clearRect(0, 0, cssW, cssH);
+  const padL = 38, padR = 12, padT = 12, padB = 24;
+  const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+  const series = data.current.concat(data.previous).filter((v) => v != null);
+  const target = data.target_pef || 0;
+  const all = series.concat(target ? [target] : []);
+  let yMax = all.length ? Math.max(...all) : 300;
+  let yMin = all.length ? Math.min(...all) : 0;
+  if (yMax === yMin) { yMax += 20; yMin = Math.max(0, yMin - 20); }
+  const margin = Math.round((yMax - yMin) * 0.15) || 10;
+  yMax += margin; yMin = Math.max(0, yMin - margin);
+  const yToPx = (v) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+  const n = data.labels.length;
+  const xToPx = (i) => (n <= 1 ? padL + plotW / 2 : padL + (i / (n - 1)) * plotW);
+
+  ctx.strokeStyle = "#999"; ctx.beginPath();
+  ctx.moveTo(padL, padT); ctx.lineTo(padL, cssH - padB); ctx.lineTo(cssW - padR, cssH - padB);
+  ctx.stroke();
+  ctx.fillStyle = "#777"; ctx.font = "10px sans-serif";
+  for (let k = 0; k <= 4; k++) {
+    const v = yMin + ((yMax - yMin) * k) / 4;
+    ctx.fillText(String(Math.round(v)), 4, yToPx(v) + 3);
+  }
+  if (target) {
+    ctx.strokeStyle = "#9aa0a6"; ctx.setLineDash([4, 4]); ctx.beginPath();
+    ctx.moveTo(padL, yToPx(target)); ctx.lineTo(cssW - padR, yToPx(target)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const drawSeries = (arr, color, dash) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.setLineDash(dash); ctx.beginPath();
+    let started = false;
+    arr.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      const x = xToPx(i), y = yToPx(v);
+      if (started) ctx.lineTo(x, y); else { ctx.moveTo(x, y); started = true; }
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+    arr.forEach((v, i) => {
+      if (v == null) return;
+      ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xToPx(i), yToPx(v), 3, 0, Math.PI * 2); ctx.fill();
+    });
+  };
+  drawSeries(data.previous, "#c0c4c8", [5, 4]);
+  drawSeries(data.current, "#2ea6ff", []);
+  ctx.fillStyle = "#777";
+  data.labels.forEach((lab, i) => {
+    if (n <= 14 || i % 2 === 0) ctx.fillText(lab, xToPx(i) - 5, cssH - padB + 14);
+  });
+  c._points = data.labels.map((lab, i) => ({ x: xToPx(i), i, label: lab }));
+}
+
+async function loadCompare() {
+  const period = state.chartRange === "week" ? "week" : "month";
+  const data = await api(`/api/chart/compare?period=${period}`);
+  state.compareData = data;
+  $("chart-title").textContent = data.title;
+  $("chart-tip").hidden = true;
+  const empty = data.current.every((v) => v == null) && data.previous.every((v) => v == null);
+  const oldHint = $("screen-chart").querySelector(".hint");
+  if (empty) {
+    initChart().ctx.clearRect(0, 0, 9999, 9999);
+    $("chart").style.display = "none";
+    if (oldHint) { oldHint.textContent = "Нет данных для сравнения"; }
+    else {
+      const h = document.createElement("div");
+      h.className = "hint";
+      h.textContent = "Нет данных для сравнения";
+      $("screen-chart").appendChild(h);
+    }
+    return;
+  }
+  $("chart").style.display = "block";
+  if (oldHint) oldHint.remove();
+  drawCompare(data);
+}
+
+function toggleCompare() {
+  state.chartCompare = !state.chartCompare;
+  const on = state.chartCompare;
+  document.querySelectorAll("[data-chart-type]").forEach((b) => { b.style.display = on ? "none" : ""; });
+  $("chart-compare").classList.toggle("active", on);
+  if (on) {
+    $("chart-prev").disabled = true;
+    $("chart-next").disabled = true;
+    loadCompare().catch((e) => showError(e.message));
+  } else {
+    const hint = $("screen-chart").querySelector(".hint");
+    const hasData = state.chartData && state.chartData.points && state.chartData.points.length;
+    if (hasData) {
+      if (hint) hint.remove();
+      $("chart").style.display = "block";
+      if (state.chartData.title) $("chart-title").textContent = state.chartData.title;
+      $("chart-prev").disabled = !state.chartData.can_prev;
+      $("chart-next").disabled = !state.chartData.can_next;
+      redrawChart();
+    } else {
+      initChart().ctx.clearRect(0, 0, 9999, 9999);
+      $("chart").style.display = "none";
+      if (hint) { hint.textContent = "В этом месяце замеров нет"; }
+      else {
+        const h = document.createElement("div");
+        h.className = "hint";
+        h.textContent = "В этом месяце замеров нет";
+        $("screen-chart").appendChild(h);
+      }
+    }
+  }
+}
+
 function chartClick(ev) {
   const c = $("chart");
-  const pts = c._points || [];
-  const data = state.chartData || {};
   const rect = c.getBoundingClientRect();
   const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+  const tip = $("chart-tip");
+  const pts = c._points || [];
+
+  if (state.chartCompare && state.compareData) {
+    let best = null, bestD = 1e9;
+    for (const q of pts) { const d = Math.abs(q.x - x); if (d < bestD) { bestD = d; best = q; } }
+    if (!best) { tip.hidden = true; return; }
+    const d = state.compareData;
+    const fmt = (v) => (v == null ? "—" : Math.round(v));
+    tip.hidden = false;
+    tip.textContent = `День ${best.label} · текущий: ${fmt(d.current[best.i])} · прошлый: ${fmt(d.previous[best.i])}`;
+    return;
+  }
+
+  const data = state.chartData || {};
   let best = null, bestD = 1e9;
   for (const q of pts) {
     const d = (q.x - x) ** 2 + (q.y - y) ** 2;
     if (d < bestD) { bestD = d; best = q; }
   }
-  const tip = $("chart-tip");
   if (best && bestD < 900) {
     const p = best.p;
     const z = pointZone(p, data);
@@ -397,7 +521,16 @@ function chartClick(ev) {
   } else { tip.hidden = true; }
 }
 
+function resetCompare() {
+  state.chartCompare = false;
+  state.compareData = null;
+  document.querySelectorAll("[data-chart-type]").forEach((b) => { b.style.display = ""; });
+  const cb = $("chart-compare");
+  if (cb) cb.classList.remove("active");
+}
+
 async function loadChart(year, month) {
+  resetCompare();
   const q = (year && month) ? `?year=${year}&month=${month}` : "";
   const data = await api(`/api/chart${q}`);
   state.target = data.target_pef || state.target;
@@ -431,6 +564,7 @@ let _resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(_resizeTimer);
   _resizeTimer = setTimeout(() => {
+    if (state.chartCompare && state.compareData) { drawCompare(state.compareData); return; }
     const d = state.chartData;
     if (d && d.points && d.points.length && $("chart").offsetParent) {
       redrawChart();
@@ -443,7 +577,12 @@ $("chart-next").onclick = () => shiftMonth(1).catch((e) => showError(e.message))
 document.querySelectorAll("[data-chart-type]").forEach((b) =>
   b.onclick = () => { state.chartType = b.dataset.chartType; redrawChart(); });
 document.querySelectorAll("[data-chart-range]").forEach((b) =>
-  b.onclick = () => { state.chartRange = b.dataset.chartRange; redrawChart(); });
+  b.onclick = () => {
+    state.chartRange = b.dataset.chartRange;
+    if (state.chartCompare) { loadCompare().catch((e) => showError(e.message)); syncChartControls(); }
+    else { redrawChart(); }
+  });
+$("chart-compare").onclick = toggleCompare;
 $("chart").addEventListener("click", chartClick);
 
 async function shiftMonth(delta) {
