@@ -890,3 +890,11 @@ class TestAnalyticsApi:
         body = _client().get("/api/analytics", headers=_auth(999)).json()
         assert sum(body["zones"].values()) == 0
         assert body["trend"]["n"] == 0
+
+    def test_ui_tokens(self):
+        import pathlib
+        html = pathlib.Path("web/static/index.html").read_text(encoding="utf-8")
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "screen-analytics" in html and 'data-screen="analytics"' in html
+        for token in ("loadAnalytics", "drawPie", "drawHeatmap", "drawTrend", "/api/analytics"):
+            assert token in js
