@@ -833,3 +833,12 @@ class TestPwaInstall:
         assert 'name="theme-color"' in html
         assert "/icon.svg" in html
         assert 'navigator.serviceWorker.register("/sw.js")' in html
+
+
+class TestServiceWorker:
+    def test_sw_source(self):
+        import pathlib
+        js = pathlib.Path("web/static/sw.js").read_text(encoding="utf-8")
+        for token in ("peakflow-v", "/api/", "skipWaiting", "clients.claim",
+                      "addAll", '"navigate"'):
+            assert token in js, f"sw.js missing {token!r}"
