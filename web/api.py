@@ -526,6 +526,7 @@ def create_app(services: dict) -> FastAPI:
             child_name=_child_name(auth),
             child_id=child_id,
         )
+        metrics.inc("measurements_saved_total")
         return {"id": mid, "pef": body.pef, "tod": tod,
                 "zone": _pef_zone(body.pef, target, config), "pct": pct, "diff": diff}
 

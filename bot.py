@@ -277,7 +277,7 @@ async def _evaluate_and_notify(child_id, family_id, who, member=None):
                     now_tz().strftime("%Y-%m-%d"))
     if not new:
         return
-    metrics.inc("achievement_notifications_total", value=len(new))
+    metrics.inc("achievements_unlocked_total", value=len(new))
     recipients = set(await _family_parents(member, family_id)) | {child_id}
     recipients.discard(who)
     titles = [f"{a['emoji']} {a['title']}"

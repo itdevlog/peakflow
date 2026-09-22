@@ -570,15 +570,15 @@ Prometheus-меток экранируются.
 `http_last_duration_ms`, `families_count`, `children_count`,
 `measurements_count`, `process_uptime_seconds`, `scheduler_ticks_total`,
 `scheduler_last_tick_timestamp`, `measurements_saved_total`,
-`achievement_notifications_total`, `reminders_sent_total{kind}`.
+`achievements_unlocked_total`, `reminders_sent_total{kind}`.
 
 ### Точки сбора
 
 | Место | Метрика |
 |-------|---------|
 | HTTP-middleware (`web/api.py`) | `http_requests_total{method,status}`, `http_last_duration_ms` |
-| Сохранение замера (`bot.input_pef`) | `measurements_saved_total` |
-| Разблокировка достижений (`_evaluate_and_notify`) | `achievement_notifications_total` |
+| Сохранение замера (бот `_persist_measurement` и Mini App `POST /api/measurements`) | `measurements_saved_total` |
+| Разблокировка достижений (`_evaluate_and_notify`) | `achievements_unlocked_total` |
 | Планировщик, за тик (`scheduler_loop`) | `scheduler_ticks_total`, `scheduler_last_tick_timestamp` |
 | Напоминания | `reminders_sent_total{kind=child\|escalation\|weekly}` |
 | `/metrics` при сборе | `families_count`, `children_count`, `measurements_count`, `process_uptime_seconds` |

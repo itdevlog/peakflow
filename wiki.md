@@ -1071,8 +1071,9 @@ aiogram (отдельного сервиса/порта процессов не�
 - **Точки сбора:**
   - HTTP-middleware (`web/api.py`) — `http_requests_total{method,status}` и
     `http_last_duration_ms` на каждый запрос.
-  - Сохранение замера (`bot.input_pef`) — `measurements_saved_total`.
-  - Разблокировка достижений (`_evaluate_and_notify`) — `achievement_notifications_total`.
+  - Сохранение замера (бот `_persist_measurement` и Mini App `POST /api/measurements`) —
+    `measurements_saved_total`.
+  - Разблокировка достижений (`_evaluate_and_notify`) — `achievements_unlocked_total`.
   - `scheduler_loop` за тик — `scheduler_ticks_total` и
     `scheduler_last_tick_timestamp` (gauge, `time.time()`).
   - Напоминания — `reminders_sent_total{kind="child"|"escalation"|"weekly"}`.

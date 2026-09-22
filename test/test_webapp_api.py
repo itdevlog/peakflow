@@ -923,3 +923,13 @@ class TestNotesAnalytics:
         assert body["notes"]["baseline"]["count"] == 1
         sick = next(g for g in body["notes"]["groups"] if g["key"] == "sick")
         assert sick["count"] == 1 and sick["delta"] == -50.0
+
+
+class TestDebtMetricsWeb:
+    def test_measurement_counts_metric(self):
+        import metrics
+        metrics.reset()
+        _setup_db()
+        r = _client().post("/api/measurements", json={"pef": 250}, headers=_auth(CHILD_ID))
+        assert r.status_code == 200, r.text
+        assert metrics.get_counter("measurements_saved_total") >= 1

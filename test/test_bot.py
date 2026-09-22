@@ -5330,3 +5330,21 @@ class TestBotMetrics:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestDebtMetrics:
+    def test_achievements_unlocked_metric(self):
+        import asyncio
+        import bot
+        import metrics
+        from unittest.mock import AsyncMock, patch
+        metrics.reset()
+        dates = ["2026-09-21", "2026-09-20", "2026-09-19", "2026-09-18",
+                 "2026-09-17", "2026-09-16", "2026-09-15"]
+        with patch.object(bot, "get_measurement_dates", return_value=dates), \
+             patch.object(bot, "count_measurements", return_value=7), \
+             patch.object(bot, "unlock_achievements", return_value={"streak_7"}), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[])), \
+             patch.object(bot.bot, "send_message", new=AsyncMock()):
+            asyncio.run(bot._evaluate_and_notify(111, 1, 999))
+        assert metrics.get_counter("achievements_unlocked_total") == 1
