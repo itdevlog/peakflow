@@ -657,3 +657,24 @@ class TestMetrics:
         assert body["children"] is None
         assert body["measurements"] is None
 
+
+class TestChartNote:
+    def test_chart_includes_note(self):
+        _setup_db()
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source, note) VALUES (1, ?, 250, 'morning', ?, ?, "
+            "'manual', 'болел')",
+            (CHILD_ID, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), CHILD_ID))
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/chart", headers=_auth(CHILD_ID)).json()
+        assert body["points"][0]["note"] == "болел"
+
+    def test_chart_note_empty_string(self):
+        _setup_db()
+        add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID, family_id=1)
+        body = _client().get("/api/chart", headers=_auth(CHILD_ID)).json()
+        assert body["points"][0]["note"] == ""
+

@@ -368,6 +368,7 @@ def create_app(services: dict) -> FastAPI:
                 "tod": r["time_of_day"],
                 "pef": r["pef_value"],
                 "source": r.get("source") or "manual",
+                "note": r.get("note") or "",
             }
             for r in rows
         ]
