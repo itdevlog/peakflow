@@ -2736,6 +2736,140 @@ class TestRegistrationAccessors:
         assert n == 1
 
 
+class TestMemberRemoval:
+    """Removing a registered child from a family (members + its data)."""
+
+    def test_remove_child_deletes_member_and_data(self):
+        from database import (create_family, add_member, add_measurement,
+                              unlock_achievements, mark_reminder_sent,
+                              remove_child, get_member, count_measurements,
+                              get_achievements, was_reminder_sent)
+        fid = create_family(TEST_DB, "Семья")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+        add_measurement(TEST_DB, 250, "morning", 700, 700, family_id=fid)
+        add_measurement(TEST_DB, 260, "evening", 700, 700, family_id=fid)
+        unlock_achievements(TEST_DB, 700, ["streak_7"], "2026-01-01T00:00:00")
+        mark_reminder_sent(TEST_DB, "2026-01-01", "child_morning", 700)
+
+        result = remove_child(TEST_DB, 700, fid)
+
+        assert result == {"member": 1, "measurements": 2,
+                          "achievements": 1, "reminders": 1}
+        assert get_member(TEST_DB, 700) is None
+        assert count_measurements(TEST_DB, 700, fid) == 0
+        assert get_achievements(TEST_DB, 700) == {}
+        assert was_reminder_sent(TEST_DB, "2026-01-01", "child_morning", 700) is False
+
+    def test_remove_child_scoped_to_family(self):
+        from database import create_family, add_member, remove_child, get_member
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+
+        assert remove_child(TEST_DB, 700, f1) is None
+        assert get_member(TEST_DB, 700)["family_id"] == f2
+
+    def test_remove_child_refuses_parent(self):
+        from database import create_family, add_member, remove_child, get_member
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 500, fid, "parent", "Папа")
+
+        assert remove_child(TEST_DB, 500, fid) is None
+        assert get_member(TEST_DB, 500)["role"] == "parent"
+
+    def test_remove_child_missing_returns_none(self):
+        from database import create_family, remove_child
+        fid = create_family(TEST_DB, "A")
+        assert remove_child(TEST_DB, 999, fid) is None
+
+    def test_remove_child_clears_active_child_pointer(self):
+        from database import (create_family, add_member, set_active_child,
+                              remove_child, get_member)
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 500, fid, "parent", "Папа")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+        assert set_active_child(TEST_DB, 500, 700) is True
+
+        remove_child(TEST_DB, 700, fid)
+
+        assert get_member(TEST_DB, 500)["active_child_id"] is None
+
+    def test_remove_child_keeps_other_children_data(self):
+        from database import (create_family, add_member, add_measurement,
+                              remove_child, count_measurements)
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+        add_member(TEST_DB, 701, fid, "child", "Петя")
+        add_measurement(TEST_DB, 250, "morning", 701, 701, family_id=fid)
+
+        remove_child(TEST_DB, 700, fid)
+
+        assert count_measurements(TEST_DB, 701, fid) == 1
+
+    def test_member_data_counts(self):
+        from database import (create_family, add_member, add_measurement,
+                              unlock_achievements, member_data_counts)
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+        add_measurement(TEST_DB, 250, "morning", 700, 700, family_id=fid)
+        unlock_achievements(TEST_DB, 700, ["streak_7"], "2026-01-01T00:00:00")
+
+        assert member_data_counts(TEST_DB, 700, fid) == {
+            "measurements": 1, "achievements": 1}
+
+
+class TestPromoteChild:
+    """Correcting a child member's role back to parent (stuck-parent fix)."""
+
+    def test_promote_changes_role(self):
+        from database import (create_family, add_member,
+                              promote_child_to_parent, get_member)
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 700, fid, "child", "Маша")
+
+        assert promote_child_to_parent(TEST_DB, 700, fid) is True
+        assert get_member(TEST_DB, 700)["role"] == "parent"
+
+    def test_promote_scoped_to_family(self):
+        from database import (create_family, add_member,
+                              promote_child_to_parent, get_member)
+        f1 = create_family(TEST_DB, "A")
+        f2 = create_family(TEST_DB, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+
+        assert promote_child_to_parent(TEST_DB, 700, f1) is False
+        assert get_member(TEST_DB, 700)["role"] == "child"
+
+    def test_promote_refuses_parent(self):
+        from database import (create_family, add_member,
+                              promote_child_to_parent, get_member)
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 500, fid, "parent", "Папа")
+
+        assert promote_child_to_parent(TEST_DB, 500, fid) is False
+        assert get_member(TEST_DB, 500)["role"] == "parent"
+
+    def test_promote_missing_returns_false(self):
+        from database import create_family, promote_child_to_parent
+        fid = create_family(TEST_DB, "A")
+        assert promote_child_to_parent(TEST_DB, 999, fid) is False
+
+
+class TestJoinDoesNotOverwriteRole:
+    def test_join_invite_keeps_existing_member_role(self):
+        """A registered parent redeeming a child card must stay a parent."""
+        from database import (create_family, add_member, create_invite,
+                              join_by_invite, get_member)
+        fid = create_family(TEST_DB, "A")
+        add_member(TEST_DB, 600, fid, "parent", "Папа")
+        token = create_invite(TEST_DB, fid, "child", "Маша")
+
+        res = join_by_invite(TEST_DB, token, 600)
+
+        assert get_member(TEST_DB, 600)["role"] == "parent"
+        assert res == {"family_id": fid, "role": "parent", "name": "Папа"}
+
+
 class TestMemberMiddleware:
     def test_role_from_member(self):
         import bot
@@ -4007,6 +4141,227 @@ class TestFamilyManagement:
 
         d = asyncio.run(run())
         d.assert_called_once_with(TEST_DB, "TOK", 1)
+
+
+class TestManageJoinedChildren:
+    """Removing a joined child / fixing their role from the «Дети» screen."""
+
+    def _cb(self, uid, data):
+        from unittest.mock import AsyncMock, MagicMock
+        cb = MagicMock()
+        cb.data = data
+        cb.from_user.id = uid
+        cb.answer = AsyncMock()
+        cb.message = MagicMock()
+        cb.message.answer = AsyncMock()
+        cb.message.delete = AsyncMock()
+        return cb
+
+    def test_kb_children_shows_member_actions(self):
+        from bot import kb_children
+        kb = kb_children([], children=[{"telegram_id": 700, "name": "Маша"}])
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "rm_child_700" in callbacks
+        assert "promote_700" in callbacks
+
+    def test_children_screen_lists_member_actions(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "children")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+            sent["kb"] = kb
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children",
+                          return_value=[{"telegram_id": 700, "name": "Маша"}]):
+            asyncio.run(bot.cb_children(cb, member={"role": "parent", "family_id": 2}))
+
+        assert "Маша" in sent.get("text", "")
+        callbacks = [b.callback_data for row in sent["kb"].inline_keyboard for b in row]
+        assert "rm_child_700" in callbacks
+        assert "promote_700" in callbacks
+
+    def test_rm_child_shows_confirmation_with_counts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_child_700")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+            sent["kb"] = kb
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "get_member",
+                          return_value={"telegram_id": 700, "role": "child",
+                                        "family_id": 2, "name": "Маша"}), \
+             patch.object(bot, "member_data_counts",
+                          return_value={"measurements": 3, "achievements": 1}):
+            asyncio.run(bot.cb_rm_child(cb, member={"role": "parent", "family_id": 2}))
+
+        assert "Маша" in sent.get("text", "")
+        callbacks = [b.callback_data for row in sent["kb"].inline_keyboard for b in row]
+        assert "rm_yes_700" in callbacks
+
+    def test_rm_child_other_family_alerts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_child_700")
+
+        with patch.object(bot, "get_member",
+                          return_value={"telegram_id": 700, "role": "child",
+                                        "family_id": 3, "name": "Маша"}), \
+             patch.object(bot, "member_data_counts") as counts:
+            asyncio.run(bot.cb_rm_child(cb, member={"role": "parent", "family_id": 2}))
+
+        counts.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_rm_child_malformed_id_alerts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_child_")
+        with patch.object(bot, "member_data_counts") as counts:
+            asyncio.run(bot.cb_rm_child(cb, member={"role": "parent", "family_id": 2}))
+
+        counts.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_rm_child_child_rejected(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_child_700")
+        with patch.object(bot, "get_member") as g, \
+             patch.object(bot, "member_data_counts") as counts:
+            asyncio.run(bot.cb_rm_child(cb, member={"role": "child", "family_id": 2}))
+
+        g.assert_not_called()
+        counts.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_rm_child_yes_deletes_and_redraws(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_yes_700")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "remove_child",
+                          return_value={"member": 1, "measurements": 3,
+                                        "achievements": 1, "reminders": 0}) as d, \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children", return_value=[]):
+            asyncio.run(bot.cb_rm_child_yes(cb, member={"role": "parent", "family_id": 2}))
+
+        d.assert_called_once_with(bot.DB_PATH, 700, 2)
+        cb.answer.assert_awaited()
+
+    def test_rm_child_yes_not_found_alerts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_yes_700")
+        with patch.object(bot, "remove_child", return_value=None), \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children", return_value=[]), \
+             patch.object(bot, "respond"):
+            asyncio.run(bot.cb_rm_child_yes(cb, member={"role": "parent", "family_id": 2}))
+
+        cb.answer.assert_awaited()
+
+    def test_rm_child_yes_child_rejected(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "rm_yes_700")
+        with patch.object(bot, "remove_child") as d:
+            asyncio.run(bot.cb_rm_child_yes(cb, member={"role": "child", "family_id": 2}))
+
+        d.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_promote_child_changes_role_and_redraws(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "promote_700")
+        sent = {}
+
+        async def fake_respond(callback, text, kb=None, parse_mode="Markdown"):
+            sent["text"] = text
+
+        with patch.object(bot, "respond", side_effect=fake_respond), \
+             patch.object(bot, "promote_child_to_parent", return_value=True) as p, \
+             patch.object(bot, "get_member",
+                          return_value={"telegram_id": 700, "role": "child",
+                                        "family_id": 2, "name": "Маша"}), \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children", return_value=[]):
+            asyncio.run(bot.cb_promote_child(cb, member={"role": "parent", "family_id": 2}))
+
+        p.assert_called_once_with(bot.DB_PATH, 700, 2)
+        cb.answer.assert_awaited()
+
+    def test_promote_child_not_found_alerts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "promote_700")
+        with patch.object(bot, "promote_child_to_parent", return_value=False), \
+             patch.object(bot, "get_member", return_value=None), \
+             patch.object(bot, "list_child_cards", return_value=[]), \
+             patch.object(bot, "list_family_children", return_value=[]), \
+             patch.object(bot, "respond"):
+            asyncio.run(bot.cb_promote_child(cb, member={"role": "parent", "family_id": 2}))
+
+        cb.answer.assert_awaited()
+
+    def test_promote_child_malformed_id_alerts(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "promote_")
+        with patch.object(bot, "promote_child_to_parent") as p:
+            asyncio.run(bot.cb_promote_child(cb, member={"role": "parent", "family_id": 2}))
+
+        p.assert_not_called()
+        cb.answer.assert_awaited()
+
+    def test_promote_child_child_rejected(self):
+        import asyncio
+        import bot
+        from unittest.mock import patch
+
+        cb = self._cb(500, "promote_700")
+        with patch.object(bot, "promote_child_to_parent") as p:
+            asyncio.run(bot.cb_promote_child(cb, member={"role": "child", "family_id": 2}))
+
+        p.assert_not_called()
+        cb.answer.assert_awaited()
 
 
 class TestActiveChild:

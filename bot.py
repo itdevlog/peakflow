@@ -64,6 +64,9 @@ from database import (
     list_child_cards,
     create_invite,
     delete_invite,
+    member_data_counts,
+    remove_child,
+    promote_child_to_parent,
     get_measurement_dates,
     count_measurements,
     unlock_achievements,
@@ -1758,10 +1761,25 @@ def _children_text(cards: list, children: list = None, active_id: int = None) ->
     return "\n".join(lines)
 
 
-def kb_children(cards: list) -> InlineKeyboardMarkup:
+def _btn_name(name, limit: int = 24) -> str:
+    """Button-safe member name (Telegram caps button text)."""
+    text = name if name else "без имени"
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def kb_children(cards: list, children: list = None) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text="➕ Добавить ребёнка", callback_data="add_child")]]
+    for c in (children or []):
+        name = _btn_name(c.get("name"))
+        rows.append([
+            InlineKeyboardButton(
+                text=f"👨 {name} → родитель",
+                callback_data=f"promote_{c['telegram_id']}"),
+            InlineKeyboardButton(
+                text="🗑️ Убрать", callback_data=f"rm_child_{c['telegram_id']}"),
+        ])
     for c in cards:
-        name = c["name"] if c.get("name") else "без имени"
+        name = _btn_name(c.get("name"))
         rows.append([InlineKeyboardButton(
             text=f"🗑️ {name}", callback_data=f"del_child_{c['token']}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="settings")])
@@ -1773,7 +1791,7 @@ async def _show_children(callback: types.CallbackQuery, family_id: int,
     cards = await _db(list_child_cards, DB_PATH, family_id)
     children = await _db(list_family_children, DB_PATH, family_id)
     await respond(callback, _children_text(cards, children, active_id),
-                  kb=kb_children(cards))
+                  kb=kb_children(cards, children))
 
 
 @router.callback_query(F.data == "children")
@@ -1839,6 +1857,78 @@ async def cb_del_child(callback: types.CallbackQuery, member=None):
         await callback.answer("❌ Карточка не найдена.", show_alert=True)
     _, child_id = await _ctx(member)
     await _show_children(callback, member["family_id"], child_id)
+
+
+@router.callback_query(F.data.startswith("rm_yes_"))
+async def cb_rm_child_yes(callback: types.CallbackQuery, member=None):
+    """Confirmed removal of a joined child (member row + their data)."""
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
+        return
+    child_id = parse_callback_int(callback.data, "rm_yes_")
+    if child_id is None:
+        await callback.answer("❌ Некорректный ребёнок.", show_alert=True)
+        return
+    result = await _db(remove_child, DB_PATH, child_id, member["family_id"])
+    if result is None:
+        await callback.answer("❌ Ребёнок не найден.", show_alert=True)
+    else:
+        await callback.answer(
+            f"✅ Удалено: участник и {result['measurements']} замер(ов).",
+            show_alert=True)
+    _, active_id = await _ctx(member)
+    await _show_children(callback, member["family_id"], active_id)
+
+
+@router.callback_query(F.data.startswith("rm_child_"))
+async def cb_rm_child(callback: types.CallbackQuery, member=None):
+    """Ask for confirmation before removing a joined child."""
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
+        return
+    child_id = parse_callback_int(callback.data, "rm_child_")
+    if child_id is None:
+        await callback.answer("❌ Некорректный ребёнок.", show_alert=True)
+        return
+    target = await _db(get_member, DB_PATH, child_id)
+    if (not target or target.get("role") != "child"
+            or target.get("family_id") != member["family_id"]):
+        await callback.answer("❌ Ребёнок не найден.", show_alert=True)
+        return
+    counts = await _db(member_data_counts, DB_PATH, child_id, member["family_id"])
+    name = escape_md(target.get("name") or "Ребёнок")
+    text = (
+        f"⚠️ Убрать *{name}* из семьи?\n\n"
+        f"Будут удалены: замеров — {counts['measurements']}, "
+        f"достижений — {counts['achievements']}.\n"
+        f"Действие необратимо."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑️ Да, убрать",
+                              callback_data=f"rm_yes_{child_id}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="children")],
+    ])
+    await respond(callback, text, kb=kb)
+
+
+@router.callback_query(F.data.startswith("promote_"))
+async def cb_promote_child(callback: types.CallbackQuery, member=None):
+    """Fix a mis-assigned role: a child member becomes a parent."""
+    if not _can_manage_family(member, callback.from_user.id):
+        await callback.answer(_family_deny_text(member), show_alert=True)
+        return
+    child_id = parse_callback_int(callback.data, "promote_")
+    if child_id is None:
+        await callback.answer("❌ Некорректный ребёнок.", show_alert=True)
+        return
+    ok = await _db(promote_child_to_parent, DB_PATH, child_id, member["family_id"])
+    if not ok:
+        await callback.answer("❌ Ребёнок не найден.", show_alert=True)
+    else:
+        await callback.answer("✅ Роль изменена: теперь это родитель.",
+                              show_alert=True)
+    _, active_id = await _ctx(member)
+    await _show_children(callback, member["family_id"], active_id)
 
 
 # ---------------------------------------------------------------------------

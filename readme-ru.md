@@ -9,7 +9,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![aiogram](https://img.shields.io/badge/aiogram-3.x-0078D4.svg)](https://docs.aiogram.dev)
 [![SQLite](https://img.shields.io/badge/SQLite-schema%20v5-003B57.svg)](https://sqlite.org)
-[![Tests](https://img.shields.io/badge/Tests-598%20passed-brightgreen.svg)](test/)
+[![Tests](https://img.shields.io/badge/Tests-623%20passed-brightgreen.svg)](test/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
@@ -171,7 +171,7 @@ python -m pytest test/ -v
 ```
 
 ```
-598 passed
+623 passed
 ```
 
 Тесты запускаются без `.env` (`test/conftest.py` подставляет тестовую БД и dummy-токен).

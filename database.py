@@ -930,6 +930,83 @@ def resolve_active_child(db_path: str, member, children=None) -> Optional[int]:
     return ids[0] if ids else None
 
 
+def member_data_counts(db_path: str, child_id: int, family_id: int) -> dict:
+    """Counts of rows that removing the child would delete (confirm dialog)."""
+    conn = get_connection(db_path)
+    try:
+        measurements = conn.execute(
+            "SELECT COUNT(*) FROM measurements WHERE child_id = ? AND family_id = ?",
+            (child_id, family_id)
+        ).fetchone()[0]
+        achievements = conn.execute(
+            "SELECT COUNT(*) FROM achievements WHERE child_id = ?", (child_id,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {"measurements": measurements, "achievements": achievements}
+
+
+def remove_child(db_path: str, child_id: int, family_id: int) -> Optional[dict]:
+    """Remove a registered child from a family and purge their data.
+
+    Deletes the child's measurements (incl. notes), achievements and reminder
+    flags, clears any parent's ``active_child_id`` that pointed at the child,
+    then the member row itself. Returns deleted-row counts, or ``None`` when
+    the member is missing, belongs to another family, or is not a child.
+    Parents are never removed through this path.
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        member = conn.execute(
+            "SELECT role, family_id FROM members WHERE telegram_id = ?",
+            (child_id,)
+        ).fetchone()
+        if (not member or member["role"] != "child"
+                or member["family_id"] != family_id):
+            conn.rollback()
+            return None
+        measurements = conn.execute(
+            "DELETE FROM measurements WHERE child_id = ? AND family_id = ?",
+            (child_id, family_id)
+        ).rowcount
+        achievements = conn.execute(
+            "DELETE FROM achievements WHERE child_id = ?", (child_id,)
+        ).rowcount
+        reminders = conn.execute(
+            "DELETE FROM reminders_sent WHERE child_id = ?", (child_id,)
+        ).rowcount
+        conn.execute(
+            "UPDATE members SET active_child_id = NULL "
+            "WHERE family_id = ? AND active_child_id = ?",
+            (family_id, child_id)
+        )
+        conn.execute("DELETE FROM members WHERE telegram_id = ?", (child_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"member": 1, "measurements": measurements,
+            "achievements": achievements, "reminders": reminders}
+
+
+def promote_child_to_parent(db_path: str, telegram_id: int, family_id: int) -> bool:
+    """Promote a child member to parent (corrects a mis-assigned role)."""
+    conn = get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE members SET role = 'parent', active_child_id = NULL "
+            "WHERE telegram_id = ? AND family_id = ? AND role = 'child'",
+            (telegram_id, family_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 # ============================================================================
 # Invites (registration tokens)
 # ============================================================================
@@ -1036,6 +1113,13 @@ def join_by_invite(db_path: str, token: str, telegram_id: int,
     invite = get_invite(db_path, token)
     if not invite:
         return None
+    existing = get_member(db_path, telegram_id)
+    if existing:
+        # A registered member must never be reassigned or have their role
+        # silently overwritten by redeeming another card (a parent must not
+        # become a child). Return their current membership unchanged.
+        return {"family_id": existing["family_id"], "role": existing["role"],
+                "name": existing["name"]}
     role = invite["role"]
     member_name = name if name is not None else (
         invite["name"] or ("Родитель" if role == "parent" else "Ребёнок")
