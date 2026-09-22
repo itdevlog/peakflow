@@ -657,3 +657,64 @@ class TestMetrics:
         assert body["children"] is None
         assert body["measurements"] is None
 
+
+class TestChartNote:
+    def test_chart_includes_note(self):
+        _setup_db()
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source, note) VALUES (1, ?, 250, 'morning', ?, ?, "
+            "'manual', 'болел')",
+            (CHILD_ID, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), CHILD_ID))
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/chart", headers=_auth(CHILD_ID)).json()
+        assert body["points"][0]["note"] == "болел"
+
+    def test_chart_note_empty_string(self):
+        _setup_db()
+        add_measurement(TEST_DB, 250, "morning", CHILD_ID, CHILD_ID, family_id=1)
+        body = _client().get("/api/chart", headers=_auth(CHILD_ID)).json()
+        assert body["points"][0]["note"] == ""
+
+
+class TestMiniAppChartUi:
+    def _js(self):
+        import pathlib
+        return pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+
+    def _html(self):
+        import pathlib
+        return pathlib.Path("web/static/index.html").read_text(encoding="utf-8")
+
+    def test_controls_present(self):
+        html = self._html()
+        assert "chart-controls" in html
+        assert 'data-chart-type="line"' in html
+        assert 'data-chart-type="bars"' in html
+        assert 'data-chart-type="points"' in html
+        assert 'data-chart-range="week"' in html
+        assert 'data-chart-range="month"' in html
+
+    def test_state_and_helpers(self):
+        js = self._js()
+        for token in ("chartType", "chartRange", "state.months",
+                      "visiblePoints", "syncChartControls", "redrawChart",
+                      'type === "bars"', 'type === "points"', "86400000"):
+            assert token in js
+
+    def test_tooltip_full(self):
+        js = self._js()
+        assert "pointZone" in js
+        assert "p.note" in js
+        assert "л/мин" in js
+
+    def test_ux_items(self):
+        js = self._js()
+        html = self._html()
+        assert "auth-hint" in html and "auth-hint" in js
+        assert "Нет доступа" in js
+        assert "state.months" in js
+        assert "note-save" in js and "disabled" in js
+

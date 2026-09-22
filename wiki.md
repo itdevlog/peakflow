@@ -819,7 +819,7 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 546 тестов
+python -m pytest test/ -v         # 554 тестов
 ```
 
 Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
@@ -952,6 +952,28 @@ aiogram (отдельного сервиса/порта процессов не�
 - **Схема v5:** таблица `achievements(child_id, code, unlocked_at)` с составным PK;
   при первом апгрейде — тихий бэкфилл уже заслуженных достижений без уведомлений
   (см. §5).
+
+#### Mini App (SP5A): интерактивный график и UX-мелочи
+
+- `GET /api/chart`: в каждой точке — `note` (заметка к замеру, обрезанная до
+  200 в эндпоинте сохранения); `available_months` — поле верхнего уровня ответа
+  для навигации по месяцам.
+- `app.js` (`drawChart`): тип графика `line`/`bars`/`points` (`state.chartType`)
+  и диапазон `week`/`month` (`state.chartRange`) через `#chart-controls`;
+  `visiblePoints()` — клиентский фильтр последних 7 дней от **последней** точки
+  (без межмесячного диапазона); `syncChartControls()` подсвечивает активные
+  кнопки; `redrawChart()` = `drawChart(visiblePoints(...), chartType)`.
+- **Тултип** (`chartClick` + `pointZone`): по тапу на графике — значение
+  (`л/мин`), дата, время суток, `%` от цели с эмодзи зоны (`🟢`/`🟡`/`🔴`,
+  `Math.floor` как в карточках) и заметка (`📝 note`, если есть);
+  промах → скрытие.
+- **UX-мелочи из аудита:** busy-guard на `note-save` (кнопка `disabled` +
+  «Сохраняем…» на время запроса); кэш месяцев `state.months` в `shiftMonth`
+  (запрос `/api/chart` только при пустом кэше); при HTTP 403 «Нет доступа» —
+  баннер `#auth-hint` «Откройте приложение заново из Telegram» (`showAuthHint`,
+  однократно), т.к. initData истекает.
+- **Вне scope:** zoom/pan (pinch), межмесячный диапазон, сторонние
+  chart-библиотеки.
 
 #### Метрики (SP4D): реестр, `/healthz`, `/metrics`, логи
 

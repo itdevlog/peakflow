@@ -20,6 +20,7 @@
     <button class="tab" data-screen="stats">Статистика</button>
     <button class="tab" data-screen="settings" id="tab-settings" hidden>⚙️</button>
   </nav>
+  <div id="auth-hint" hidden>Откройте приложение заново из Telegram</div>
   <div id="error" hidden></div>
   <main>
     <section id="screen-today" class="screen"></section>
@@ -29,6 +30,17 @@
         <button id="chart-prev">‹</button>
         <span id="chart-title"></span>
         <button id="chart-next">›</button>
+      </div>
+      <div id="chart-controls">
+        <div class="seg">
+          <button class="mini" data-chart-type="line">Линия</button>
+          <button class="mini" data-chart-type="bars">Столбцы</button>
+          <button class="mini" data-chart-type="points">Точки</button>
+        </div>
+        <div class="seg">
+          <button class="mini" data-chart-range="week">Неделя</button>
+          <button class="mini" data-chart-range="month">Месяц</button>
+        </div>
       </div>
       <canvas id="chart" height="320"></canvas>
       <div id="chart-tip" hidden></div>
