@@ -12,8 +12,10 @@
 
 Сделать Mini App устанавливаемым (Add to Home Screen) и устойчивым к отсутствию сети:
 манифест + service worker, кэширующий **app-shell** (статика). Данные замеров по сети
-не кэшируются (приватность медданных). Работает как progressive enhancement — в
-Telegram WebView просто не покажет install, но ничего не сломает.
+не кэшируются (приватность медданных). Работает как progressive enhancement —
+регистрация выполняется там, где есть поддержка Service Worker; в окружениях без
+него (часть WebView) она просто не выполняется, ничего не ломая (install не
+покажется, но приложение работает).
 
 **Успех:** при открытии в браузере по `WEBAPP_URL` (HTTPS через Caddy) приложение
 устанавливается; при офлайне открывается оболочка с понятным состоянием; API всегда
@@ -98,8 +100,8 @@ if ("serviceWorker" in navigator) {
 - **activate**: удалить все кэши, кроме `CACHE`; `self.clients.claim()`.
 - **fetch** (`GET`, same-origin только):
   - путь начинается с `/api/`, `/healthz`, `/metrics` → **не перехватывать** (network-only, `return` без `respondWith`), чтобы данные и метрики всегда шли в сеть.
-  - `request.mode === "navigate"` → network-first: сеть → при ошибке `caches.match("/index.html")`.
-  - прочее (статика) → cache-first: кэш → при промахе сеть и положить в кэш.
+  - навигация (`request.mode === "navigate"`) → network-first: сеть → при ошибке `caches.match("/index.html")`.
+  - прочее (статика) → **network-first**: сеть (запись в кэш только при `response.ok`, через `event.waitUntil`) → при ошибке fallback на кэш. Онлайн всегда отдаёт свежую версию (нет «залипания» статики), офлайн — закэшированный app-shell.
   - cross-origin (Telegram SDK, etc.) → не перехватывать.
 - Никаких `importScripts`/workbox — только нативный Cache API.
 
@@ -110,10 +112,10 @@ if ("serviceWorker" in navigator) {
 | Ситуация | Поведение |
 |----------|-----------|
 | Нет HTTPS | SW не регистрируется; приложение работает как раньше |
-| Telegram WebView без SW | `register().catch()` глушит; UI не ломается |
+| Окружение без поддержки SW (часть WebView) | guard `"serviceWorker" in navigator` ложно → регистрация не выполняется; UI не ломается |
 | Офлайн, аппшелл в кэше | навигация отдаёт `index.html`; API-запросы падают штатной ошибкой клиента |
 | Офлайн, аппшелл не кэширован | обычная ошибка браузера (как без PWA) |
-| Обновление статики | новый SW (`skipWaiting`+`clients.claim`) и чистка старых кэшей |
+| Обновление статики | network-first: онлайн всегда свежая версия; плюс `skipWaiting`+`clients.claim` и чистка старых кэшей |
 | API/метрики | никогда не кэшируются |
 | `addAll(SHELL)` частично падает | `install` отклоняется; старый SW/кэш остаётся — деградация без поломки |
 
@@ -130,7 +132,10 @@ if ("serviceWorker" in navigator) {
    `navigator.serviceWorker.register("/sw.js")`.
 4. `sw.js` содержит: `peakflow-v` (версия), `/api/` (байпас), `skipWaiting`,
    `clients.claim`, `addAll`, и обработку `"navigate"`.
-5. Регрессия: `pytest test/`; `pyflakes`/`compileall`; счётчики в `PROJECT.md`/`wiki.md`/todo-plan.
+5. `sw.js` — network-first для навигации и статики (`networkFirst`,
+   fallback на `/index.html`); `response.ok` + `event.waitUntil` для записи в кэш;
+   `/healthz` и `/metrics` в байпасе.
+6. Регрессия: `pytest test/`; `pyflakes`/`compileall`; счётчики в `PROJECT.md`/`wiki.md`/todo-plan.
 
 ---
 
@@ -140,8 +145,8 @@ if ("serviceWorker" in navigator) {
 - [ ] `index.html` линкует манифест/иконку и регистрирует SW с guard'ом.
 - [ ] SW кэширует app-shell, версионирует кэш, активируется и чистит старьё.
 - [ ] `/api/`, `/healthz`, `/metrics` никогда не кэшируются.
-- [ ] Офлайн-навигация отдаёт оболочку; данные — с понятной ошибкой, без «залипшего» кэша.
-- [ ] В Telegram без SW ничего не ломается.
+- [ ] Офлайн-навигация отдаёт оболочку; онлайн статика всегда свежая; данные — с понятной ошибкой, без «залипшего» кэша.
+- [ ] В окружениях без поддержки SW ничего не ломается.
 - [ ] `pyflakes` + `compileall` + все тесты зелёные; документация/счётчики обновлены.
 
 ---
@@ -150,9 +155,9 @@ if ("serviceWorker" in navigator) {
 
 | Риск | Решение |
 |------|---------|
-| Кэш «замораживает» старую версию | версионированный `CACHE` + `skipWaiting`/`clients.claim` + чистка |
+| Кэш «замораживает» старую версию | network-first для статики (онлайн свежо) + версионированный `CACHE` + `skipWaiting`/`clients.claim` + чистка |
 | Медданные попадают в кэш | API/SW-байпас, кэшируем только статику |
-| iOS/Telegram WebView без SW | progressive enhancement, guard + `catch` |
+| Окружение без поддержки SW (часть WebView) | progressive enhancement, guard + `catch` |
 | SVG-иконка не везде для install | принять как компромисс; PNG — отдельная задача |
 | `StaticFiles` отдаёт `.json`/`.js` с верным типом | `manifest.json` как JSON, `.js` как JS — ок |
 

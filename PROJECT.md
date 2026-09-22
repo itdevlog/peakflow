@@ -734,11 +734,13 @@ PWA (SP5C): `web/static/manifest.json` (`name`/`short_name` «Пикфлоуме
 Service worker `web/static/sw.js` (нативный Cache API без workbox) кэширует
 **app-shell** (`CACHE = "peakflow-v1"`, `SHELL` — `/`, `index.html`, `app.js`,
 `style.css`, манифест, иконка): `install` — `addAll(SHELL)` + `skipWaiting`,
-`activate` — чистка старых кэшей + `clients.claim`, `fetch` — навигация
-network-first с fallback на `index.html`, статика cache-first. `/api/`,
+`activate` — чистка старых кэшей + `clients.claim`, `fetch` — навигация и
+статика network-first (онлайн всегда свежо, офлайн — fallback на кэш,
+навигация — на `index.html`). `/api/`,
 `/healthz`, `/metrics` **никогда не кэшируются** (network-only — приватность
-медданных). Progressive enhancement: без HTTPS/в Telegram WebView SW не
-регистрируется, приложение работает как раньше.
+медданных). Progressive enhancement: регистрация выполняется там, где есть
+поддержка Service Worker; в окружениях без него (часть WebView) она просто не
+выполняется, ничего не ломая.
 
 Метрики (SP4D): `GET /healthz` отдаёт `status`, `uptime_seconds`,
 `last_scheduler_tick` и счётчики БД `families`/`children`/`measurements`; при

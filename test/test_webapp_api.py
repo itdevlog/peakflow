@@ -842,3 +842,8 @@ class TestServiceWorker:
         for token in ("peakflow-v", "/api/", "skipWaiting", "clients.claim",
                       "addAll", '"navigate"'):
             assert token in js, f"sw.js missing {token!r}"
+        assert '"/healthz"' in js and '"/metrics"' in js
+        assert 'mode === "navigate"' in js
+        assert 'networkFirst("/index.html")' in js, "offline navigation must fall back to the app shell"
+        assert 'networkFirst' in js, "static requests must revalidate (network-first), not cache-first"
+        assert "caches.match(request).then" not in js, "cache-first static lookup leaves clients stale"

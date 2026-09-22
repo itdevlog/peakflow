@@ -25,18 +25,18 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (BYPASS.some((p) => url.pathname.startsWith(p))) return;
 
+  const networkFirst = (fallback) =>
+    fetch(request).then((response) => {
+      if (response.ok) {
+        const copy = response.clone();
+        event.waitUntil(caches.open(CACHE).then((cache) => cache.put(request, copy)));
+      }
+      return response;
+    }).catch(() => caches.match(fallback));
+
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(() => caches.match("/index.html")));
+    event.respondWith(networkFirst("/index.html"));
     return;
   }
-
-  event.respondWith(
-    caches.match(request).then((cached) =>
-      cached || fetch(request).then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE).then((cache) => cache.put(request, copy));
-        return response;
-      })
-    )
-  );
+  event.respondWith(networkFirst(request));
 });

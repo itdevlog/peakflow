@@ -808,7 +808,7 @@ loop каждые 60 секунд:
 - ✅ PDF-отчёт врачу (SP4A): `report_pdf.py`, кнопка «📄 Отчёт врачу» в боте и Mini App, `GET /api/report/pdf` (неделя/месяц/квартал).
 - ✅ Геймификация (SP4B): `gamification.py`, streak в статусе, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, схема v5.
 - ✅ Метрики (SP4D): `metrics.py` (реестр + Prometheus-рендер), расширенный `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware/access-лог.
-- ✅ PWA (SP5C): `manifest.json` + SVG-иконка, офлайн app-shell через `sw.js`, `/api/`/`healthz`/`metrics` не кэшируются.
+- ✅ PWA (SP5C): `manifest.json` + SVG-иконка, офлайн app-shell через `sw.js`, `/api/`, `/healthz`, `/metrics` не кэшируются.
 - Дальше: Фаза 5 (развитие Mini App); план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
@@ -1013,10 +1013,12 @@ aiogram (отдельного сервиса/порта процессов не�
   `install` — `addAll(SHELL)` + `skipWaiting`; `activate` — удаление всех кэшей
   кроме `CACHE` + `clients.claim`; `fetch` (только GET, same-origin):
   `/api/`, `/healthz`, `/metrics` **не перехватываются** (network-only),
-  навигация — network-first с fallback на `index.html`, прочая статика —
-  cache-first с дозаписью в кэш.
-- Progressive enhancement: без HTTPS/в Telegram WebView SW не регистрируется,
-  приложение работает как раньше; данные замеров (API) в кэш не попадают.
+  навигация и прочая статика — network-first (онлайн всегда свежо; offline —
+  fallback на кэш, навигация — на `index.html`; запись в кэш только при
+  `response.ok`).
+- Progressive enhancement: регистрация выполняется там, где есть поддержка
+  Service Worker; в окружениях без него (часть WebView) она просто не
+  выполняется, ничего не ломая; данные замеров (API) в кэш не попадают.
 
 #### Метрики (SP4D): реестр, `/healthz`, `/metrics`, логи
 
