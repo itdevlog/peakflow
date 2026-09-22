@@ -70,6 +70,7 @@ peakflow/
 ├── report.py       # Чистые хелперы: зоны, CSV, экранирование (общие для бота/веба)
 ├── report_pdf.py   # PDF-отчёт врачу: периоды, статистика, график, A4-вёрстка (SP4A)
 ├── gamification.py # Серия дней и достижения: чистые расчёты, без bot/database (SP4B)
+├── analytics.py    # Аналитика ПСВ: зоны, средние по дням недели, МНК-тренд (SP5D)
 ├── metrics.py      # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── test/           # pytest-тесты (test_bot.py и др.)
 ├── requirements.txt # aiogram, matplotlib, python-dotenv
@@ -809,6 +810,7 @@ loop каждые 60 секунд:
 - ✅ Геймификация (SP4B): `gamification.py`, streak в статусе, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, схема v5.
 - ✅ Метрики (SP4D): `metrics.py` (реестр + Prometheus-рендер), расширенный `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware/access-лог.
 - ✅ PWA (SP5C): `manifest.json` + SVG-иконка, офлайн app-shell через `sw.js`, `/api/`, `/healthz`, `/metrics` не кэшируются.
+- ✅ Аналитика (SP5D): `analytics.py` (зоны, средние по дням недели, МНК-тренд), `GET /api/analytics`, вкладка «Аналитика» (pie/heatmap/тренд).
 - Дальше: Фаза 5 (развитие Mini App); план трансформации в публичный сервис — в `roadmap.md`.
 
 ---
@@ -820,10 +822,10 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 565 тестов
+python -m pytest test/ -v         # 578 тестов
 ```
 
-Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), PWA SP5C (манифест/иконка, линковка и регистрация SW, токены SW: версия/`/api/`-байпас/`skipWaiting`/`clients.claim`/`addAll`/`navigate`), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
+Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), PWA SP5C (манифест/иконка, линковка и регистрация SW, токены SW: версия/`/api/`-байпас/`skipWaiting`/`clients.claim`/`addAll`/`navigate`), аналитика SP5D (`zone_distribution`, `weekday_averages`, `linear_fit`, `GET /api/analytics`, изоляция family/child, 404 без активного ребёнка), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
 
 ---
 
@@ -837,7 +839,7 @@ aiogram (отдельного сервиса/порта процессов не�
 
 | Модуль | Что делает |
 |--------|-----------|
-| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check + uptime/счётчики БД); `GET /metrics` (Prometheus text, env-gated + токен); HTTP-middleware метрик/access-лога; read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`); геймификация SP4B (`GET /api/gamification`) |
+| `web/api.py` | `create_app(services)` — FastAPI-приложение. `GET /healthz` (health-check + uptime/счётчики БД); `GET /metrics` (Prometheus text, env-gated + токен); HTTP-middleware метрик/access-лога; read-only API SP2a (`/api/me`, `/status`, `/history`, `/chart`, `/stats`); запись SP2b (`POST /api/measurements`, `PATCH`/`DELETE /api/measurements/{id}`, `POST …/note`); настройки/экспорт SP2c (`/api/settings*`, `/api/export/*`, `/api/backup`); tenant-aware SP3C (`/api/children`, `PUT /api/active-child`); PDF-отчёт врачу SP4A (`GET /api/report/pdf`); геймификация SP4B (`GET /api/gamification`); аналитика SP5D (`GET /api/analytics`) |
 | `web/server.py` | `run_webapp(services)` — запускает uvicorn на `WEBAPP_HOST:WEBAPP_PORT` и обслуживает приложение; `wait_forever()` — режим без веб-сервера (ожидание сигнала завершения) |
 
 #### Mini App (SP2a): чтение
@@ -1019,6 +1021,27 @@ aiogram (отдельного сервиса/порта процессов не�
 - Progressive enhancement: регистрация выполняется там, где есть поддержка
   Service Worker; в окружениях без него (часть WebView) она просто не
   выполняется, ничего не ломая; данные замеров (API) в кэш не попадают.
+
+#### Mini App (SP5D): аналитика — зоны, дни недели, тренд
+
+- `analytics.py` — чистый модуль (stdlib + `report.pef_zone`, без
+  `bot.py`/`database.py`/aiogram/matplotlib):
+  - `zone_distribution(rows, target, zone_green=80, zone_yellow=60)` → счётчики
+    замеров по зонам `{green, yellow, red}`;
+  - `weekday_averages(...)` → список из 7 элементов (Пн=0…Вс=6), каждый
+    `{avg, count, zone}` или `None` (нет замеров в этот день недели);
+    `measured_at` парсится как ISO-дата, невалидные пропускаются;
+  - `linear_fit(values)` → МНК `(slope, intercept)` по `x=0..n-1`; пустой
+    список → `(0.0, 0.0)`, один элемент → `(0.0, v)`.
+- **`GET /api/analytics`** (любая роль): `zones` (`{green, yellow, red}` по всем
+  замерам ребёнка), `weekday` (`[{avg, count, zone}|null]` × 7) и `trend`
+  (`{n, slope, intercept, per_week, daily:[{date, avg}]}` — МНК по средним за
+  день за последние 14 дней, `per_week = slope × 7`). Нет активного ребёнка →
+  **404**; данные scoped по `(family_id, active_child_id)`.
+- Mini App (`app.js`): вкладка «Аналитика» (`loadAnalytics`) рисует круговую
+  диаграмму зон (`drawPie` + легенда), heatmap среднего ПСВ по дням недели
+  (`drawHeatmap`) и линию тренда за 14 дней (`drawTrend`) с подписью
+  л/мин/нед.
 
 #### Метрики (SP4D): реестр, `/healthz`, `/metrics`, логи
 
