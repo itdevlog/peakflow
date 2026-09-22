@@ -55,7 +55,7 @@ peakflow/
 ├── gamification.py     # Геймификация: серия дней и достижения, чистые расчёты (SP4B)
 ├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (561)
+├── test/               # Pytest тесты (565)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -726,6 +726,22 @@ vs прошлая» (подписи `Пн..Вс`), месяц выровнен �
 периодами (текущий и прошлый, среднее за день). Повторное нажатие возвращает
 обычный график.
 
+PWA (SP5C): `web/static/manifest.json` (`name`/`short_name` «Пикфлоуметр»,
+`display: standalone`, `theme_color #2ea6ff`, SVG-иконка `icon.svg`
+`sizes: any` / `purpose: any maskable`) делает Mini App устанавливаемым на
+домашний экран; `index.html` линкует манифест/иконку/`theme-color` и
+регистрирует `/sw.js` под guard'ом (`"serviceWorker" in navigator` + `catch`).
+Service worker `web/static/sw.js` (нативный Cache API без workbox) кэширует
+**app-shell** (`CACHE = "peakflow-v1"`, `SHELL` — `/`, `index.html`, `app.js`,
+`style.css`, манифест, иконка): `install` — `addAll(SHELL)` + `skipWaiting`,
+`activate` — чистка старых кэшей + `clients.claim`, `fetch` — навигация и
+статика network-first (онлайн всегда свежо, офлайн — fallback на кэш,
+навигация — на `index.html`). `/api/`,
+`/healthz`, `/metrics` **никогда не кэшируются** (network-only — приватность
+медданных). Progressive enhancement: регистрация выполняется там, где есть
+поддержка Service Worker; в окружениях без него (часть WebView) она просто не
+выполняется, ничего не ломая.
+
 Метрики (SP4D): `GET /healthz` отдаёт `status`, `uptime_seconds`,
 `last_scheduler_tick` и счётчики БД `families`/`children`/`measurements`; при
 `state.bot_ok == False` — по-прежнему 503 `{"status": "bot down"}`.
@@ -751,7 +767,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 561 passed
+# 565 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`

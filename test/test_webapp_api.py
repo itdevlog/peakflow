@@ -809,3 +809,41 @@ class TestChartCompare:
         body = _client().get("/api/chart/compare?period=month", headers=_auth(999)).json()
         assert all(v is None for v in body["current"])
         assert all(v is None for v in body["previous"])
+
+
+class TestPwaInstall:
+    def test_manifest_valid(self):
+        import json
+        import pathlib
+        data = json.loads(pathlib.Path("web/static/manifest.json").read_text(encoding="utf-8"))
+        assert data["name"] and data["short_name"]
+        assert data["start_url"]
+        assert data["display"] == "standalone"
+        assert data["icons"] and data["icons"][0]["type"] == "image/svg+xml"
+
+    def test_icon_svg(self):
+        import pathlib
+        svg = pathlib.Path("web/static/icon.svg").read_text(encoding="utf-8")
+        assert svg.lstrip().startswith("<svg")
+
+    def test_index_links_and_registration(self):
+        import pathlib
+        html = pathlib.Path("web/static/index.html").read_text(encoding="utf-8")
+        assert 'rel="manifest"' in html and "/manifest.json" in html
+        assert 'name="theme-color"' in html
+        assert "/icon.svg" in html
+        assert 'navigator.serviceWorker.register("/sw.js")' in html
+
+
+class TestServiceWorker:
+    def test_sw_source(self):
+        import pathlib
+        js = pathlib.Path("web/static/sw.js").read_text(encoding="utf-8")
+        for token in ("peakflow-v", "/api/", "skipWaiting", "clients.claim",
+                      "addAll", '"navigate"'):
+            assert token in js, f"sw.js missing {token!r}"
+        assert '"/healthz"' in js and '"/metrics"' in js
+        assert 'mode === "navigate"' in js
+        assert 'networkFirst("/index.html")' in js, "offline navigation must fall back to the app shell"
+        assert 'networkFirst' in js, "static requests must revalidate (network-first), not cache-first"
+        assert "caches.match(request).then" not in js, "cache-first static lookup leaves clients stale"
