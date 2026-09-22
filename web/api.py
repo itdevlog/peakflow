@@ -49,6 +49,7 @@ from database import (
 import gamification
 import metrics
 import report_pdf
+from analytics import linear_fit, weekday_averages, zone_distribution
 from report import build_csv_content as _build_csv, daily_average_series, parse_month
 from web.auth import get_user_from_init_data
 from web.notify import notify_added, notify_red_zone
@@ -439,6 +440,34 @@ def create_app(services: dict) -> FastAPI:
         data = await _db(get_stats, config.DB_PATH, auth["active_child_id"], auth["family_id"])
         data["target_pef"] = await _db(_effective_target, config, auth["family_id"])
         return data
+
+    @app.get("/api/analytics")
+    async def analytics_endpoint(auth: dict = Depends(require_user)):
+        child_id = auth["active_child_id"]
+        if child_id is None:
+            raise HTTPException(404, "Нет активного ребёнка")
+        today = datetime.now(
+            timezone(timedelta(hours=getattr(config, "TZ_OFFSET", 0)))
+        ).date()
+        target = await _db(_effective_target, config, auth["family_id"])
+        zg = getattr(config, "ZONE_GREEN", 80)
+        zy = getattr(config, "ZONE_YELLOW", 60)
+
+        rows = await _db(get_measurements_between, config.DB_PATH, child_id,
+                         "2000-01-01", today.isoformat(), auth["family_id"])
+        since = (today - timedelta(days=13)).isoformat()
+        recent = await _db(get_measurements_between, config.DB_PATH, child_id,
+                           since, today.isoformat(), auth["family_id"])
+        dates = _date_list(since, today.isoformat())
+        series = daily_average_series(recent, dates)
+        daily = [{"date": d, "avg": v} for d, v in zip(dates, series) if v is not None]
+        slope, intercept = linear_fit([d["avg"] for d in daily])
+        return {
+            "zones": zone_distribution(rows, target, zg, zy),
+            "weekday": weekday_averages(rows, target, zg, zy),
+            "trend": {"n": len(daily), "slope": slope, "intercept": intercept,
+                      "per_week": slope * 7, "daily": daily},
+        }
 
     @app.get("/api/gamification")
     async def gamification_endpoint(auth: dict = Depends(require_user)):
