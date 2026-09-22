@@ -1486,6 +1486,7 @@ async def _build_report_pdf_async(rows, target, child_name, period_label) -> byt
     return await asyncio.to_thread(
         report_pdf.build_pdf, rows, target=target, child_name=child_name,
         period_label=period_label, zone_green=ZONE_GREEN, zone_yellow=ZONE_YELLOW,
+        generated=report_pdf.generated_label(TZ_OFFSET),
     )
 
 

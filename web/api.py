@@ -656,6 +656,7 @@ def create_app(services: dict) -> FastAPI:
                 period_label=label,
                 zone_green=getattr(config, "ZONE_GREEN", 80),
                 zone_yellow=getattr(config, "ZONE_YELLOW", 60),
+                generated=report_pdf.generated_label(getattr(config, "TZ_OFFSET", 0)),
             )
         except Exception as e:
             logger.error("Ошибка генерации PDF-отчёта: %s", e)

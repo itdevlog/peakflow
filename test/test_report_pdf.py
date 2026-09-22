@@ -170,3 +170,34 @@ class TestBuildPdf:
                 report_pdf.build_pdf(self._rows(), target=260, child_name="M",
                                      period_label="P")
         assert len(plt.get_fignums()) == before
+
+
+class TestGeneratedLabel:
+    def test_shape(self):
+        from report_pdf import generated_label
+        import re
+        assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", generated_label(0))
+
+    def test_offset_applied(self):
+        from datetime import datetime, timedelta, timezone
+        from report_pdf import generated_label
+        expected = datetime.now(timezone(timedelta(hours=5))).strftime("%d.%m.%Y")
+        assert generated_label(5) == expected
+
+
+class TestBuildPdfSavefigError:
+    def test_closes_figure_when_savefig_raises(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+        from unittest.mock import patch
+        import report_pdf
+        before = len(plt.get_fignums())
+        with patch.object(PdfPages, "savefig", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                report_pdf.build_pdf(
+                    [{"pef_value": 250, "time_of_day": "morning",
+                      "measured_at": "2026-09-01 08:00:00", "note": ""}],
+                    target=260, child_name="M", period_label="P")
+        assert len(plt.get_fignums()) == before
