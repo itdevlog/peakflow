@@ -899,6 +899,11 @@ class TestAnalyticsApi:
         for token in ("loadAnalytics", "drawPie", "drawHeatmap", "drawTrend", "/api/analytics"):
             assert token in js
 
+    def test_notes_ui(self):
+        import pathlib
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "notesCard" in js and "Заметки" in js
+
 
 class TestNotesAnalytics:
     def test_notes_field(self):

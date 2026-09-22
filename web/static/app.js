@@ -193,6 +193,22 @@ async function loadStats() {
     ${streakCard}${badges}`;
 }
 
+function notesCard(notes) {
+  const base = notes && notes.baseline;
+  const baseLine = (base && base.avg != null)
+    ? `Обычно: ${Math.round(base.avg)} (${base.count})`
+    : "Нет данных";
+  const rows = ((notes && notes.groups) || []).map((g) => {
+    if (!g.count) {
+      return `<div class="row"><span>${esc(g.title)}</span><span class="label">—</span></div>`;
+    }
+    const d = g.delta == null ? "—"
+      : `${g.delta >= 0 ? "🟢 +" : "🔴 "}${g.delta.toFixed(0)}`;
+    return `<div class="row"><span>${esc(g.title)} · ${Math.round(g.avg)} (${g.count})</span><span>${d}</span></div>`;
+  }).join("");
+  return `<div class="card"><div class="label">Заметки</div>${baseLine}${rows}</div>`;
+}
+
 async function loadAnalytics() {
   const data = await api("/api/analytics");
   const el = $("screen-analytics");
@@ -210,7 +226,8 @@ async function loadAnalytics() {
       <div class="label">Тренд (14 дней)</div>
       <canvas id="trend-line" height="140"></canvas>
       <div id="trend-label" class="label"></div>
-    </div>`;
+    </div>
+    ${notesCard(data.notes)}`;
   drawPie($("zone-pie"), data.zones);
   $("zone-legend").textContent =
     `🟢 ${data.zones.green} · 🟡 ${data.zones.yellow} · 🔴 ${data.zones.red}`;
