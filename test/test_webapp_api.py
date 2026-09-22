@@ -718,3 +718,18 @@ class TestMiniAppChartUi:
         assert "state.months" in js
         assert "note-save" in js and "disabled" in js
 
+
+class TestDailyAverageSeries:
+    def test_average_per_day(self):
+        from report import daily_average_series
+        rows = [
+            {"measured_at": "2026-09-21 08:00:00", "pef_value": 250},
+            {"measured_at": "2026-09-21 20:00:00", "pef_value": 270},
+            {"measured_at": "2026-09-22 08:00:00", "pef_value": 260},
+        ]
+        assert daily_average_series(rows, ["2026-09-21", "2026-09-22", "2026-09-23"]) == [260.0, 260.0, None]
+
+    def test_empty_rows(self):
+        from report import daily_average_series
+        assert daily_average_series([], ["2026-09-21"]) == [None]
+

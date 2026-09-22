@@ -110,3 +110,16 @@ def build_csv_content(rows, target, child_name, stats=None, include_summary=True
         )
         csv_content = "\n" + summary + csv_content
     return csv_content
+
+
+def daily_average_series(rows: list, dates: list) -> list:
+    """Average PEF per ISO date in ``dates`` (None when a day has no rows)."""
+    buckets = {}
+    for r in rows:
+        key = str(r["measured_at"])[:10]
+        buckets.setdefault(key, []).append(r["pef_value"])
+    out = []
+    for d in dates:
+        vals = buckets.get(d)
+        out.append(sum(vals) / len(vals) if vals else None)
+    return out
