@@ -56,7 +56,7 @@ peakflow/
 ├── analytics.py        # Аналитика ПСВ: зоны, дни недели, тренд, корреляция заметок (SP5D, SP5E)
 ├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (587)
+├── test/               # Pytest тесты (598)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -808,7 +808,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 587 passed
+# 598 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
