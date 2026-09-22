@@ -701,7 +701,7 @@ class TestMiniAppChartUi:
         js = self._js()
         for token in ("chartType", "chartRange", "state.months",
                       "visiblePoints", "syncChartControls", "redrawChart",
-                      'type === "bars"', 'type === "points"', "86400000"):
+                      'type === "bars"', 'type === "points"', "cutoff.setDate"):
             assert token in js
 
     def test_tooltip_full(self):
@@ -725,6 +725,8 @@ class TestMiniAppChartUi:
         assert "chartCompare" in js
         assert "drawCompare" in js and "/api/chart/compare" in js
         assert "resetCompare" in js
+        assert "cutoff.setDate" in js
+        assert 'state.chartRange = "month"' in js
         assert "Нет данных для сравнения" in js
 
 

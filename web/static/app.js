@@ -449,9 +449,10 @@ function drawChart(data, points, type) {
 function visiblePoints(data) {
   const pts = (data && data.points) || [];
   if (state.chartRange !== "week" || !pts.length) return pts;
-  const lastMs = Date.parse(pts[pts.length - 1].date + "T00:00:00");
-  const cutoff = lastMs - 6 * 86400000;
-  return pts.filter((p) => Date.parse(p.date + "T00:00:00") >= cutoff);
+  const last = new Date(pts[pts.length - 1].date + "T00:00:00");
+  const cutoff = new Date(last);
+  cutoff.setDate(cutoff.getDate() - 6);
+  return pts.filter((p) => new Date(p.date + "T00:00:00") >= cutoff);
 }
 
 function syncChartControls() {
@@ -567,6 +568,8 @@ function toggleCompare() {
     $("chart-next").disabled = true;
     loadCompare().catch((e) => showError(e.message));
   } else {
+    state.chartRange = "month";
+    syncChartControls();
     const hint = $("screen-chart").querySelector(".hint");
     const hasData = state.chartData && state.chartData.points && state.chartData.points.length;
     if (hasData) {
