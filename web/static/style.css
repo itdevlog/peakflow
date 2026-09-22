@@ -73,3 +73,8 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 #auth-hint { background: var(--card); color: var(--fg); padding: 10px;
   border-radius: 8px; margin: 8px; text-align: center; font-size: 14px; }
 #auth-hint[hidden] { display: none !important; }
+
+.heat { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.heat-cell { border-radius: 6px; padding: 6px 2px; text-align: center;
+  color: #fff; font-size: 11px; }
+.heat-cell.empty { color: var(--muted); }

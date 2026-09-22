@@ -6,7 +6,7 @@ import os
 import sqlite3
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import quote
@@ -39,7 +39,7 @@ def make_init_data(user_id: int, token: str = BOT_TOKEN, auth_date: int | None =
 def _config():
     return SimpleNamespace(
         DB_PATH=TEST_DB, BOT_TOKEN=BOT_TOKEN, CHILD_ID=CHILD_ID, PARENT_IDS=PARENT_IDS,
-        CHILD_NAME="Motya", TARGET_PEF=260,
+        CHILD_NAME="Motya", TARGET_PEF=260, TZ_OFFSET=0,
     )
 
 
@@ -847,3 +847,54 @@ class TestServiceWorker:
         assert 'networkFirst("/index.html")' in js, "offline navigation must fall back to the app shell"
         assert 'networkFirst' in js, "static requests must revalidate (network-first), not cache-first"
         assert "caches.match(request).then" not in js, "cache-first static lookup leaves clients stale"
+
+
+class TestAnalyticsApi:
+    def test_fields_and_values(self):
+        _setup_db()
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(TEST_DB)
+        for v in (260, 240):
+            conn.execute(
+                "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+                "measured_at, added_by, source) VALUES (1, ?, ?, 'morning', ?, ?, 'manual')",
+                (CHILD_ID, v, now, CHILD_ID))
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/analytics", headers=_auth(CHILD_ID)).json()
+        assert set(body) == {"zones", "weekday", "trend"}
+        assert body["zones"]["green"] == 2
+        assert len(body["weekday"]) == 7
+        assert body["trend"]["n"] == 1
+        assert body["trend"]["daily"][0]["avg"] == 250.0
+
+    def test_no_child_404(self):
+        _setup_db()
+        from database import create_family_with_owner
+        create_family_with_owner(TEST_DB, 999, "B")
+        assert _client().get("/api/analytics", headers=_auth(999)).status_code == 404
+
+    def test_isolation(self):
+        _setup_db()
+        from database import create_family_with_owner, add_member
+        f2 = create_family_with_owner(TEST_DB, 999, "B")
+        add_member(TEST_DB, 700, f2, "child", "Маша")
+        conn = sqlite3.connect(TEST_DB)
+        conn.execute(
+            "INSERT INTO measurements (family_id, child_id, pef_value, time_of_day, "
+            "measured_at, added_by, source) VALUES (1, 700, 250, 'morning', "
+            "'2026-09-01 08:00:00', 700, 'manual')")
+        conn.commit()
+        conn.close()
+        body = _client().get("/api/analytics", headers=_auth(999)).json()
+        assert sum(body["zones"].values()) == 0
+        assert body["trend"]["n"] == 0
+
+    def test_ui_tokens(self):
+        import pathlib
+        html = pathlib.Path("web/static/index.html").read_text(encoding="utf-8")
+        js = pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+        assert "screen-analytics" in html and 'data-screen="analytics"' in html
+        for token in ("loadAnalytics", "drawPie", "drawHeatmap", "drawTrend", "/api/analytics"):
+            assert token in js

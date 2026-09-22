@@ -193,6 +193,88 @@ async function loadStats() {
     ${streakCard}${badges}`;
 }
 
+async function loadAnalytics() {
+  const data = await api("/api/analytics");
+  const el = $("screen-analytics");
+  el.innerHTML = `
+    <div class="card">
+      <div class="label">Зоны</div>
+      <canvas id="zone-pie" height="160"></canvas>
+      <div id="zone-legend" class="label"></div>
+    </div>
+    <div class="card">
+      <div class="label">Средний ПСВ по дням недели</div>
+      <div id="weekday-heat" class="heat"></div>
+    </div>
+    <div class="card">
+      <div class="label">Тренд (14 дней)</div>
+      <canvas id="trend-line" height="140"></canvas>
+      <div id="trend-label" class="label"></div>
+    </div>`;
+  drawPie($("zone-pie"), data.zones);
+  $("zone-legend").textContent =
+    `🟢 ${data.zones.green} · 🟡 ${data.zones.yellow} · 🔴 ${data.zones.red}`;
+  drawHeatmap($("weekday-heat"), data.weekday);
+  drawTrend($("trend-line"), data.trend);
+  const t = data.trend;
+  $("trend-label").textContent = t.n
+    ? `${t.per_week >= 0 ? "↗" : "↘"} ${t.per_week >= 0 ? "+" : ""}${t.per_week.toFixed(1)} л/мин/нед (n=${t.n})`
+    : "Нет данных";
+}
+
+function drawPie(canvas, zones) {
+  const total = zones.green + zones.yellow + zones.red;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width = canvas.clientWidth || 200;
+  const h = canvas.height = 160;
+  ctx.clearRect(0, 0, w, h);
+  if (!total) { ctx.fillStyle = "#777"; ctx.font = "12px sans-serif"; ctx.fillText("Нет данных", 8, 80); return; }
+  const cx = w / 2, cy = h / 2, r = 60;
+  let start = -Math.PI / 2;
+  [["green", "#2fb344"], ["yellow", "#e8a600"], ["red", "#e5484d"]].forEach(([k, color]) => {
+    const frac = zones[k] / total;
+    if (!frac) return;
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, start, start + frac * Math.PI * 2);
+    ctx.closePath(); ctx.fillStyle = color; ctx.fill();
+    start += frac * Math.PI * 2;
+  });
+}
+
+function drawHeatmap(el, weekday) {
+  const names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+  const colors = { green: "#2fb344", yellow: "#e8a600", red: "#e5484d" };
+  el.innerHTML = weekday.map((d, i) =>
+    `<div class="heat-cell${d ? "" : " empty"}" style="background:${d ? (colors[d.zone] || "#999") : "var(--card)"}">
+       <div>${names[i]}</div><div>${d ? Math.round(d.avg) : "—"}</div></div>`).join("");
+}
+
+function drawTrend(canvas, trend) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width = canvas.clientWidth || 200;
+  const h = canvas.height = 140;
+  ctx.clearRect(0, 0, w, h);
+  const daily = trend.daily || [];
+  if (daily.length < 2) {
+    ctx.fillStyle = "#777"; ctx.font = "12px sans-serif";
+    ctx.fillText("Недостаточно данных", 8, h / 2); return;
+  }
+  const vals = daily.map((d) => d.avg);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = 14, plotH = h - 2 * pad;
+  const x = (i) => pad + (i / (daily.length - 1)) * (w - 2 * pad);
+  const y = (v) => pad + (hi === lo ? plotH / 2 : (1 - (v - lo) / (hi - lo)) * plotH);
+  ctx.strokeStyle = "#2ea6ff"; ctx.lineWidth = 1.8; ctx.beginPath();
+  daily.forEach((d, i) => { i ? ctx.lineTo(x(i), y(d.avg)) : ctx.moveTo(x(i), y(d.avg)); });
+  ctx.stroke();
+  ctx.strokeStyle = "#9aa0a6"; ctx.setLineDash([5, 4]); ctx.beginPath();
+  daily.forEach((_, i) => {
+    const v = trend.slope * i + trend.intercept;
+    i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v));
+  });
+  ctx.stroke(); ctx.setLineDash([]);
+}
+
 function renderChildSelector() {
   const bar = $("topbar");
   if (!bar) return;
@@ -243,6 +325,7 @@ async function switchTo(name) {
     if (name === "today") await loadToday();
     else if (name === "history") await loadHistory(1);
     else if (name === "stats") await loadStats();
+    else if (name === "analytics") await loadAnalytics();
     else if (name === "chart") await loadChart();
     else if (name === "settings") await loadSettings();
   } catch (e) { showError(e.message); }
