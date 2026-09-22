@@ -160,7 +160,8 @@ peakflow/
 Проверки прав в хендлерах:
 
 - `cb_edit_any`, `cb_delete`, `cb_delete_confirm`, `cb_settings`, `cb_change_target`,
-  `cb_members`, `cb_children`, `cb_add_child`, `cb_del_child`, `cb_regen_invite` —
+  `cb_members`, `cb_children`, `cb_add_child`, `cb_del_child`, `cb_regen_invite`,
+  `cb_rm_child`, `cb_rm_child_yes`, `cb_promote_child` —
   только для родителей, иначе alert «Только родители…».
 - **Все измерения пишутся от имени ребёнка**: в БД `child_id` = активный ребёнок,
   а ID того, кто нажал кнопки, хранится в `added_by`.
@@ -170,11 +171,14 @@ peakflow/
 - `/start` без `member` → экран «🏠 Создать семью» / «🔑 Войти по коду».
 - Создание семьи (`create_family_with_owner`): семья + владелец-родитель + родительский
   invite-токен в одной транзакции.
-- Вход по токену (`join_by_invite`): создаёт/обновляет `member` с ролью и именем из
-  приглашения. **Уже зарегистрированный пользователь не может быть перемещён в другую
-  семью** — и при вводе кода, и при deep-link `/start <token>`.
+- Вход по токену (`join_by_invite`): создаёт `member` с ролью и именем из
+  приглашения; для **уже зарегистрированного** пользователя возвращает текущее
+  членство без изменений. **Уже зарегистрированный пользователь не может быть
+  перемещён в другую семью/получить другую роль** — ни при вводе кода, ни при
+  deep-link `/start <token>` (защита и в БД, и в хендлерах).
 - «⚙️ Настройки» → «👨‍👩‍👧 Участники» (invite-код, перегенерация) и «🧒 Дети»
-  (карточки детей: добавить/удалить, каждая с токеном).
+  (карточки детей: добавить/удалить, каждая с токеном; а также управление уже
+  вошедшими детьми: «👨 … → родитель» и «🗑️ Убрать»).
 - Мини-App: `_resolve_user` берёт роль, `family_id`, `active_child_id` и список детей
   из `members`; неизвестный → 403. Временный gate 2B (только семья №1) снят.
 
@@ -192,6 +196,21 @@ peakflow/
 - Ребёнок не может выбрать активного ребёнка (запись доступна только родителю).
 - Если у семьи нет детей (`child_id is None`) — data-экраны показывают подсказку,
   данные пустые (`/api/status` `today=[]`, статистика 0).
+
+### 4c. Удаление ребёнка и коррекция роли
+
+- Кнопка «🗑️ Убрать» (`rm_child_<id>`) показывает подтверждение с числом замеров и
+  достижений; «🗑️ Да, убрать» (`rm_yes_<id>`) вызывает `remove_child` — атомарно
+  удаляются строка `members`, замеры (вместе с заметками), достижения и флаги
+  напоминаний ребёнка, а `active_child_id` родителей, указывавший на него, сбрасывается.
+- Кнопка «👨 … → родитель» (`promote_<id>`) вызывает `promote_child_to_parent` —
+  исправляет ошибочно назначенную роль (`child` → `parent`), не удаляя данные.
+- Обе операции валидируют, что цель — ребёнок **этой** семьи; родители через эти
+  хендлеры не удаляются и не понижаются. Экран доступен только родителям.
+- Раньше единственным удалением в «Детях» было удаление карточки-приглашения
+  (`delete_invite`), а строка `members` вошедшего ребёнка не удалялась — из-за этого
+  ошибочно попавший в дети участник оставался там навсегда. `join_by_invite` больше
+  не перезаписывает роль существующего участника.
 
 ---
 
@@ -319,6 +338,9 @@ peakflow/
 | `list_family_parents(db, family_id)` | Родители семьи (получатели уведомлений) |
 | `count_family_children(db, family_id)` | Число детей семьи |
 | `set_active_child(db, telegram_id, child_id)` / `resolve_active_child(db, member)` | Выбор/резолв активного ребёнка (ребёнок → сам, родитель → выбранный/первый, нет детей → None); `set` валидирует роль и семью |
+| `member_data_counts(db, child_id, family_id)` | Числа замеров и достижений ребёнка — для текста подтверждения удаления |
+| `remove_child(db, child_id, family_id)` | Атомарно (`BEGIN IMMEDIATE`) удаляет ребёнка **этой** семьи: `measurements` (с заметками), `achievements`, `reminders_sent`, сбрасывает `active_child_id` родителей на него и строку `members`; возвращает счётчики, `None` если member нет/не ребёнок/чужая семья |
+| `promote_child_to_parent(db, telegram_id, family_id)` | Меняет роль `child` → `parent` в рамках семьи (исправление ошибки), `active_child_id` обнуляется; bool |
 | `backup_family_db(db, dest, family_id)` | Family-scoped `.backup`: вся схема, но только строки одной семьи (families/members/measurements/settings/invites/reminders_sent) — не утекают данные других семей. Таблица `achievements` в бэкап **не входит** (её нет в `_FAMILY_BACKUP_DDL`): при восстановлении на v5 достижения пересоздаются тихим бэкфиллом миграции |
 | `get_measurement_dates(db, child_id, family_id)` | Уникальные даты замеров (ISO, по возрастанию) — вход для расчёта серии (v5) |
 | `count_measurements(db, child_id, family_id)` | Всего замеров, включая auto — вход для достижений по количеству (v5) |
@@ -720,6 +742,9 @@ loop каждые 60 секунд:
 | `export` | `cb_export` | все (кнопка — в настройках) | CSV-документ |
 | `pick_child` | `cb_pick_child` | родитель | Список детей семьи (отметка ✅ активного) |
 | `set_child_<id>` | `cb_set_child` | родитель | Сделать ребёнка активным → главное меню |
+| `rm_child_<id>` | `cb_rm_child` | родитель | Подтверждение удаления вошедшего ребёнка (с числом замеров) |
+| `rm_yes_<id>` | `cb_rm_child_yes` | родитель | Удалить ребёнка и его данные (`remove_child`) |
+| `promote_<id>` | `cb_promote_child` | родитель | Исправить роль: ребёнок → родитель (`promote_child_to_parent`) |
 | `achievements` | `cb_achievements` | все | Экран «🏅 Достижения» (SP4B) |
 | `noop` | `cb_noop` | все | Пустой ACK (кнопка «N/M») |
 
@@ -823,7 +848,7 @@ pip install -r requirements.txt        # aiogram==3.31.0, matplotlib==3.11.2, py
 pip install -r requirements-dev.txt    # + pytest==9.1.1
 # заполнить .env (BOT_TOKEN, CHILD_ID, PARENT_IDS, CHILD_NAME, TARGET_PEF, TZ_OFFSET)
 python bot.py                     # long polling + планировщик
-python -m pytest test/ -v         # 598 тестов
+python -m pytest test/ -v         # 623 теста
 ```
 
 Тесты лежат в `test/` (`test/test_bot.py` и `test/test_webapp_*.py`): CRUD, права, статистика/тренд (без авто), пагинация, флаги напоминаний (в т.ч. child/auto), settings, часы напоминаний, месячные выборки, бэкап, заметки (вопрос после замера, сохранение, обрезка 200), авто-carry, планировщик, клавиатуры, рендер PNG, CSV, безопасный парсинг callback, `/cancel`/FSM-подсказки, экранирование Markdown, версии схемы БД (v5), миграции (в т.ч. тихий бэкфилл достижений v5), dry-run миграции (read-only источник), изоляция семей, мульти-семейный планировщик (per-family hours, per-child weekly), выбор активного ребёнка в боте и Mini App, PDF-отчёт врачу (периоды/статистика/A4/изоляция, кнопка бота и `GET /api/report/pdf`), геймификация SP4B (`current_streak` с grace, `longest_streak`, `evaluate`, экран «🏅 Достижения», одноразовые уведомления, `GET /api/gamification`, бэкфилл v5), метрики SP4D (реестр/валидация/экранирование, Prometheus-рендер, `get_system_counts`, поля `/healthz`, env-gated `/metrics` с токеном, HTTP-middleware), PWA SP5C (манифест/иконка, линковка и регистрация SW, токены SW: версия/`/api/`-байпас/`skipWaiting`/`clients.claim`/`addAll`/`navigate`), аналитика SP5D (`zone_distribution`, `weekday_averages`, `linear_fit`, `GET /api/analytics`, изоляция family/child, 404 без активного ребёнка), корреляция заметок SP5E (`NOTE_GROUPS`/`match_note_groups` регистр/корни/несколько групп, `note_correlation` baseline/avg/count/delta и пустые данные, поле `notes` в `/api/analytics`, секция «Заметки» в `app.js`), а также Mini App (auth initData, чтение, запись, настройки, экспорт, family-scoped бэкап). Хендлеры через mock-объекты aiogram. `test/conftest.py` подставляет тестовые `DB_PATH` и dummy `BOT_TOKEN`, поэтому сьют запускается без `.env` (это же делает CI).
