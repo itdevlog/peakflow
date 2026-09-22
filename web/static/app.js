@@ -69,7 +69,15 @@ async function download(path, fallbackName) {
   a.remove(); URL.revokeObjectURL(url);
 }
 
+function showAuthHint() {
+  if (showAuthHint._shown) return;
+  showAuthHint._shown = true;
+  const el = $("auth-hint");
+  if (el) el.hidden = false;
+}
+
 function showError(msg) {
+  if (msg === "Нет доступа") { showAuthHint(); return; }
   const el = $("error");
   el.textContent = msg;
   el.hidden = false;
@@ -439,8 +447,11 @@ document.querySelectorAll("[data-chart-range]").forEach((b) =>
 $("chart").addEventListener("click", chartClick);
 
 async function shiftMonth(delta) {
-  const data = await api(`/api/chart?year=${state.chart.year}&month=${state.chart.month}`);
-  const months = data.available_months;
+  if (!state.months.length) {
+    const data = await api(`/api/chart?year=${state.chart.year}&month=${state.chart.month}`);
+    state.months = data.available_months || [];
+  }
+  const months = state.months;
   const cur = `${state.chart.year}-${state.chart.month}`;
   // Index in the sorted union of available months + the current one, so a
   // month with no data still navigates to the nearest real neighbour.
@@ -559,12 +570,21 @@ function openNote(mid) {
     </div></div>`;
   ov.hidden = false;
   $("note-save").onclick = async () => {
+    const btn = $("note-save");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = "Сохраняем…";
     const text = $("note-input").value;
     try {
       await api(`/api/measurements/${mid}/note`, { method: "POST", body: { note: text } });
       closeForm();
       await switchTo("today");
-    } catch (e) { showError(e.message); }
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Сохранить";
+    }
   };
   $("note-cancel").onclick = () => { closeForm(); switchTo("today"); };
 }

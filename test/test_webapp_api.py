@@ -709,3 +709,11 @@ class TestMiniAppChartUi:
         assert "p.note" in js
         assert "л/мин" in js
 
+    def test_ux_items(self):
+        js = self._js()
+        html = self._html()
+        assert "auth-hint" in html and "auth-hint" in js
+        assert "Нет доступа" in js
+        assert "state.months" in js
+        assert "note-save" in js and "disabled" in js
+

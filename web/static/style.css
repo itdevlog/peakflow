@@ -43,7 +43,8 @@ body { margin: 0; background: var(--bg); color: var(--fg);
   background: var(--card); color: var(--fg); font-size: 18px; }
 #chart { width: 100%; background: var(--card); border-radius: 10px; }
 #chart-tip { background: var(--fg); color: var(--bg); padding: 6px 10px;
-  border-radius: 8px; font-size: 13px; display: inline-block; margin-top: 6px; }
+  border-radius: 8px; font-size: 13px; display: inline-block; margin-top: 6px;
+  white-space: pre-line; }
 .hint { color: var(--muted); text-align: center; padding: 24px 0; }
 .center { text-align: center; }
 #form-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5);
@@ -67,3 +68,8 @@ body { margin: 0; background: var(--bg); color: var(--fg);
   color: var(--fg); font-size: 15px; }
 #tab-settings[hidden] { display: none !important; }
 #screen-settings .row { justify-content: space-between; }
+.seg { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.mini.active { background: var(--accent); color: #fff; }
+#auth-hint { background: var(--card); color: var(--fg); padding: 10px;
+  border-radius: 8px; margin: 8px; text-align: center; font-size: 14px; }
+#auth-hint[hidden] { display: none !important; }
