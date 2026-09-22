@@ -147,9 +147,16 @@ def _avg_line(label: str, avg) -> str:
     return f"{label}: —" if avg is None else f"{label}: {avg:.0f} л/мин"
 
 
-def _header_page(rows, target, child_name, period_label, stats, zone_green, zone_yellow):
-    from datetime import datetime
+def generated_label(tz_offset: int = 0) -> str:
+    """Current date formatted for the PDF header, in the given UTC offset."""
+    from datetime import datetime, timedelta, timezone
 
+    tz = timezone(timedelta(hours=tz_offset))
+    return datetime.now(tz).strftime("%d.%m.%Y")
+
+
+def _header_page(rows, target, child_name, period_label, stats, zone_green, zone_yellow,
+                 generated):
     from matplotlib import pyplot as plt
 
     fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait, inches
@@ -159,8 +166,7 @@ def _header_page(rows, target, child_name, period_label, stats, zone_green, zone
         fig.text(0.07, 0.915, f"Ребёнок: {child_name}", fontsize=11)
         fig.text(0.07, 0.888, f"Период: {period_label}", fontsize=11)
         fig.text(0.07, 0.861, f"Целевая ПСВ: {target} л/мин", fontsize=11)
-        fig.text(0.93, 0.915, f"Сформирован: {datetime.now():%d.%m.%Y}",
-                 ha="right", fontsize=9)
+        fig.text(0.93, 0.915, f"Сформирован: {generated}", ha="right", fontsize=9)
 
         ax = fig.add_axes([0.09, 0.55, 0.84, 0.27])
         if rows:
@@ -215,20 +221,27 @@ def _table_page(rows, target, zone_green, zone_yellow):
 
 
 def build_pdf(rows, *, target, child_name, period_label,
-              zone_green: int = 80, zone_yellow: int = 60) -> bytes:
+              zone_green: int = 80, zone_yellow: int = 60,
+              generated: str = None) -> bytes:
     """Собрать A4-PDF (шапка+график+статистика, затем постраничная таблица)."""
     from matplotlib import pyplot as plt
     from matplotlib.backends.backend_pdf import PdfPages
 
+    if generated is None:
+        generated = generated_label(0)
     stats = compute_stats(rows, target, zone_green, zone_yellow)
     buf = io.BytesIO()
     with RENDER_LOCK, PdfPages(buf) as pdf:
         fig = _header_page(rows, target, child_name, period_label,
-                           stats, zone_green, zone_yellow)
-        pdf.savefig(fig)
-        plt.close(fig)
+                           stats, zone_green, zone_yellow, generated)
+        try:
+            pdf.savefig(fig)
+        finally:
+            plt.close(fig)
         for chunk in _chunks(rows, ROWS_PER_PAGE):
             tfig = _table_page(chunk, target, zone_green, zone_yellow)
-            pdf.savefig(tfig)
-            plt.close(tfig)
+            try:
+                pdf.savefig(tfig)
+            finally:
+                plt.close(tfig)
     return buf.getvalue()

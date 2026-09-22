@@ -526,6 +526,7 @@ def create_app(services: dict) -> FastAPI:
             child_name=_child_name(auth),
             child_id=child_id,
         )
+        metrics.inc("measurements_saved_total")
         return {"id": mid, "pef": body.pef, "tod": tod,
                 "zone": _pef_zone(body.pef, target, config), "pct": pct, "diff": diff}
 
@@ -656,6 +657,7 @@ def create_app(services: dict) -> FastAPI:
                 period_label=label,
                 zone_green=getattr(config, "ZONE_GREEN", 80),
                 zone_yellow=getattr(config, "ZONE_YELLOW", 60),
+                generated=report_pdf.generated_label(getattr(config, "TZ_OFFSET", 0)),
             )
         except Exception as e:
             logger.error("Ошибка генерации PDF-отчёта: %s", e)

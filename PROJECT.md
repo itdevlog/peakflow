@@ -56,7 +56,7 @@ peakflow/
 ├── analytics.py        # Аналитика ПСВ: зоны, дни недели, тренд, корреляция заметок (SP5D, SP5E)
 ├── metrics.py          # In-process метрики: счётчики/гейджи + Prometheus-рендер, stdlib (SP4D)
 ├── web/                # FastAPI Mini App: api.py, server.py, auth.py, notify.py, static/
-├── test/               # Pytest тесты (587)
+├── test/               # Pytest тесты (598)
 ├── manage.sh           # Установка и эксплуатация (systemd, бэкапы, Caddy)
 ├── requirements.txt    # Python зависимости
 ├── requirements-dev.txt# + pytest, pyflakes
@@ -570,15 +570,15 @@ Prometheus-меток экранируются.
 `http_last_duration_ms`, `families_count`, `children_count`,
 `measurements_count`, `process_uptime_seconds`, `scheduler_ticks_total`,
 `scheduler_last_tick_timestamp`, `measurements_saved_total`,
-`achievement_notifications_total`, `reminders_sent_total{kind}`.
+`achievements_unlocked_total`, `reminders_sent_total{kind}`.
 
 ### Точки сбора
 
 | Место | Метрика |
 |-------|---------|
 | HTTP-middleware (`web/api.py`) | `http_requests_total{method,status}`, `http_last_duration_ms` |
-| Сохранение замера (`bot.input_pef`) | `measurements_saved_total` |
-| Разблокировка достижений (`_evaluate_and_notify`) | `achievement_notifications_total` |
+| Сохранение замера (бот `_persist_measurement` и Mini App `POST /api/measurements`) | `measurements_saved_total` |
+| Разблокировка достижений (`_evaluate_and_notify`) | `achievements_unlocked_total` |
 | Планировщик, за тик (`scheduler_loop`) | `scheduler_ticks_total`, `scheduler_last_tick_timestamp` |
 | Напоминания | `reminders_sent_total{kind=child\|escalation\|weekly}` |
 | `/metrics` при сборе | `families_count`, `children_count`, `measurements_count`, `process_uptime_seconds` |
@@ -808,7 +808,7 @@ python bot.py
 
 ```bash
 python -m pytest test/ -v
-# 587 passed
+# 598 passed
 ```
 
 Тесты запускаются без `.env`: `test/conftest.py` подставляет тестовый `DB_PATH`
