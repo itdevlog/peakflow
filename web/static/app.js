@@ -245,7 +245,7 @@ function drawHeatmap(el, weekday) {
   const names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
   const colors = { green: "#2fb344", yellow: "#e8a600", red: "#e5484d" };
   el.innerHTML = weekday.map((d, i) =>
-    `<div class="heat-cell" style="background:${d ? (colors[d.zone] || "#999") : "var(--card)"}">
+    `<div class="heat-cell${d ? "" : " empty"}" style="background:${d ? (colors[d.zone] || "#999") : "var(--card)"}">
        <div>${names[i]}</div><div>${d ? Math.round(d.avg) : "—"}</div></div>`).join("");
 }
 

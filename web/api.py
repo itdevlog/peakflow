@@ -456,8 +456,7 @@ def create_app(services: dict) -> FastAPI:
         rows = await _db(get_measurements_between, config.DB_PATH, child_id,
                          "2000-01-01", today.isoformat(), auth["family_id"])
         since = (today - timedelta(days=13)).isoformat()
-        recent = await _db(get_measurements_between, config.DB_PATH, child_id,
-                           since, today.isoformat(), auth["family_id"])
+        recent = [r for r in rows if str(r["measured_at"])[:10] >= since]
         dates = _date_list(since, today.isoformat())
         series = daily_average_series(recent, dates)
         daily = [{"date": d, "avg": v} for d, v in zip(dates, series) if v is not None]

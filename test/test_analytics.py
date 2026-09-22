@@ -33,6 +33,15 @@ class TestWeekdayAverages:
         from analytics import weekday_averages
         assert weekday_averages([], 260) == [None] * 7
 
+    def test_skips_invalid_dates(self):
+        from analytics import weekday_averages
+        rows = [
+            {"measured_at": "garbage", "pef_value": 999},
+            {"measured_at": "2026-09-21 08:00:00", "pef_value": 250},
+        ]
+        out = weekday_averages(rows, 260)
+        assert out[0] == {"avg": 250.0, "count": 1, "zone": "green"}
+
 
 class TestLinearFit:
     def test_increasing(self):

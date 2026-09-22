@@ -6,7 +6,7 @@ import os
 import sqlite3
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import quote
@@ -39,7 +39,7 @@ def make_init_data(user_id: int, token: str = BOT_TOKEN, auth_date: int | None =
 def _config():
     return SimpleNamespace(
         DB_PATH=TEST_DB, BOT_TOKEN=BOT_TOKEN, CHILD_ID=CHILD_ID, PARENT_IDS=PARENT_IDS,
-        CHILD_NAME="Motya", TARGET_PEF=260,
+        CHILD_NAME="Motya", TARGET_PEF=260, TZ_OFFSET=0,
     )
 
 
@@ -852,8 +852,8 @@ class TestServiceWorker:
 class TestAnalyticsApi:
     def test_fields_and_values(self):
         _setup_db()
-        from datetime import datetime
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(TEST_DB)
         for v in (260, 240):
             conn.execute(

@@ -77,3 +77,4 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 .heat { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .heat-cell { border-radius: 6px; padding: 6px 2px; text-align: center;
   color: #fff; font-size: 11px; }
+.heat-cell.empty { color: var(--muted); }
