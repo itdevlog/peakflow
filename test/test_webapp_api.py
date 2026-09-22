@@ -703,3 +703,9 @@ class TestMiniAppChartUi:
                       "visiblePoints", "syncChartControls", "redrawChart"):
             assert token in js
 
+    def test_tooltip_full(self):
+        js = self._js()
+        assert "pointZone" in js
+        assert "p.note" in js
+        assert "л/мин" in js
+

@@ -356,9 +356,20 @@ function redrawChart() {
   syncChartControls();
 }
 
+function pointZone(p, data) {
+  const t = (data && data.target_pef) || 0;
+  if (!t) return { pct: null, emoji: "" };
+  const pct = Math.round((p.pef / t) * 100);
+  const zones = (data && data.zones) || {};
+  if (pct >= (zones.green || 80)) return { pct, emoji: "🟢" };
+  if (pct >= (zones.yellow || 60)) return { pct, emoji: "🟡" };
+  return { pct, emoji: "🔴" };
+}
+
 function chartClick(ev) {
   const c = $("chart");
   const pts = c._points || [];
+  const data = state.chartData || {};
   const rect = c.getBoundingClientRect();
   const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
   let best = null, bestD = 1e9;
@@ -368,8 +379,13 @@ function chartClick(ev) {
   }
   const tip = $("chart-tip");
   if (best && bestD < 900) {
+    const p = best.p;
+    const z = pointZone(p, data);
+    let text = `${p.date} · ${todLabel(p.tod)} · ${p.pef} л/мин`;
+    if (z.pct != null) text += ` · ${z.pct}% ${z.emoji}`;
+    if (p.note) text += `\n📝 ${p.note}`;
     tip.hidden = false;
-    tip.textContent = `${best.p.date} · ${todLabel(best.p.tod)} · ${best.p.pef}`;
+    tip.textContent = text;
   } else { tip.hidden = true; }
 }
 
