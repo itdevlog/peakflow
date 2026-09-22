@@ -324,7 +324,7 @@ function drawChart(data, points, type) {
       ctx.fillStyle = p.tod === "morning" ? "#e8a600" : "#7a5cff";
       ctx.fillRect(x - bw / 2, y, bw, (cssH - padB) - y);
     });
-  } else {
+  } else if (type === "line" || type === "points") {
     if (type === "line" && n >= 2) {
       ctx.strokeStyle = "#555"; ctx.lineWidth = 1.5; ctx.beginPath();
       points.forEach((p, i) => { const x = xToPx(i), y = yToPx(p.pef);

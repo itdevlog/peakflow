@@ -700,7 +700,8 @@ class TestMiniAppChartUi:
     def test_state_and_helpers(self):
         js = self._js()
         for token in ("chartType", "chartRange", "state.months",
-                      "visiblePoints", "syncChartControls", "redrawChart"):
+                      "visiblePoints", "syncChartControls", "redrawChart",
+                      'type === "bars"', 'type === "points"', "86400000"):
             assert token in js
 
     def test_tooltip_full(self):
