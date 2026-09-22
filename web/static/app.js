@@ -439,7 +439,8 @@ async function loadCompare() {
   if (empty) {
     initChart().ctx.clearRect(0, 0, 9999, 9999);
     $("chart").style.display = "none";
-    if (!oldHint) {
+    if (oldHint) { oldHint.textContent = "Нет данных для сравнения"; }
+    else {
       const h = document.createElement("div");
       h.className = "hint";
       h.textContent = "Нет данных для сравнения";
@@ -462,12 +463,26 @@ function toggleCompare() {
     $("chart-next").disabled = true;
     loadCompare().catch((e) => showError(e.message));
   } else {
-    if (state.chartData && state.chartData.title) $("chart-title").textContent = state.chartData.title;
-    if (state.chartData) {
+    const hint = $("screen-chart").querySelector(".hint");
+    const hasData = state.chartData && state.chartData.points && state.chartData.points.length;
+    if (hasData) {
+      if (hint) hint.remove();
+      $("chart").style.display = "block";
+      if (state.chartData.title) $("chart-title").textContent = state.chartData.title;
       $("chart-prev").disabled = !state.chartData.can_prev;
       $("chart-next").disabled = !state.chartData.can_next;
+      redrawChart();
+    } else {
+      initChart().ctx.clearRect(0, 0, 9999, 9999);
+      $("chart").style.display = "none";
+      if (hint) { hint.textContent = "В этом месяце замеров нет"; }
+      else {
+        const h = document.createElement("div");
+        h.className = "hint";
+        h.textContent = "В этом месяце замеров нет";
+        $("screen-chart").appendChild(h);
+      }
     }
-    redrawChart();
   }
 }
 
