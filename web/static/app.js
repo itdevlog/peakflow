@@ -21,6 +21,7 @@ const state = {
   target: 0, role: null, zones: null, screen: "today",
   children: [], activeChildId: null,
   chart: { year: null, month: null }, chartData: null, history: { page: 1 },
+  chartType: "line", chartRange: "month", months: [],
   form: { open: false, step: "h", hundreds: null, mode: "add", editId: null, busy: false },
 };
 
@@ -254,7 +255,7 @@ function initChart() {
   return { c, ctx, cssW, cssH };
 }
 
-function drawChart(data, points) {
+function drawChart(data, points, type) {
   const { c, ctx, cssW, cssH } = initChart();
   ctx.clearRect(0, 0, cssW, cssH);
   const padL = 38, padR = 12, padT = 12, padB = 24;
@@ -308,20 +309,51 @@ function drawChart(data, points) {
     ctx.setLineDash([]);
   }
 
-  if (n >= 2) {
-    ctx.strokeStyle = "#555"; ctx.lineWidth = 1.5; ctx.beginPath();
-    points.forEach((p, i) => { const x = xToPx(i), y = yToPx(p.pef);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-    ctx.stroke();
+  if (type === "bars") {
+    const bw = Math.max(3, Math.min(20, (plotW / Math.max(1, n)) * 0.6));
+    points.forEach((p, i) => {
+      const x = xToPx(i), y = yToPx(p.pef);
+      ctx.fillStyle = p.tod === "morning" ? "#e8a600" : "#7a5cff";
+      ctx.fillRect(x - bw / 2, y, bw, (cssH - padB) - y);
+    });
+  } else {
+    if (type === "line" && n >= 2) {
+      ctx.strokeStyle = "#555"; ctx.lineWidth = 1.5; ctx.beginPath();
+      points.forEach((p, i) => { const x = xToPx(i), y = yToPx(p.pef);
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+    points.forEach((p, i) => {
+      ctx.fillStyle = p.tod === "morning" ? "#e8a600" : "#7a5cff";
+      ctx.beginPath(); ctx.arc(xToPx(i), yToPx(p.pef), 3.5, 0, Math.PI * 2); ctx.fill();
+    });
   }
 
-  ctx.lineWidth = 1;
-  points.forEach((p, i) => {
-    ctx.fillStyle = p.tod === "morning" ? "#e8a600" : "#7a5cff";
-    ctx.beginPath(); ctx.arc(xToPx(i), yToPx(p.pef), 3.5, 0, Math.PI * 2); ctx.fill();
-  });
-
   c._points = points.map((p, i) => ({ x: xToPx(i), y: yToPx(p.pef), p }));
+}
+
+function visiblePoints(data) {
+  const pts = (data && data.points) || [];
+  if (state.chartRange !== "week" || !pts.length) return pts;
+  const lastMs = Date.parse(pts[pts.length - 1].date + "T00:00:00");
+  const cutoff = lastMs - 6 * 86400000;
+  return pts.filter((p) => Date.parse(p.date + "T00:00:00") >= cutoff);
+}
+
+function syncChartControls() {
+  document.querySelectorAll("[data-chart-type]").forEach((b) =>
+    b.classList.toggle("active", b.dataset.chartType === state.chartType));
+  document.querySelectorAll("[data-chart-range]").forEach((b) =>
+    b.classList.toggle("active", b.dataset.chartRange === state.chartRange));
+}
+
+function redrawChart() {
+  const d = state.chartData;
+  if (!d) return;
+  $("chart-tip").hidden = true;
+  drawChart(d, visiblePoints(d), state.chartType);
+  syncChartControls();
 }
 
 function chartClick(ev) {
@@ -346,6 +378,8 @@ async function loadChart(year, month) {
   const data = await api(`/api/chart${q}`);
   state.target = data.target_pef || state.target;
   state.chart = { year: data.month.slice(0, 4), month: data.month.slice(5, 7) };
+  state.months = data.available_months || [];
+  state.chartRange = "month";
   $("chart-title").textContent = data.title;
   $("chart-prev").disabled = !data.can_prev;
   $("chart-next").disabled = !data.can_next;
@@ -354,6 +388,7 @@ async function loadChart(year, month) {
     state.chartData = null;
     initChart().ctx.clearRect(0, 0, 9999, 9999);
     $("chart").style.display = "none";
+    $("chart-controls").style.display = "none";
     $("screen-chart").querySelector(".hint")?.remove();
     const hint = document.createElement("div");
     hint.className = "hint";
@@ -362,9 +397,10 @@ async function loadChart(year, month) {
     return;
   }
   $("chart").style.display = "block";
+  $("chart-controls").style.display = "";
   $("screen-chart").querySelector(".hint")?.remove();
   state.chartData = data;
-  drawChart(data, data.points);
+  redrawChart();
 }
 
 let _resizeTimer = null;
@@ -373,13 +409,17 @@ window.addEventListener("resize", () => {
   _resizeTimer = setTimeout(() => {
     const d = state.chartData;
     if (d && d.points && d.points.length && $("chart").offsetParent) {
-      drawChart(d, d.points);
+      redrawChart();
     }
   }, 200);
 });
 
 $("chart-prev").onclick = () => shiftMonth(-1).catch((e) => showError(e.message));
 $("chart-next").onclick = () => shiftMonth(1).catch((e) => showError(e.message));
+document.querySelectorAll("[data-chart-type]").forEach((b) =>
+  b.onclick = () => { state.chartType = b.dataset.chartType; redrawChart(); });
+document.querySelectorAll("[data-chart-range]").forEach((b) =>
+  b.onclick = () => { state.chartRange = b.dataset.chartRange; redrawChart(); });
 $("chart").addEventListener("click", chartClick);
 
 async function shiftMonth(delta) {

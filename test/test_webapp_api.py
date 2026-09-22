@@ -678,3 +678,28 @@ class TestChartNote:
         body = _client().get("/api/chart", headers=_auth(CHILD_ID)).json()
         assert body["points"][0]["note"] == ""
 
+
+class TestMiniAppChartUi:
+    def _js(self):
+        import pathlib
+        return pathlib.Path("web/static/app.js").read_text(encoding="utf-8")
+
+    def _html(self):
+        import pathlib
+        return pathlib.Path("web/static/index.html").read_text(encoding="utf-8")
+
+    def test_controls_present(self):
+        html = self._html()
+        assert "chart-controls" in html
+        assert 'data-chart-type="line"' in html
+        assert 'data-chart-type="bars"' in html
+        assert 'data-chart-type="points"' in html
+        assert 'data-chart-range="week"' in html
+        assert 'data-chart-range="month"' in html
+
+    def test_state_and_helpers(self):
+        js = self._js()
+        for token in ("chartType", "chartRange", "state.months",
+                      "visiblePoints", "syncChartControls", "redrawChart"):
+            assert token in js
+
