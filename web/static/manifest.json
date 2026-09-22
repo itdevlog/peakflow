@@ -1,0 +1,13 @@
+{
+  "name": "Пикфлоуметр",
+  "short_name": "Пикфлоуметр",
+  "description": "Дневник пикфлоуметрии для семьи",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2ea6ff",
+  "icons": [
+    {"src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
+  ]
+}

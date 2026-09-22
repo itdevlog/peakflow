@@ -6,6 +6,9 @@
 <title>Дневник ПСВ</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="style.css">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#2ea6ff">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
 </head>
 <body>
 <div id="app">
@@ -54,5 +57,12 @@
   <div id="form-overlay" hidden></div>
 </div>
 <script src="app.js"></script>
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  });
+}
+</script>
 </body>
 </html>
