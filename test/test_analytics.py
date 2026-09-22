@@ -68,3 +68,52 @@ class TestLinearFit:
     def test_single(self):
         from analytics import linear_fit
         assert linear_fit([250]) == (0.0, 250.0)
+
+
+class TestMatchNoteGroups:
+    def test_empty(self):
+        from analytics import match_note_groups
+        assert match_note_groups("") == []
+        assert match_note_groups(None) == []
+
+    def test_case_and_roots(self):
+        from analytics import match_note_groups
+        assert match_note_groups("Болел сильно") == ["sick"]
+        assert match_note_groups("под утро БОЛЕЛА голова") == ["sick"]
+        assert match_note_groups("был на тренировке") == ["sport"]
+        assert match_note_groups("принял вентолин") == ["meds"]
+        assert match_note_groups("аллергия на пыль") == ["allergy"]
+
+    def test_multiple_groups(self):
+        from analytics import match_note_groups
+        got = match_note_groups("болел, не спал")
+        assert "sick" in got and "night" in got
+
+
+class TestNoteCorrelation:
+    def test_avg_count_delta(self):
+        from analytics import note_correlation
+        rows = [
+            {"pef_value": 250, "note": ""},
+            {"pef_value": 250, "note": ""},
+            {"pef_value": 200, "note": "болел"},
+        ]
+        out = note_correlation(rows)
+        assert out["baseline"] == {"avg": 250.0, "count": 2}
+        sick = next(g for g in out["groups"] if g["key"] == "sick")
+        assert sick["avg"] == 200.0 and sick["count"] == 1 and sick["delta"] == -50.0
+        sport = next(g for g in out["groups"] if g["key"] == "sport")
+        assert sport["count"] == 0 and sport["avg"] is None and sport["delta"] is None
+
+    def test_no_baseline(self):
+        from analytics import note_correlation
+        out = note_correlation([{"pef_value": 200, "note": "болел"}])
+        assert out["baseline"]["count"] == 0
+        sick = next(g for g in out["groups"] if g["key"] == "sick")
+        assert sick["delta"] is None
+
+    def test_empty(self):
+        from analytics import note_correlation
+        out = note_correlation([])
+        assert out["baseline"] == {"avg": None, "count": 0}
+        assert all(g["count"] == 0 for g in out["groups"])
