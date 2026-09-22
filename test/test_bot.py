@@ -5348,3 +5348,58 @@ class TestDebtMetrics:
              patch.object(bot.bot, "send_message", new=AsyncMock()):
             asyncio.run(bot._evaluate_and_notify(111, 1, 999))
         assert metrics.get_counter("achievements_unlocked_total") == 1
+
+
+class TestDebtReminderMetrics:
+    def _child(self):
+        return {"telegram_id": 111, "name": "M"}
+
+    def test_child_ping_counts(self):
+        import asyncio
+        import bot
+        import metrics
+        from unittest.mock import AsyncMock, patch
+        metrics.reset()
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "_child_name", new=AsyncMock(return_value="M")), \
+             patch.object(bot, "mark_reminder_sent", return_value=None), \
+             patch.object(bot.bot, "send_message", new=AsyncMock()):
+            asyncio.run(bot._maybe_ping_child("morning", {"child_morning": 8}, 8, 0,
+                                              "2026-09-21", family_id=1,
+                                              child=self._child()))
+        assert metrics.get_counter("reminders_sent_total", kind="child") == 1
+
+    def test_child_ping_failure_not_counted(self):
+        import asyncio
+        import bot
+        import metrics
+        from unittest.mock import AsyncMock, patch
+        metrics.reset()
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "_child_name", new=AsyncMock(return_value="M")), \
+             patch.object(bot, "mark_reminder_sent", return_value=None), \
+             patch.object(bot.bot, "send_message", side_effect=RuntimeError("no")):
+            asyncio.run(bot._maybe_ping_child("morning", {"child_morning": 8}, 8, 0,
+                                              "2026-09-21", family_id=1,
+                                              child=self._child()))
+        assert metrics.get_counter("reminders_sent_total", kind="child") == 0
+
+    def test_escalation_counts(self):
+        import asyncio
+        import bot
+        import metrics
+        from unittest.mock import AsyncMock, patch
+        metrics.reset()
+        with patch.object(bot, "was_reminder_sent", return_value=False), \
+             patch.object(bot, "has_today_measurement", return_value=False), \
+             patch.object(bot, "get_last_of_tod", return_value=None), \
+             patch.object(bot, "_child_name", new=AsyncMock(return_value="M")), \
+             patch.object(bot, "_family_parents", new=AsyncMock(return_value=[222])), \
+             patch.object(bot, "mark_reminder_sent", return_value=None), \
+             patch.object(bot.bot, "send_message", new=AsyncMock()):
+            asyncio.run(bot._escalate_parents("morning", {"parent_morning": 10}, 10, 0,
+                                              "2026-09-21", family_id=1,
+                                              child=self._child()))
+        assert metrics.get_counter("reminders_sent_total", kind="escalation") == 1
